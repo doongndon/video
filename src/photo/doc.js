@@ -822,7 +822,7 @@ function renderTextLayer(doc, layer) {
 
 // ---------------------------------------------------------------- shape layers
 
-export const SHAPES = [['rect', '사각형'], ['round', '둥근 사각형'], ['ellipse', '타원'], ['polygon', '다각형'], ['line', '선'], ['triangle', '삼각형'], ['star', '별']];
+export const SHAPES = [['rect', '사각형'], ['round', '둥근 사각형'], ['ellipse', '타원'], ['polygon', '다각형'], ['star', '별'], ['triangle', '삼각형'], ['line', '선'], ['custom', '사용자 정의 모양']];
 
 let customShapePath = null;
 /** Set by paths.js: Path2D for custom shapes and vector (path-based) shapes. */

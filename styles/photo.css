@@ -254,3 +254,8 @@ body.mobile .ph-fxdlg { grid-template-columns: minmax(0, 1fr); }
 body.mobile .ph-fxlist { flex-direction: row; overflow-x: auto; border-right: none; border-bottom: 1px solid var(--line); padding: 0 0 6px; max-height: none; }
 body.mobile .ph-fxitem { flex: 0 0 auto; min-height: 36px; }
 body.mobile .ph-fxpane { max-height: 50dvh; }
+
+/* character / paths panels */
+.ph-tog.on { background: var(--accent-soft); border-color: var(--accent); color: var(--value); }
+.ph-panel.char .ph-prow > span:first-child { min-width: calc(110px * var(--ui-scale)); }
+.ph-panel.paths .ph-layer { min-height: 46px; }

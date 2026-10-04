@@ -7,6 +7,7 @@ import { isBlend } from './blend.js';
 import { defaultParams } from './adjust.js';
 import { FX_DEFAULTS, normalizeFx } from './styles.js';
 import { userPatterns, rgbHex, hexRgb } from './resources.js';
+import { pathBounds, translatePath, shapeToSubpaths, mapPath } from './paths.js';
 
 const baseName = (n) => String(n || '이미지').replace(/\.[^.]+$/, '');
 
@@ -316,6 +317,19 @@ export function docFromPsd(buffer, name) {
           continue;
         }
         l = newLayer('adjust', { ...common, adjust: { type: adj.type, params: { ...defaultParams(adj.type), ...adj.params } } });
+      } else if (c.vectorFill?.type === 'color' && c.vectorMask?.paths?.length && !c.vectorMask.invert) {
+        // a Photoshop shape layer: an editable path shape
+        const sps = pathsFromPsd(c.vectorMask.paths);
+        const b = pathBounds(sps) || { x: 0, y: 0, w: 1, h: 1 };
+        const vs = c.vectorStroke;
+        const strokeOn = vs && vs.strokeEnabled !== false && vs.content?.type === 'color' && px(vs.lineWidth, 0) > 0;
+        l = newLayer('shape', {
+          ...common, x: b.x, y: b.y,
+          shape: { type: 'path', subpaths: translatePath(sps, -b.x, -b.y), w: Math.max(1, b.w), h: Math.max(1, b.h), pw: Math.max(1, b.w), ph: Math.max(1, b.h), fill: vs?.fillEnabled === false ? null : colorHex(c.vectorFill.color), stroke: strokeOn ? colorHex(vs.content.color) : null, strokeWidth: strokeOn ? px(vs.lineWidth, 0) : 0, strokeAlign: vs?.lineAlignment || 'center' },
+        });
+        doc.layers.push(l);
+        l.mask = maskFromPsd(doc, c.mask);
+        continue;
       } else if (c.vectorFill && !c.canvas && !c.vectorMask?.paths?.length) {
         const vf = c.vectorFill;
         const fill = vf.type === 'color' ? { type: 'solid', color: colorHex(vf.color) } : vf.type === 'solid' ? { type: 'gradient', gradient: gradientFromPsd(vf), angle: vf.angle ?? 90, style: vf.style || 'linear', scale: Math.round((vf.scale ?? 1) * 100), reverse: !!vf.reverse } : { type: 'solid', color: '#808080' };
@@ -404,6 +418,18 @@ export function docToPsd(doc, { editableText = false, fg = '#000000', bg = '#fff
     if (l.kind === 'smart') flat.smart++;
     if (l.kind === 'shape') flat.shape++;
     const out = { ...base, canvas: c.canvas, left: c.x, top: c.y };
+    if (l.kind === 'shape' && editableText && l.shape.fill && !l.rotation) {
+      // a real Photoshop shape layer: vector mask + solid colour fill (+ stroke)
+      const s = l.shape;
+      const kx = s.w / (s.pw || s.w || 1);
+      const ky = s.h / (s.ph || s.h || 1);
+      const local = s.type === 'path' ? mapPath(s.subpaths, ([x, y]) => [x * kx, y * ky]) : shapeToSubpaths(s);
+      const sps = translatePath(local, l.x, l.y).map((sp) => ({ ...sp, closed: s.type === 'line' ? false : sp.closed }));
+      flat.shape--;
+      out.vectorMask = { paths: pathsToPsd(sps) };
+      out.vectorFill = { type: 'color', color: psdColor(s.fill) };
+      if (s.stroke && s.strokeWidth) out.vectorStroke = { strokeEnabled: true, fillEnabled: true, lineWidth: unitPx(s.strokeWidth), lineAlignment: s.strokeAlign || 'center', lineCapType: 'round', lineJoinType: 'round', content: { type: 'color', color: psdColor(s.stroke) }, opacity: 1, blendMode: 'normal' };
+    }
     if (l.kind === 'text' && editableText) {
       const t = l.text;
       out.text = {

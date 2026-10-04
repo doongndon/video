@@ -68,7 +68,7 @@ const falloff = (d, r, h) => (d >= r ? 0 : d <= r * h ? 1 : 1 - (d - r * h) / Ma
  * A paint stroke on the active layer (or its mask). Dabs accumulate in a buffer so the stroke's
  * opacity caps like Photoshop's; the layer = pre-stroke pixels + buffer, clipped to the selection.
  */
-class Stroke {
+export class Stroke {
   constructor(E, mode, o) {
     const doc = E.doc;
     this.E = E;
@@ -421,7 +421,7 @@ const BRUSH_OPTS = [
   ['pressureSize', '펜 압력 → 크기', 'bool', null, null, true],
 ];
 
-function brushOpts(o, E, extra = {}) {
+export function brushOpts(o, E, extra = {}) {
   return { size: o.size, hardness: (o.hardness ?? 70) / 100, opacity: (o.opacity ?? 100) / 100, flow: (o.flow ?? 100) / 100, pressureSize: o.pressureSize, color: E.fg, ...extra };
 }
 
@@ -666,6 +666,73 @@ function retouchTool(id, name, key, icon, kind) {
     },
   };
 }
+
+const TEXT_OPTS = [['font', '글꼴', 'font', null, null, 'Noto Sans KR'], ['size', '크기 (px)', 'number', 4, 2000, 72], ['bold', '굵게', 'bool', null, null, true], ['italic', '기울임', 'bool', null, null, false], ['align', '정렬', 'select', null, null, 'left', [['left', '왼쪽'], ['center', '가운데'], ['right', '오른쪽'], ['justify', '양쪽 (마지막 줄 왼쪽)'], ['justifyAll', '양쪽 모두']]]];
+
+/** Type tools: click for point text, drag for a paragraph box, click on a path for text on the path. */
+function typeTool(id, name, key, icon, { vertical, mask }) {
+  return {
+    id, name, key, icon, group: 'type', cursor: 'text',
+    options: TEXT_OPTS,
+    optionsFrom: 'text',
+    down(E, p) {
+      const hit = !mask && E.layerAt(p, (l) => l.kind === 'text');
+      if (hit) {
+        E.selectLayer(hit.id);
+        E.editText(hit);
+        return;
+      }
+      this.d = { a: p, b: p };
+    },
+    move(E, p) {
+      if (!this.d) return;
+      this.d.b = p;
+      E.overlay();
+    },
+    up(E) {
+      const d = this.d;
+      this.d = null;
+      if (!d) return;
+      const o = E.opts('text');
+      const before = E.doc.capture();
+      const r = rectOf(d);
+      const box = r.w > 8 && r.h > 8 ? { w: Math.round(r.w), h: Math.round(r.h) } : null;
+      const t = E.newText(o, E.fg, { vertical, box });
+      const l = newLayer('text', { name: mask ? '문자 마스크' : '텍스트', text: t, typeMask: mask });
+      // clicking on the current path: text along the path
+      const sps = !box && E.getPath ? E.getPath() : [];
+      const near = sps.length && E.nearestOnPath(sps, d.a.x, d.a.y);
+      if (near && near.d <= 8 / E.view.zoom && !vertical) {
+        l.text = { ...t, path: { subpath: sps[near.si], offset: 0 }, align: 'left' };
+        l.x = 0;
+        l.y = 0;
+        l.name = '패스 위 문자';
+      } else if (box) {
+        l.x = Math.round(r.x);
+        l.y = Math.round(r.y);
+      } else if (vertical) {
+        l.x = Math.round(p0(d).x - o.size * 0.6);
+        l.y = Math.round(p0(d).y);
+      } else {
+        l.x = Math.round(d.a.x);
+        l.y = Math.round(d.a.y - o.size * 0.95);
+      }
+      E.addLayer(l);
+      E.editText(l, before);
+    },
+    overlay(E, g) {
+      if (!this.d) return;
+      const r = rectOf(this.d);
+      if (r.w < 3 && r.h < 3) return;
+      const [x, y] = E.toScreen(r.x, r.y);
+      g.strokeStyle = '#4aa3ff';
+      g.setLineDash([4, 3]);
+      g.strokeRect(x + 0.5, y + 0.5, r.w * E.view.zoom, r.h * E.view.zoom);
+      g.setLineDash([]);
+    },
+  };
+}
+const p0 = (d) => d.a;
 
 export const TOOLS = [
   // ---- move
@@ -1091,29 +1158,14 @@ export const TOOLS = [
   retouchTool('dodge', '닷지 (밝게)', 'O', 'dodge', 'dodge'),
   retouchTool('burn', '번 (어둡게)', 'O', 'burn', 'burn'),
   // ---- text
-  {
-    id: 'text', name: '수평 문자', key: 'T', icon: 'text', group: 'type', cursor: 'text',
-    options: [['font', '글꼴', 'font', null, null, 'Noto Sans KR'], ['size', '크기 (px)', 'number', 4, 2000, 72], ['bold', '굵게', 'bool', null, null, true], ['italic', '기울임', 'bool', null, null, false], ['align', '정렬', 'select', null, null, 'left', [['left', '왼쪽'], ['center', '가운데'], ['right', '오른쪽']]]],
-    down(E, p) {
-      const hit = E.layerAt(p, (l) => l.kind === 'text');
-      if (hit) {
-        E.selectLayer(hit.id);
-        E.editText(hit);
-        return;
-      }
-      const o = E.opts('text');
-      const before = E.doc.capture();
-      const l = newLayer('text', { name: '텍스트', text: { content: '', font: o.font, size: o.size, color: E.fg, bold: o.bold, italic: o.italic, align: o.align, lineHeight: 1.2, letterSpacing: 0 } });
-      l.x = Math.round(p.x);
-      l.y = Math.round(p.y - o.size * 0.9);
-      E.addLayer(l);
-      E.editText(l, before);
-    },
-  },
+  typeTool('text', '수평 문자', 'T', 'text', { vertical: false, mask: false }),
+  typeTool('verticalText', '세로 문자', 'T', 'verticalText', { vertical: true, mask: false }),
+  typeTool('textMask', '수평 문자 마스크', 'T', 'textMask', { vertical: false, mask: true }),
+  typeTool('verticalTextMask', '세로 문자 마스크', 'T', 'verticalTextMask', { vertical: true, mask: true }),
   // ---- shapes
   {
     id: 'shape', name: '모양', key: 'U', icon: 'shape', group: 'type', cursor: 'crosshair',
-    options: [['type', '모양', 'select', null, null, 'rect', SHAPES], ['fill', '채우기', 'select', null, null, 'fg', [['fg', '전경색'], ['bg', '배경색'], ['none', '없음']]], ['strokeWidth', '선 두께', 'range', 0, 100, 0], ['radius', '모서리 반경', 'range', 0, 300, 24]],
+    options: [['mode', '모드', 'select', null, null, 'shape', [['shape', '모양 (레이어)'], ['path', '패스'], ['pixels', '픽셀 (현재 레이어에)']]], ['type', '모양', 'select', null, null, 'rect', SHAPES], ['custom', '사용자 정의', 'select', null, null, 'heart', 'customShapes'], ['sides', '면 / 꼭짓점', 'number', 3, 100, 5], ['fill', '채우기', 'select', null, null, 'fg', [['fg', '전경색'], ['bg', '배경색'], ['none', '없음']]], ['strokeWidth', '선 두께', 'range', 0, 100, 0], ['radius', '모서리 반경', 'range', 0, 300, 24]],
     down(E, p, e) {
       if (e.altKey) {
         pickColor(E, p, false);
@@ -1145,9 +1197,16 @@ export const TOOLS = [
       const fill = o.fill === 'none' ? null : o.fill === 'bg' ? E.bg : E.fg;
       const isLine = o.type === 'line';
       const l = newLayer('shape', {
-        name: SHAPES.find((s) => s[0] === o.type)?.[1] || '모양',
-        shape: { type: o.type, w: Math.max(1, Math.round(r.w)), h: Math.max(isLine ? Math.max(2, o.strokeWidth || 6) : 1, Math.round(isLine ? Math.max(2, o.strokeWidth || 6) : r.h)), fill, stroke: o.strokeWidth > 0 || isLine ? (fill === E.fg ? E.bg : E.fg) : null, strokeWidth: isLine ? Math.max(2, o.strokeWidth || 6) : o.strokeWidth, radius: o.radius },
+        name: o.type === 'custom' ? E.customShapeName(o.custom) : SHAPES.find((s) => s[0] === o.type)?.[1] || '모양',
+        shape: { type: o.type, custom: o.custom, sides: o.sides, w: Math.max(1, Math.round(r.w)), h: Math.max(isLine ? Math.max(2, o.strokeWidth || 6) : 1, Math.round(isLine ? Math.max(2, o.strokeWidth || 6) : r.h)), fill, stroke: o.strokeWidth > 0 || isLine ? (fill === E.fg ? E.bg : E.fg) : null, strokeWidth: isLine ? Math.max(2, o.strokeWidth || 6) : o.strokeWidth, radius: o.radius },
       });
+      if (o.mode === 'path' || o.mode === 'pixels') {
+        // the same geometry as a work path, or painted straight onto the current layer
+        const sps = E.shapeSubpaths(l.shape, Math.round(r.x), Math.round(r.y));
+        if (o.mode === 'path') E.addToWorkPath(sps, '모양 (패스)', before);
+        else E.paintShapePixels(sps, l.shape, before);
+        return;
+      }
       l.x = Math.round(r.x);
       l.y = Math.round(isLine ? d.a.y - l.shape.h / 2 : r.y);
       if (isLine) {
@@ -1210,7 +1269,7 @@ export const TOOL_BY_ID = Object.fromEntries(TOOLS.map((t) => [t.id, t]));
 /** Toolbar groups (like Photoshop's tool slots), in order. */
 export const TOOL_GROUPS = [
   ['move'], ['rect', 'ellipse'], ['lasso'], ['wand'], ['crop'], ['eyedropper'], ['heal'], ['brush', 'pencil'], ['clone'], ['eraser'],
-  ['gradient', 'bucket'], ['blur', 'sharpen', 'smudge', 'push'], ['dodge', 'burn'], ['text'], ['shape'], ['hand'], ['zoom'],
+  ['gradient', 'bucket'], ['blur', 'sharpen', 'smudge', 'push'], ['dodge', 'burn'], ['text', 'verticalText', 'textMask', 'verticalTextMask'], ['shape'], ['hand'], ['zoom'],
 ];
 
 const inside = (p, r) => p.x >= r.x && p.y >= r.y && p.x <= r.x + r.w && p.y <= r.y + r.h;
@@ -1311,7 +1370,9 @@ export class FreeTransform {
     if (this.vector) {
       const l = this.layer;
       if (l.kind === 'text') {
-        l.text = { ...l.text, size: Math.max(1, Math.round(this.orig.text.size * Math.abs(this.sy) * 10) / 10) };
+        const ot = this.orig.text;
+        // paragraph boxes scale with the text
+        l.text = { ...l.text, size: Math.max(1, Math.round(ot.size * Math.abs(this.sy) * 10) / 10), box: ot.box ? { w: Math.max(4, Math.round(ot.box.w * Math.abs(this.sx))), h: Math.max(4, Math.round(ot.box.h * Math.abs(this.sy))) } : null };
         const b = textBox(l);
         l.x = Math.round(this.cx - b.w / 2);
         l.y = Math.round(this.cy - b.h / 2);

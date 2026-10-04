@@ -100,6 +100,15 @@ const P = {
   freeze: '<path d="M8 2v12M3 5l10 6M13 5 3 11"/>',
   frame: '<rect x="2" y="3.5" width="12" height="9" rx="1"/><rect x="8.5" y="8" width="4" height="3"/>',
   check: '<path d="M3 8.5 6.5 12 13 4.5"/>',
+  freePen: '<path d="M3 13c2-4 4-1 6-4s1-5 4-6"/><path d="M11 3l2 2"/>',
+  addAnchor: '<path d="M3 13l2-5 6-6 3 3-6 6zM12 10v5M9.5 12.5h5"/>',
+  deleteAnchor: '<path d="M3 13l2-5 6-6 3 3-6 6zM9.5 12.5h5"/>',
+  convertPoint: '<path d="M2.5 13.5 8 3l5.5 10.5"/><circle cx="8" cy="3" r="1.3" fill="currentColor"/>',
+  pathSelect: '<path d="M4 2l9 6-4 1 3 5-2 1-3-5-3 3z" fill="currentColor"/>',
+  directSelect: '<path d="M4 2l9 6-4 1 3 5-2 1-3-5-3 3z"/>',
+  verticalText: '<path d="M4 3h8M8 3v10M11 9h3M12.5 9v4"/>',
+  textMask: '<path d="M3 3.5h10M8 3.5v9M6 12.5h4" stroke-dasharray="2 1.5"/>',
+  verticalTextMask: '<path d="M4 3h8M8 3v10" stroke-dasharray="2 1.5"/>',
   ease: '<path d="M2 13.5C7 13.5 9 2.5 14 2.5"/><circle cx="2" cy="13.5" r="1.2" fill="currentColor"/><circle cx="14" cy="2.5" r="1.2" fill="currentColor"/>',
 };
 

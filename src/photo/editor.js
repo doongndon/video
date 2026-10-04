@@ -13,6 +13,12 @@ import { ADJUSTMENTS, FILTERS } from './adjust.js';
 import * as IO from './io.js';
 import * as D from './pdialogs.js';
 import { installLayerCommands, layerMenuItems } from './layercmds.js';
+import { newText } from './type.js';
+import { nearestOnPath } from './paths.js';
+import { installPathTools } from './pathtools.js';
+import { buildPathsPanel, buildCharacterPanel, installTypeCommands, warpTextDialog } from './panels2.js';
+import * as PT from './paths.js';
+import './transform.js';
 import { FX_NAMES } from './styles.js';
 import { buildToolbar, buildToolStrip, buildOptionsBar, buildLayersPanel, buildColorPanel, buildPropertiesPanel, buildHistoryPanel } from './panels.js';
 
@@ -56,12 +62,14 @@ export function createPhotoEditor(root) {
 
   P.opts = (id) => {
     const t = TOOL_BY_ID[id];
-    const o = toolOpts[id] || (toolOpts[id] = {});
+    // tools in one family (the type tools) share their settings
+    const key = t.optionsFrom || id;
+    const o = toolOpts[key] || (toolOpts[key] = {});
     for (const [key, , , , , def] of t.options) if (!(key in o)) o[key] = def;
     return o;
   };
   P.setOpt = (id, key, v) => {
-    P.opts(id)[key] = v;
+    P.opts(TOOL_BY_ID[id]?.optionsFrom || id)[key] = v;
     savePref('photo.opts', toolOpts);
     P.emit('opts');
     P.overlay();
@@ -101,6 +109,8 @@ export function createPhotoEditor(root) {
     P.emit('color');
   };
   P.toast = toast;
+  P.newText = (o, color, extra) => newText(o, color, extra);
+  P.nearestOnPath = (sps, x, y) => nearestOnPath(sps, x, y);
   P.exportDialog = () => (P.doc ? D.exportDialog(P) : toast('내보낼 문서가 없습니다. 먼저 사진을 열거나 새 문서를 만드세요.'));
 
   // ---------------------------------------------------------------- DOM
@@ -125,6 +135,8 @@ export function createPhotoEditor(root) {
     props: { title: '속성', el: buildPropertiesPanel(P) },
     layers: { title: '레이어', el: buildLayersPanel(P) },
     history: { title: '작업 내역', el: buildHistoryPanel(P) },
+    char: { title: '문자', el: buildCharacterPanel(P) },
+    paths: { title: '패스', el: buildPathsPanel(P) },
   };
   const sideTabs = (ids) => {
     let cur = loadPref(`photo.side.${ids[0]}`, ids[0]);
@@ -144,8 +156,8 @@ export function createPhotoEditor(root) {
     show(ids.includes(cur) ? cur : ids[0]);
     return { el: h('div.ph-pgroup', bar, body), show, ids };
   };
-  const groupsTop = sideTabs(['color', 'props', 'history']);
-  const groupLayers = sideTabs(['layers']);
+  const groupsTop = sideTabs(['color', 'props', 'char', 'history']);
+  const groupLayers = sideTabs(['layers', 'paths']);
   const side = h('div.ph-side', groupsTop.el, groupLayers.el);
   // phone: a sheet that shows one panel at a time
   const sheetBody = h('div.ph-sheet-body');
@@ -165,6 +177,7 @@ export function createPhotoEditor(root) {
       return;
     }
     if (groupsTop.ids.includes(id)) groupsTop.show(id);
+    if (groupLayers.ids.includes(id)) groupLayers.show(id);
   };
 
   function openSheet(id) {
@@ -177,7 +190,7 @@ export function createPhotoEditor(root) {
     sheet.classList.remove('open');
     // panels go back to the side column
     groupsTop.show(groupsTop.ids.find((i) => panels[i].el.isConnected) || groupsTop.ids[0]);
-    groupLayers.show('layers');
+    groupLayers.show(groupLayers.ids.find((i) => panels[i].el.isConnected) || 'layers');
   }
   function mobileAction(id) {
     if (panels[id]) return openSheet(id);
@@ -192,6 +205,9 @@ export function createPhotoEditor(root) {
       { label: '내보내기 (PNG·JPG)…', action: () => D.exportDialog(P) },
       { label: 'PSD로 저장', action: () => P.cmd.savePsd() },
       { label: '영상 편집으로 보내기…', action: () => D.sendToVideoDialog(P) },
+      '-',
+      { label: '문자 · 단락 패널', action: () => openSheet('char') },
+      { label: '패스 패널', action: () => openSheet('paths') },
       '-',
       { label: '자유 변형', action: () => P.cmd.freeTransform() },
       { label: '모두 선택', action: () => P.cmd.selectAll() },
@@ -421,6 +437,8 @@ export function createPhotoEditor(root) {
       }
     }
     TOOL_BY_ID[P.tool].overlay?.(P, og);
+    // the current path stays visible (thin) with the other tools
+    if (!['pen', 'freePen', 'addAnchor', 'deleteAnchor', 'convertPoint', 'pathSelect', 'directSelect'].includes(P.tool) && P.resolvePathTarget?.()?.kind && P.pathTarget?.kind !== 'shape') P.drawPathOverlay(og, { outlineOnly: true });
     P.transform?.overlay(og);
     if (P.editingText) {
       const l = P.editingText.layer;
@@ -660,6 +678,17 @@ export function createPhotoEditor(root) {
         return true;
       }
     }
+    if (l.typeMask && doc.layer(l.id)) {
+      // type mask tools: the text becomes a selection
+      const c = doc.content(l);
+      const m = makeCanvas(doc.width, doc.height);
+      if (c) m.getContext('2d').drawImage(c.canvas, c.x, c.y);
+      doc.layers = doc.layers.filter((x) => x.id !== l.id);
+      doc.activeId = doc.layers[doc.layers.length - 1]?.id;
+      doc.selection = { canvas: m };
+      P.commit('문자 마스크', t.before);
+      return true;
+    }
     P.commit(t.created ? '텍스트 추가' : '텍스트 고치기', t.before);
     return true;
   }
@@ -893,10 +922,11 @@ export function createPhotoEditor(root) {
     const map = {
       KeyZ: () => (mod ? (e.shiftKey ? P.redo() : P.undo()) : P.setTool('zoom')),
       KeyY: () => mod && P.redo(),
-      KeyA: () => (mod && e.altKey ? P.cmd.selectAllLayers() : mod ? P.cmd.selectAll() : null),
+      KeyA: () => (mod && e.altKey ? P.cmd.selectAllLayers() : mod ? P.cmd.selectAll() : cycle(['pathSelect', 'directSelect'], e.shiftKey)),
+      KeyP: () => (mod ? null : cycle(['pen', 'freePen'], e.shiftKey)),
       KeyD: () => (mod ? (e.shiftKey ? P.cmd.reselect() : P.cmd.deselect()) : P.defaultColors()),
       KeyI: () => (mod ? (e.shiftKey ? P.cmd.inverse() : D.adjustDialog(P, 'invert')) : P.setTool('eyedropper')),
-      KeyT: () => (mod ? P.cmd.freeTransform() : P.setTool('text')),
+      KeyT: () => (mod ? P.cmd.freeTransform() : cycle(['text', 'verticalText', 'textMask', 'verticalTextMask'], e.shiftKey)),
       KeyJ: () => (mod && e.shiftKey ? P.cmd.layerVia(true) : mod ? P.cmd.duplicateLayer() : P.setTool('heal')),
       KeyE: () => (mod && e.shiftKey && e.altKey ? P.cmd.stampVisible() : mod ? (e.shiftKey ? P.cmd.mergeVisible() : P.cmd.mergeDown()) : P.setTool('eraser')),
       KeyN: () => (mod && e.shiftKey ? P.cmd.newLayer() : mod ? D.newDocDialog(P) : null),
@@ -922,7 +952,7 @@ export function createPhotoEditor(root) {
       BracketRight: () => (mod ? P.cmd.arrange(1) : changeSize(e.shiftKey ? 'hardness' : 'size', 1)),
       Delete: () => P.cmd.clear(),
       Backspace: () => (e.altKey ? P.fill(P.fg, 1) : mod ? P.fill(P.bg, 1) : P.cmd.clear()),
-      Enter: () => (P.tool === 'crop' ? TOOL_BY_ID.crop.apply(P) : null),
+      Enter: () => (mod && P.getPath?.().length ? P.cmd.pathToSelection() : P.tool === 'crop' ? TOOL_BY_ID.crop.apply(P) : null),
       Escape: () => (P.tool === 'crop' ? TOOL_BY_ID.crop.activate(P) : null),
       ArrowLeft: () => nudge(-1, 0),
       ArrowRight: () => nudge(1, 0),
@@ -944,6 +974,13 @@ export function createPhotoEditor(root) {
       updateCursor();
     }
   });
+
+  /** A tool key: pick the family's first tool, or the next one with Shift (like Photoshop). */
+  function cycle(ids, shift) {
+    const i = ids.indexOf(P.tool);
+    P.setTool(i < 0 ? ids[0] : shift ? ids[(i + 1) % ids.length] : P.tool);
+    return undefined;
+  }
 
   function changeSize(key, dir) {
     const t = TOOL_BY_ID[P.tool];
@@ -997,6 +1034,9 @@ export function createPhotoEditor(root) {
   ];
   installCommands(P);
   installLayerCommands(P);
+  installPathTools(P);
+  installTypeCommands(P, PT);
+  P.warpText = () => warpTextDialog(P);
   P.menus = buildMenus(P);
   P.layerMenu = () => P.menus['레이어']();
   P.contextMenu = () => [
@@ -1645,7 +1685,7 @@ function buildMenus(P) {
       '-',
       { label: 'Montage 사진 파일로 저장 (.mphoto)', key: `${mod}S`, disabled: no(), action: () => C.saveProject() },
       { label: 'PSD로 저장 (포토샵 파일)', disabled: no(), action: () => C.savePsd() },
-      { label: 'PSD로 저장 (글자 레이어를 포토샵 글자로, 실험적)', disabled: no(), action: () => C.savePsd({ editableText: true }) },
+      { label: 'PSD로 저장 (글자·모양을 포토샵에서 고칠 수 있게, 실험적)', disabled: no(), action: () => C.savePsd({ editableText: true }) },
       { label: '레이어를 파일로 내보내기 (PNG)…', disabled: no(), action: () => C.exportLayers() },
       { label: '내보내기 (PNG · JPG · WebP)…', key: `${mod}Shift+Alt+W`, disabled: no(), action: () => D.exportDialog(P) },
       '-',

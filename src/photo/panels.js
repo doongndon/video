@@ -31,7 +31,7 @@ export function buildToolbar(P) {
   const render = () => {
     el.replaceChildren();
     for (const g of TOOL_GROUPS) {
-      const cur = g.includes(P.tool) ? P.tool : groupPick.get(g[0]);
+      const cur = g.includes(P.tool) ? P.tool : groupPick.get(g[0]) || g[0];
       const t = TOOL_BY_ID[cur];
       const b = h(`button.ph-tool${g.includes(P.tool) ? '.on' : ''}`, {
         title: `${t.name}${t.key ? ` (${t.key})` : ''}${g.length > 1 ? ' · 오른쪽 클릭/길게 눌러 다른 도구' : ''}`,
@@ -93,6 +93,7 @@ export function buildOptionsBar(P) {
       const [key, label, type, min, max, , list] = def;
       // ranges keep their unit where a select keeps its list
       const unit = typeof list === 'string' ? list : def[7];
+      if (t.id === 'shape' && ((key === 'sides' && !['polygon', 'star'].includes(o.type)) || (key === 'radius' && o.type !== 'round'))) continue;
       if (type === 'range' || type === 'number') {
         const r = type === 'range' ? h('input', { type: 'range', min, max, value: o[key], 'aria-label': label }) : null;
         const n = h('input.ph-num', { type: 'number', min, max, value: o[key], 'aria-label': label });
@@ -110,7 +111,10 @@ export function buildOptionsBar(P) {
         b.addEventListener('change', () => P.setOpt(t.id, key, b.checked));
         ctrls.push(h('label.ph-opt', b, h('span', label)));
       } else if (type === 'select') {
-        const s = h('select', { 'aria-label': label }, list.map(([v, txt]) => h('option', { value: v }, txt)));
+        if (key === 'custom' && o.type !== 'custom') continue;
+        if (key === 'sides' && !['polygon', 'star'].includes(o.type)) continue;
+        const items = list === 'customShapes' ? P.customShapeList() : list;
+        const s = h('select', { 'aria-label': label }, items.map(([v, txt]) => h('option', { value: v }, txt)));
         s.value = o[key];
         s.addEventListener('change', () => P.setOpt(t.id, key, isNaN(+s.value) || s.value === '' ? s.value : +s.value));
         ctrls.push(h('label.ph-opt', h('span', label), s));
@@ -159,6 +163,14 @@ export function buildOptionsBar(P) {
       ctrls.push(h('button.primary.small', { onclick: () => t.apply(P) }, '✓ 자르기'), h('button.small', { onclick: () => { t.activate(P); } }, '되돌리기'));
     } else if (t.id === 'clone') {
       ctrls.push(h('button.small', { onclick: () => { P.cloneSourceNext = true; toast('복제할 원본 위치를 누르세요'); }, title: '휴대폰: 이 버튼을 누른 뒤 원본 위치를 누르세요' }, '원본 정하기'));
+    } else if (['pen', 'freePen', 'pathSelect', 'directSelect', 'addAnchor', 'deleteAnchor', 'convertPoint'].includes(t.id)) {
+      ctrls.push(h('span.ph-opt', '만들기:'),
+        h('button.small', { onclick: () => P.cmd.pathToSelection() }, '선택 영역'),
+        h('button.small', { onclick: () => P.cmd.addVectorMask('path') }, '마스크'),
+        h('button.small', { onclick: () => P.cmd.pathToShape?.() }, '모양'),
+        P.doc?.workPath ? h('button.small', { onclick: () => P.cmd.savePath() }, '패스 저장') : null);
+    } else if (TOOL_BY_ID[t.id]?.optionsFrom === 'text') {
+      ctrls.push(h('button.small', { onclick: () => (P.doc?.active?.kind === 'text' ? P.warpText() : toast('글자 레이어를 고르세요')) }, '⌒ 뒤틀기'), h('button.small', { onclick: () => P.showPanel('char') }, '문자 패널'));
     } else if (t.id === 'lasso' && P.opts('lasso').polygon) {
       ctrls.push(h('button.small', { onclick: () => t.finish?.(P) }, '다각형 닫기'));
     }
@@ -622,7 +634,23 @@ export function buildPropertiesPanel(P) {
       const stroke = h('input', { type: 'color', value: s.stroke || '#000000' });
       stroke.addEventListener('input', () => live('선 색', () => { l.shape = { ...l.shape, stroke: stroke.value }; }, false));
       stroke.addEventListener('change', () => live('선 색', () => {}, true));
-      rows.push(field('모양', type),
+      const extra = [];
+      if (s.type === 'custom') {
+        const cs = h('select', P.customShapeList().map(([v, n]) => h('option', { value: v }, n)));
+        cs.value = s.custom || 'heart';
+        cs.addEventListener('change', () => live('사용자 정의 모양', () => { l.shape = { ...l.shape, custom: cs.value }; }, true));
+        extra.push(field('사용자 정의', cs));
+      }
+      if (s.type === 'polygon' || s.type === 'star') extra.push(field('면 / 꼭짓점', numIn(s.sides || 5, 3, 100, 1, (v) => live('면 수', () => { l.shape = { ...l.shape, sides: v }; }, true))));
+      if (s.type === 'star') extra.push(field('들어감 (%)', numIn(s.indent ?? 60, 1, 99, 1, (v) => live('별 들어감', () => { l.shape = { ...l.shape, indent: v }; }, true))));
+      const align = h('select', [['center', '가운데'], ['inside', '안쪽'], ['outside', '바깥쪽']].map(([v, n]) => h('option', { value: v }, n)));
+      align.value = s.strokeAlign || 'center';
+      align.addEventListener('change', () => live('선 맞춤', () => { l.shape = { ...l.shape, strokeAlign: align.value }; }, true));
+      const dash = h('select', [['solid', '실선'], ['dash', '파선'], ['dot', '점선']].map(([v, n]) => h('option', { value: v }, n)));
+      dash.value = !s.dash?.length ? 'solid' : s.dash[0] > 1 ? 'dash' : 'dot';
+      dash.addEventListener('change', () => live('선 모양', () => { l.shape = { ...l.shape, dash: dash.value === 'dash' ? [4, 2] : dash.value === 'dot' ? [0.01, 2] : null }; }, true));
+      extra.push(field('선 맞춤', align), field('선 모양', dash), h('div.ph-prow', h('button.small', { onclick: () => { P.pathTarget = { kind: 'shape', layerId: l.id }; P.setTool('directSelect'); } }, '패스 고치기 (직접 선택)')));
+      rows.push(field('모양', type), ...extra,
         field('폭 × 높이', h('span.inline', numIn(s.w, 1, 20000, 1, (v) => live('모양 크기', () => { l.shape = { ...l.shape, w: v }; }, true)), '×', numIn(s.h, 1, 20000, 1, (v) => live('모양 크기', () => { l.shape = { ...l.shape, h: v }; }, true)))),
         field('채우기', h('span.inline', fill, h('label.inline', noFill, '없음'))),
         field('선 색', stroke),
