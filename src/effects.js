@@ -249,6 +249,15 @@ export const EFFECTS = {
     name: '자르기', kind: 'video', category: '변형',
     params: [pct('left', '왼쪽', 0), pct('top', '위쪽', 0), pct('right', '오른쪽', 0), pct('bottom', '아래쪽', 0)],
   },
+  blurFill: {
+    name: '배경 채우기 (흐림·단색)', kind: 'video', category: '변형',
+    params: [
+      { key: 'mode', label: '채우기', type: 'select', default: 'blur', options: [['blur', '흐린 영상'], ['color', '단색']] },
+      num('blur', '흐림 정도', 40, { min: 0, max: 200, unit: 'px' }),
+      pct('dim', '어둡게', 15),
+      { key: 'color', label: '색상', type: 'color', default: '#000000' },
+    ],
+  },
   hFlip: { name: '가로 뒤집기', kind: 'video', category: '변형', params: [] },
   vFlip: { name: '세로 뒤집기', kind: 'video', category: '변형', params: [] },
   letterbox: {
@@ -338,6 +347,10 @@ export const EFFECTS = {
   bandpass: {
     name: '밴드패스 (전화 음성)', kind: 'audio', category: '필터 및 EQ',
     params: [num('frequency', '중심 주파수', 1500, { min: 20, max: 20000, unit: 'Hz', step: 10 }), num('q', 'Q', 1.2, { min: 0.1, max: 18, step: 0.1 })],
+  },
+  ringMod: {
+    name: '로봇 목소리 (링 모듈레이터)', kind: 'audio', category: '특수 효과',
+    params: [num('freq', '변조 주파수', 55, { min: 5, max: 2000, unit: 'Hz' }), pct('mix', '믹스', 100)],
   },
   reverb: {
     name: '리버브 (울림)', kind: 'audio', category: '리버브',

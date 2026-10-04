@@ -21,7 +21,9 @@ import {
   openSpeedDialog, openSequenceSettings, openExportDialog, openShortcutsDialog, openAboutDialog,
   openColorMatteDialog, importSrt, exportSrt, openMarkerDialog, openSceneDetectDialog,
   openDuckingDialog, openReframeDialog, openMulticamDialog, openAutoCaptionDialog, openGuideDialog, openExtractAudioDialog,
+  openSilenceCutDialog, openBeatDialog, openSlideshowDialog,
 } from './ui/dialogs.js';
+import { quickApi } from './ui/quick-panel.js';
 
 const inSource = () => store.ui.focusPanel === 'source' && sourceApi.hasMedia?.();
 const seq = () => store.seq;
@@ -179,6 +181,13 @@ export const commands = {
     toast(n ? `오디오 클립 ${n}개를 최대 -1 dB로 맞췄습니다` : '오디오 클립을 선택하세요 (파형 분석이 끝나야 합니다)');
   },
   autoDuck: () => openDuckingDialog(),
+  silenceCut: () => openSilenceCutDialog(),
+  beatMarkers: () => openBeatDialog(),
+  slideshow: () => openSlideshowDialog(),
+  quick: (section) => {
+    showPanel('quick');
+    quickApi.show?.(section);
+  },
   extractAudio: () => {
     const c = sel().find((x) => x.mediaId && ['video', 'audio'].includes(store.project.media[x.mediaId]?.kind));
     if (c) return openExtractAudioDialog({ clipId: c.id });

@@ -9,6 +9,8 @@ import { FORMATS, EXPORT_PRESETS, exportRange, exportSequence, exportFrame } fro
 import { createSyntheticMedia, detectScenes, mediaStatus, getRuntime, audioSyncOffsets, AUDIO_FILE_FORMATS, audioFileFormatSupport, extractAudioFile, importFiles } from '../media.js';
 import { clipEnd, clipsOnTrack, videoTracks, audioTracks, isTimed, mediaTimeAt, hasSpeedRamp, sourceOut } from '../model.js';
 import { ASR_MODELS, ASR_LANGUAGES, transcribeSequence, createCaptionTrack } from '../captions.js';
+import { silentIntervals, cutSilence, detectBeats, addBeatMarkers, createSlideshow } from '../features.js';
+import { TRANSITIONS } from '../effects.js';
 
 const note = (...t) => h('div.note', ...t);
 const check = (checked, label, attrs = {}) => {
@@ -868,6 +870,194 @@ export function openExtractAudioDialog({ mediaId, clipId = null } = {}) {
       token.cancelled = true;
       token.cancel?.();
     },
+  });
+}
+
+// ---------------------------------------------------------------- silence cut (jump cut)
+
+export function openSilenceCutDialog() {
+  const s = store.seq;
+  let ids = store.selectedClips().map((c) => c.id);
+  if (!ids.length) {
+    // nothing selected: use the clips with sound under the playhead
+    const t = store.ui.playhead;
+    ids = Object.values(s.clips).filter((c) => c.kind === 'audio' && c.start <= t && clipEnd(c) > t).map((c) => c.id);
+  }
+  if (!ids.length) {
+    toast('말소리가 있는 클립을 먼저 선택하세요');
+    return;
+  }
+  const threshold = h('input', { type: 'range', min: -60, max: -20, step: 1, value: -40 });
+  const minSil = h('input', { type: 'range', min: 0.2, max: 3, step: 0.1, value: 0.6 });
+  const pad = h('input', { type: 'range', min: 0, max: 0.5, step: 0.02, value: 0.12 });
+  const labels = { th: h('span.qp-val'), min: h('span.qp-val'), pad: h('span.qp-val') };
+  const allTracks = check(false, '다른 트랙(음악·자막 등)도 함께 당겨서 전체 싱크 유지');
+  const preview = note('');
+  const opts = () => ({ thresholdDb: +threshold.value, minSilence: +minSil.value, pad: +pad.value });
+  const update = () => {
+    labels.th.textContent = `${threshold.value} dB`;
+    labels.min.textContent = `${(+minSil.value).toFixed(1)}초`;
+    labels.pad.textContent = `${(+pad.value).toFixed(2)}초`;
+    let n = 0;
+    let total = 0;
+    let missing = false;
+    const seen = new Set();
+    for (const id of ids) {
+      const c = store.seq.clips[id];
+      if (!c) continue;
+      for (const a of [c, ...Object.values(store.seq.clips).filter((x) => x.linkId && x.linkId === c.linkId)]) {
+        if (a.kind !== 'audio' || seen.has(a.id)) continue;
+        seen.add(a.id);
+        const iv = silentIntervals(a, opts());
+        if (!iv) missing = true;
+        else for (const [x, y] of iv) { n++; total += y - x; }
+      }
+    }
+    preview.textContent = missing ? '소리 파형을 분석하는 중입니다. 잠시 뒤 다시 열어 주세요.' : `조용한 구간 ${n}곳, 모두 ${total.toFixed(1)}초를 잘라냅니다.`;
+  };
+  for (const el of [threshold, minSil, pad]) el.addEventListener('input', update);
+  update();
+  openModal({
+    title: '무음 구간 자동 삭제 (점프 컷)',
+    width: '540px',
+    body: [
+      formRow('조용하다고 볼 크기', threshold, labels.th),
+      formRow('최소 길이', minSil, labels.min),
+      formRow('앞뒤 여유', pad, labels.pad),
+      formRow('', allTracks.el),
+      preview,
+      note('선택한 클립(연결된 영상·소리 포함)에서 기준보다 작은 소리가 이어지는 구간을 잘라내고 빈자리를 당깁니다. 말이 잘리면 "조용하다고 볼 크기"를 낮추거나 "앞뒤 여유"를 늘리세요. 실행 취소(Ctrl+Z)로 되돌릴 수 있습니다.'),
+    ],
+    buttons: [
+      { label: '취소' },
+      {
+        label: '잘라내기', primary: true, action: () => {
+          const r = cutSilence(ids, { ...opts(), allTracks: allTracks.box.checked });
+          if (!r) {
+            preview.textContent = '소리 파형 분석이 아직 끝나지 않았습니다.';
+            return false;
+          }
+          if (r.noAudio) toast('선택한 클립에 소리가 없습니다');
+          else toast(r.cuts ? `무음 ${r.cuts}곳 (${r.removed.toFixed(1)}초)을 잘라냈습니다` : '잘라낼 조용한 구간이 없습니다');
+          return true;
+        },
+      },
+    ],
+  });
+}
+
+// ---------------------------------------------------------------- beat markers
+
+export function openBeatDialog() {
+  const s = store.seq;
+  const audioClips = Object.values(s.clips).filter((c) => c.kind === 'audio' && c.mediaId && store.project.media[c.mediaId]?.kind !== 'sequence').sort((a, b) => a.start - b.start);
+  if (!audioClips.length) {
+    toast('타임라인에 음악(소리) 클립이 없습니다');
+    return;
+  }
+  const selAudio = store.selectedClips().find((c) => c.kind === 'audio');
+  const source = select(audioClips.map((c) => [c.id, `${s.tracks.find((t) => t.id === c.trackId)?.name} · ${c.name} (${formatTimecode(c.start, s.fps)})`]), selAudio?.id || audioClips[audioClips.length - 1].id);
+  const sens = h('input', { type: 'range', min: 5, max: 95, value: 50 });
+  const markers = check(true, '박자마다 마커 찍기');
+  const selVideo = store.selectedClips().filter((c) => c.kind !== 'audio');
+  const cut = check(false, `선택한 영상 클립을 박자마다 자르기${selVideo.length ? ` (${selVideo.length}개)` : ' (먼저 클립 선택)'}`, { disabled: !selVideo.length });
+  const preview = note('');
+  let beats = [];
+  const update = () => {
+    const c = store.seq.clips[source.value];
+    const b = c ? detectBeats(c, +sens.value) : null;
+    beats = b || [];
+    if (!b) preview.textContent = '소리 파형을 분석하는 중입니다. 잠시 뒤 다시 열어 주세요.';
+    else {
+      const bpm = b.length > 3 ? Math.round(60 / ((b[b.length - 1] - b[0]) / (b.length - 1))) : null;
+      preview.textContent = `박자 ${b.length}개를 찾았습니다${bpm ? ` (평균 약 ${bpm} BPM)` : ''}.`;
+    }
+  };
+  source.addEventListener('change', update);
+  sens.addEventListener('input', update);
+  update();
+  openModal({
+    title: '비트 마커 (음악 박자 맞추기)',
+    width: '560px',
+    body: [
+      formRow('음악 클립', source),
+      formRow('민감도', h('span', '강한 박자만'), sens, h('span', '많이')),
+      formRow('결과', h('div', { style: { display: 'grid', gap: '4px' } }, markers.el, cut.el)),
+      preview,
+      note('소리 파형에서 갑자기 커지는 순간(드럼 등)을 찾습니다. 박자가 또렷하지 않은 곡은 잘 맞지 않을 수 있습니다. 마커가 있으면 클립을 끌 때 마커에 달라붙습니다(스냅).'),
+    ],
+    buttons: [
+      { label: '취소' },
+      {
+        label: '적용', primary: true, action: () => {
+          if (!beats.length) return false;
+          if (markers.box.checked) addBeatMarkers(beats);
+          if (cut.box.checked) for (const c of selVideo) edit.cutClipAt(c.id, beats.filter((t) => t > c.start && t < clipEnd(c)));
+          toast(`박자 ${beats.length}개를 적용했습니다`);
+          return true;
+        },
+      },
+    ],
+  });
+}
+
+// ---------------------------------------------------------------- photo slideshow
+
+export function openSlideshowDialog(preselected = null) {
+  const p = store.project;
+  const pickSelected = () => (preselected || p.mediaOrder.filter((id) => store.ui.selectedMedia.has(id))).filter((id) => ['image', 'video'].includes(p.media[id]?.kind));
+  let ids = pickSelected();
+  const list = note('');
+  const showList = () => {
+    list.textContent = ids.length ? `${ids.length}개: ${ids.map((id) => p.media[id].name).slice(0, 6).join(', ')}${ids.length > 6 ? ' …' : ''}` : '아직 고른 사진이 없습니다. 아래 "사진 고르기"를 누르거나, 프로젝트 패널에서 사진을 여러 장 선택한 뒤 다시 여세요.';
+  };
+  showList();
+  const perImage = h('input', { type: 'number', value: 3, min: 0.5, max: 30, step: 0.5, style: { width: '80px' } });
+  const trans = select([['', '없음 (바로 넘김)'], ...Object.entries(TRANSITIONS).filter(([, d]) => d.kind === 'video').map(([k, d]) => [k, d.name])], 'crossDissolve');
+  const transDur = h('input', { type: 'number', value: 0.6, min: 0.1, max: 3, step: 0.1, style: { width: '80px' } });
+  const ken = check(true, '사진마다 천천히 확대/축소 (켄 번즈)');
+  const fill = check(true, '화면을 꽉 채우기 (가장자리 잘림)');
+  const pickBtn = h('button', {
+    onclick: async () => {
+      const { pickFiles } = await import('./project-panel.js');
+      const files = await pickFiles({ accept: 'image/*,video/*', multiple: true });
+      if (!files.length) return;
+      list.textContent = '가져오는 중…';
+      const newIds = await importFiles(files);
+      ids = newIds.filter((id) => ['image', 'video'].includes(p.media[id]?.kind) && mediaStatus(id) === 'ready');
+      showList();
+    },
+  }, '사진 고르기…');
+  openModal({
+    title: '사진 슬라이드쇼 만들기',
+    width: '540px',
+    body: [
+      formRow('사진', h('div', { style: { display: 'grid', gap: '6px' } }, list, h('div.inline', pickBtn))),
+      formRow('사진 한 장 길이', perImage, '초'),
+      formRow('전환', trans, transDur, '초'),
+      formRow('', h('div', { style: { display: 'grid', gap: '4px' } }, ken.el, fill.el)),
+      note('재생헤드 위치부터 대상 비디오 트랙에 순서대로 놓습니다. 영상 파일을 섞으면 영상은 원래 길이대로 들어갑니다.'),
+    ],
+    buttons: [
+      { label: '취소' },
+      {
+        label: '만들기', primary: true, action: () => {
+          if (!ids.length) {
+            toast('사진을 먼저 고르세요');
+            return false;
+          }
+          const n = createSlideshow(ids, {
+            perImage: clamp(parseFloat(perImage.value) || 3, 0.5, 60),
+            transition: trans.value || null,
+            transDur: clamp(parseFloat(transDur.value) || 0.6, 0.1, 5),
+            kenBurns: ken.box.checked,
+            fill: fill.box.checked,
+          });
+          toast(n ? `${n}개로 슬라이드쇼를 만들었습니다` : '놓을 수 있는 사진이 없습니다');
+          return true;
+        },
+      },
+    ],
   });
 }
 

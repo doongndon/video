@@ -106,7 +106,8 @@ export function rawRipple(trackIds, t, dt, exceptIds = new Set()) {
 export function rawSplit(c, t) {
   const s = seq();
   t = q(t);
-  if (t <= c.start + EPS || t >= clipEnd(c) - EPS) return null;
+  // never leave a sliver shorter than half a frame (e.g. at the un-rounded end of a media file)
+  if (t <= c.start + fd() / 2 || t >= clipEnd(c) - fd() / 2) return null;
   const right = cloneClip(c);
   const cut = t - c.start;
   right.start = t;
@@ -195,7 +196,8 @@ export function placeMedia(mediaId, opts) {
   const inPoint = opts.inPoint ?? m.inPoint ?? 0;
   let outPoint = opts.outPoint ?? m.outPoint ?? (m.duration ?? (inPoint + DEFAULT_STILL_DURATION));
   if (m.duration == null && outPoint - inPoint <= 0) outPoint = inPoint + DEFAULT_STILL_DURATION;
-  const duration = Math.max(fd(), outPoint - inPoint);
+  // clip lengths are whole frames, so later edits at frame positions never leave slivers
+  const duration = Math.max(fd(), q(outPoint - inPoint));
   const wantVideo = opts.video !== false && m.kind !== 'audio';
   const wantAudio = opts.audio !== false && (m.kind === 'audio' || ((m.kind === 'video' || m.kind === 'sequence') && m.hasAudio));
 

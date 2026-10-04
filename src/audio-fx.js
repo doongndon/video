@@ -6,7 +6,7 @@ import { evalEffect } from './model.js';
 import { dbToGain, clamp } from './util.js';
 
 /** Audio effects handled by the chain (Volume/Panner/Amplify are applied as plain gain/pan). */
-export const CHAIN_FX = new Set(['eq3', 'highpass', 'lowpass', 'compressor', 'reverb', 'delay', 'bandpass', 'noiseGate', 'humRemove']);
+export const CHAIN_FX = new Set(['eq3', 'highpass', 'lowpass', 'compressor', 'reverb', 'delay', 'bandpass', 'noiseGate', 'humRemove', 'ringMod']);
 
 // ---- AudioWorklet processors (loaded from a blob so the app needs no extra files)
 const WORKLET_SRC = `
@@ -81,9 +81,17 @@ function impulseResponse(ctx, seconds) {
   if (irCache.has(key) && irCache.get(key).ctx === ctx) return irCache.get(key).buf;
   const len = Math.max(1, Math.floor(ctx.sampleRate * clamp(seconds, 0.1, 10)));
   const buf = ctx.createBuffer(2, len, ctx.sampleRate);
+  // seeded noise so the preview and every export sound the same
+  let seed = 0x9e3779b9;
+  const rnd = () => {
+    seed = (seed + 0x6d2b79f5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
   for (let ch = 0; ch < 2; ch++) {
     const d = buf.getChannelData(ch);
-    for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 3);
+    for (let i = 0; i < len; i++) d[i] = (rnd() * 2 - 1) * Math.pow(1 - i / len, 3);
   }
   irCache.set(key, { ctx, buf });
   return buf;
@@ -228,6 +236,26 @@ function buildUnit(ctx, fx) {
       input.connect(node).connect(output);
       unit.apply = (v, when, mode) => {
         for (const k of ['threshold', 'reduction', 'attack', 'release']) setParam(node.parameters.get(k), v[k], when, mode);
+      };
+      break;
+    }
+    case 'ringMod': {
+      // multiply the voice by a sine wave: the classic robot / Dalek sound
+      const dry = ctx.createGain();
+      const wet = ctx.createGain();
+      const ring = ctx.createGain();
+      ring.gain.value = 0;
+      const osc = ctx.createOscillator();
+      osc.frequency.value = fx.params.freq.value;
+      osc.connect(ring.gain);
+      osc.start();
+      input.connect(dry).connect(output);
+      input.connect(ring).connect(wet).connect(output);
+      unit.apply = (v, when, mode) => {
+        const m = clamp(v.mix / 100, 0, 1);
+        setParam(osc.frequency, v.freq, when, mode);
+        setParam(wet.gain, m, when, mode);
+        setParam(dry.gain, 1 - m, when, mode);
       };
       break;
     }

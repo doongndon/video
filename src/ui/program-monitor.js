@@ -15,7 +15,7 @@ import { exportFrame } from '../export.js';
 export const programApi = {};
 
 const MASK_TYPES = new Set(['mask', 'censor']);
-const HANDLE = 7;
+let HANDLE = 7; // handle hit radius in px (bigger for fingers)
 
 export function createProgramMonitor() {
   const view = h('div.monitor-view');
@@ -80,8 +80,10 @@ export function createProgramMonitor() {
     return parseFloat(resolution);
   }
 
+  let laidFor = '';
   function layout() {
     const s = store.seq;
+    laidFor = `${s.width}x${s.height}`;
     const r = view.getBoundingClientRect();
     fr = fitRect(r.width, r.height, s.width, s.height, zoom === 'fit' ? 0 : parseFloat(zoom));
     Object.assign(frame.style, { left: `${fr.x}px`, top: `${fr.y}px`, width: `${fr.w}px`, height: `${fr.h}px` });
@@ -90,6 +92,8 @@ export function createProgramMonitor() {
 
   function draw() {
     const s = store.seq;
+    // the sequence size can change (settings, aspect presets, switching sequences) without a resize
+    if (laidFor !== `${s.width}x${s.height}`) layout();
     const sc = renderScale();
     const w = Math.max(2, Math.round(s.width * sc));
     const hh = Math.max(2, Math.round(s.height * sc));
@@ -375,11 +379,22 @@ export function createProgramMonitor() {
     });
   }
 
+  const touches = new Map();
   view.addEventListener('pointerdown', (e) => {
     if (e.button !== 0) return;
     const r = view.getBoundingClientRect();
     const px = e.clientX - r.left;
     const py = e.clientY - r.top;
+    HANDLE = e.pointerType === 'touch' ? 16 : 7;
+    if (e.pointerType === 'touch') {
+      touches.set(e.pointerId, { x: px, y: py });
+      view.setPointerCapture(e.pointerId);
+      if (touches.size === 2) {
+        startPinch();
+        return;
+      }
+      if (touches.size > 2) return;
+    }
     store.setFocus('program');
     if (store.ui.tool === 'type') {
       const [sx, sy] = screenToSeq(px, py);
@@ -419,8 +434,8 @@ export function createProgramMonitor() {
     // the selected clip's corner / rotation handles win, even where other clips lie on top
     if (pts) {
       const rot = rotationHandle(pts);
-      if (Math.hypot(px - rot[0], py - rot[1]) < 8) mode = 'rotate';
-      else if (pts.some(([x, y]) => Math.abs(px - x) < 7 && Math.abs(py - y) < 7)) mode = 'scale';
+      if (Math.hypot(px - rot[0], py - rot[1]) < HANDLE + 1) mode = 'rotate';
+      else if (pts.some(([x, y]) => Math.abs(px - x) < HANDLE && Math.abs(py - y) < HANDLE)) mode = 'scale';
     }
     if (!mode) {
       // otherwise the topmost visible clip under the pointer is picked (a full-frame video that was
@@ -495,10 +510,48 @@ export function createProgramMonitor() {
     store.changed();
   }
 
+  /** Two fingers on the selected clip: pinch = scale, twist = rotate, move together = position. */
+  function startPinch() {
+    const c = activeClip();
+    if (!c) return;
+    const motion = c.effects.find((fx) => fx.type === 'motion');
+    if (!motion) return;
+    if (!handleDrag) store.begin('크기·회전 (두 손가락)');
+    const [a, b] = [...touches.values()];
+    handleDrag = {
+      mode: 'pinch', clipId: c.id, fxId: motion.id, m0: evalEffect(motion, store.ui.playhead - c.start),
+      d0: Math.hypot(a.x - b.x, a.y - b.y) || 1, a0: Math.atan2(b.y - a.y, b.x - a.x), mx0: (a.x + b.x) / 2, my0: (a.y + b.y) / 2,
+    };
+  }
+
+  function movePinch() {
+    const d = handleDrag;
+    const pts = [...touches.values()];
+    if (pts.length < 2) return;
+    const [a, b] = pts;
+    const c = store.seq.clips[d.clipId];
+    const fx = c?.effects.find((x) => x.id === d.fxId);
+    if (!fx) return;
+    const k = Math.hypot(a.x - b.x, a.y - b.y) / d.d0;
+    let rot = d.m0.rotation + ((Math.atan2(b.y - a.y, b.x - a.x) - d.a0) * 180) / Math.PI;
+    if (Math.abs(rot - Math.round(rot / 90) * 90) < 4) rot = Math.round(rot / 90) * 90; // snap to straight angles
+    edit.rawSetParam(c, fx, 'scale', Math.round(clamp(d.m0.scale * k, 1, 2000) * 10) / 10);
+    edit.rawSetParam(c, fx, 'rotation', Math.round(rot * 10) / 10);
+    edit.rawSetParam(c, fx, 'posX', Math.round((d.m0.posX + ((a.x + b.x) / 2 - d.mx0) / fr.s) * 10) / 10);
+    edit.rawSetParam(c, fx, 'posY', Math.round((d.m0.posY + ((a.y + b.y) / 2 - d.my0) / fr.s) * 10) / 10);
+    store.changed();
+  }
+
   view.addEventListener('pointermove', (e) => {
     const r = view.getBoundingClientRect();
     const px = e.clientX - r.left;
     const py = e.clientY - r.top;
+    if (e.pointerType === 'touch' && touches.has(e.pointerId)) touches.set(e.pointerId, { x: px, y: py });
+    if (handleDrag?.mode === 'pinch') {
+      movePinch();
+      return;
+    }
+    if (touches.size > 1) return;
     if (!handleDrag) {
       updateCursor(px, py, e);
       return;
@@ -532,10 +585,15 @@ export function createProgramMonitor() {
     store.changed();
   });
 
-  const endDrag = () => {
+  const endDrag = (e) => {
+    if (e?.pointerType === 'touch') {
+      touches.delete(e.pointerId);
+      if (handleDrag?.mode === 'pinch' && touches.size >= 2) return;
+    }
     if (!handleDrag) return;
     handleDrag = null;
     store.commit();
+    touches.clear();
   };
   view.addEventListener('pointerup', endDrag);
   view.addEventListener('pointercancel', endDrag);

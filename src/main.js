@@ -18,6 +18,8 @@ import {
   createEffectsPanel, createMarkersPanel, createHistoryPanel, createMixerPanel, createScopesPanel, createMulticamPanel, createMeters, createTools, TOOLS,
 } from './ui/panels.js';
 import { openGuideDialog } from './ui/dialogs.js';
+import { createQuickPanel } from './ui/quick-panel.js';
+import { initMobile } from './ui/mobile.js';
 import { formatTimecode } from './util.js';
 import { loadSampleProject } from './sample.js';
 import { ensureProjectFonts } from './fonts.js';
@@ -28,9 +30,11 @@ function buildWorkspace() {
   createMenubar($('menubar'));
   const scopes = createScopesPanel();
   const multicam = createMulticamPanel();
+  const quick = createQuickPanel();
   panelGroup($('pg-top-left'), 'topLeft', [
     { id: 'source', title: '소스', body: createSourceMonitor() },
     { id: 'effectControls', title: '효과 컨트롤', body: createEffectControls() },
+    { id: 'quick', title: '빠른 편집', body: quick, onShow: () => quick.onShow(), onHide: () => quick.onHide() },
     { id: 'mixer', title: '오디오 믹서', body: createMixerPanel() },
     { id: 'scopes', title: '스코프', body: scopes, onShow: () => scopes.onShow(), onHide: () => scopes.setVisible(false) },
     { id: 'multicam', title: '멀티캠', body: multicam, onShow: () => multicam.onShow(), onHide: () => multicam.onHide() },
@@ -107,6 +111,7 @@ async function boot() {
   installFocusHygiene();
   buildWorkspace();
   buildStatusBar();
+  initMobile();
   installShortcuts();
   installFileDrop();
   store.on('toast', toast);

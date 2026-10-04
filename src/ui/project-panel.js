@@ -323,10 +323,19 @@ export function createProjectPanel() {
     if (m.fps) metaParts.push(`${Math.round(m.fps * 100) / 100}fps`);
     if (m.kind === 'video' && m.hasAudio === false) metaParts.push('소리 없음');
     if (m.kind === 'sequence' && store.project.sequences[m.sequenceId]?.multicam) metaParts.unshift('멀티캠');
+    const canPlace = st === 'ready' && !['lut', 'font'].includes(m.kind) && !(m.kind === 'sequence' && m.sequenceId === store.seq.id);
+    const addBtn = canPlace ? h('button.m-place', {
+      title: '재생헤드 위치에 넣기', 'aria-label': `${m.name} 타임라인에 넣기`,
+      onclick: (e) => {
+        e.stopPropagation();
+        const ids = edit.placeMedia(id, { mode: 'insert' });
+        if (ids.length) toast(`${m.name}을(를) 넣었습니다`);
+      },
+    }, '넣기') : null;
     const el = h(`div.media-item${store.ui.selectedMedia.has(id) ? '.selected' : ''}${inBin ? '.in-bin' : ''}`, { draggable: true, title: m.name },
       thumb,
       h('div.name', m.label ? h('span.label-dot', { style: { background: m.label } }) : null, h('span', m.name), badge),
-      h('div.meta', metaParts.join(' · ')));
+      h('div.meta', metaParts.join(' · '), addBtn));
     el.addEventListener('click', (e) => {
       const sel = store.ui.selectedMedia;
       if (e.shiftKey && anchor) {

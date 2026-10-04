@@ -237,7 +237,9 @@ export function openModal({ title, body, buttons = [{ label: '닫기', primary: 
   }
   document.addEventListener('keydown', onKey, true);
   document.body.append(backdrop);
-  setTimeout(() => modal.querySelector('input,select,textarea,button.primary')?.focus(), 0);
+  // on phones, focusing a text field would pop up the keyboard over the dialog
+  const phone = document.body.classList.contains('mobile');
+  setTimeout(() => modal.querySelector(phone ? 'button.primary' : 'input,select,textarea,button.primary')?.focus({ preventScroll: phone }), 0);
   return { close, modal, footer };
 }
 

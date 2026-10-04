@@ -20,6 +20,8 @@ const RULER_H = 34;
 const DIVIDER_H = 6;
 const SNAP_PX = 8;
 const EDGE_PX = 7;
+const EDGE_PX_TOUCH = 18;
+const COARSE = typeof window !== 'undefined' && window.matchMedia?.('(pointer: coarse)').matches;
 
 const COLORS = {
   video: ['#5d5fb8', '#8487e6'],
@@ -49,7 +51,7 @@ export function createTimeline() {
     pps: loadPref('tl.pps', 40),
     scrollX: 0,
     scrollY: 0,
-    th: loadPref('tl.trackH', 50),
+    th: loadPref('tl.trackH', COARSE ? 58 : 50),
     showThumbs: loadPref('tl.thumbs', true),
     showWaves: loadPref('tl.waves', true),
     rows: [],
@@ -58,6 +60,10 @@ export function createTimeline() {
     height: 0,
   };
   let drag = null; // active pointer interaction
+  let edgePx = EDGE_PX; // wider edge zones for fingers
+  const touches = new Map(); // active touch points (pinch zoom)
+  let longPress = null;
+  let lastPointerType = 'mouse';
   let hover = null;
   let dropPreview = null;
   let staticDirty = true;
@@ -585,6 +591,16 @@ export function createTimeline() {
     ctx.strokeStyle = selected ? '#ffffff' : 'rgba(0,0,0,0.6)';
     ctx.lineWidth = selected ? 2 : 1;
     ctx.strokeRect(x + 0.5, y + 0.5, w - 1, hh - 1);
+    if (selected && COARSE && w > 30 && !ghost) {
+      // finger-sized trim handles on the selected clip
+      ctx.fillStyle = '#ffffff';
+      for (const hx of [x + 1, x + w - 9]) {
+        ctx.fillRect(hx, y + 1, 8, hh - 2);
+        ctx.fillStyle = '#1b1e23';
+        ctx.fillRect(hx + 3, y + hh / 2 - 6, 2, 12);
+        ctx.fillStyle = '#ffffff';
+      }
+    }
     if (c.enabled === false) {
       ctx.fillStyle = 'rgba(30,30,30,0.6)';
       ctx.fillRect(x, y, w, hh);
@@ -821,7 +837,7 @@ export function createTimeline() {
       const x1 = xOf(clipEnd(c));
       if (x < x0 - 1 || x > x1 + 1) continue;
       const w = x1 - x0;
-      const ez = Math.min(EDGE_PX, w / 3);
+      const ez = Math.min(edgePx, w / 3);
       let zone = 'body';
       if (x <= x0 + ez) zone = 'in';
       else if (x >= x1 - ez) zone = 'out';
@@ -890,9 +906,31 @@ export function createTimeline() {
     canvas.focus();
     store.setFocus('timeline');
     const { x, y } = localPos(e);
+    lastPointerType = e.pointerType;
+    if (e.pointerType === 'touch') {
+      touches.set(e.pointerId, { x, y });
+      canvas.setPointerCapture(e.pointerId);
+      if (touches.size === 2) {
+        startPinch();
+        return;
+      }
+      if (touches.size > 2) return;
+      edgePx = EDGE_PX_TOUCH;
+    } else edgePx = EDGE_PX;
     const hit = hitTest(x, y);
     const tool = store.ui.tool;
     canvas.setPointerCapture(e.pointerId);
+
+    // fingers: dragging pans the timeline; a tap selects (or moves the playhead on empty space);
+    // a selected clip can be dragged or trimmed by its edges; long press opens the clip menu
+    if (e.pointerType === 'touch' && tool === 'select') {
+      const onSelected = hit.area === 'clip' && store.selection.clips.has(hit.clip.id);
+      armLongPress(e, hit);
+      if (hit.area !== 'ruler' && hit.area !== 'transition' && !onSelected) {
+        drag = { type: 'touchpan', x0: x, y0: y, sx: view.scrollX, sy: view.scrollY, moved: false, hit };
+        return;
+      }
+    }
 
     if (tool === 'hand' || e.button === 1) {
       drag = { type: 'pan', x0: x, y0: y, sx: view.scrollX, sy: view.scrollY };
@@ -1094,6 +1132,26 @@ export function createTimeline() {
 
   function onPointerMove(e) {
     const { x, y } = localPos(e);
+    if (e.pointerType === 'touch' && touches.has(e.pointerId)) touches.set(e.pointerId, { x, y });
+    if (drag?.type === 'pinch') {
+      movePinch();
+      return;
+    }
+    if (drag?.type === 'touchpan') {
+      if (!drag.moved && Math.hypot(x - drag.x0, y - drag.y0) > 8) {
+        drag.moved = true;
+        clearTimeout(longPress);
+      }
+      if (drag.moved) {
+        setScrollX(drag.sx - (x - drag.x0));
+        setScrollY(drag.sy - (y - drag.y0));
+      }
+      return;
+    }
+    if (drag && e.pointerType === 'touch' && !drag.longPressMoved && Math.hypot(x - (drag.lx ?? x), y - (drag.ly ?? y)) > 8) {
+      drag.longPressMoved = true;
+      clearTimeout(longPress);
+    }
     if (!drag) {
       updateHover(x, y, e);
       return;
@@ -1269,11 +1327,27 @@ export function createTimeline() {
   }
 
   function onPointerUp(e) {
+    touches.delete(e.pointerId);
+    clearTimeout(longPress);
     if (!drag) return;
+    if (drag.type === 'pinch') {
+      if (touches.size < 2) drag = null;
+      return;
+    }
     const d = drag;
     drag = null;
     const s = store.seq;
     switch (d.type) {
+      case 'touchpan':
+        if (!d.moved && e.type !== 'pointercancel') {
+          if (d.hit.area === 'clip') store.selectClips([...edit.withLinked([d.hit.clip.id])]);
+          else if (d.hit.area === 'track' || d.hit.area === 'empty') {
+            store.clearSelection();
+            playback.stop();
+            store.setPlayhead(snapFrame(Math.max(0, tOf(d.x0)), fps()));
+          }
+        }
+        break;
       case 'move':
         if (!d.moved && d.clickIds) store.selectClips(d.clickIds);
         if (d.moved && (Math.abs(d.dt) > EPS || d.dV || d.dA || d.duplicate)) {
@@ -1362,8 +1436,49 @@ export function createTimeline() {
     if (hit.area === 'transition') store.emit('reveal-effect-controls');
   }
 
+  /** Long press with a finger = right click (iOS has no native long-press context menu). */
+  function armLongPress(e, hit) {
+    clearTimeout(longPress);
+    const { clientX, clientY } = e;
+    const { x, y } = localPos(e);
+    longPress = setTimeout(() => {
+      if (!drag || drag.moved || drag.longPressMoved || drag.type === 'pinch') return;
+      if (drag.type !== 'touchpan' && drag.type !== 'move') return;
+      drag = null;
+      if (navigator.vibrate) navigator.vibrate(12);
+      if (hit.area === 'clip' && !store.selection.clips.has(hit.clip.id)) store.selectClips([...edit.withLinked([hit.clip.id])]);
+      onContextMenu({ preventDefault() {}, clientX, clientY, synthetic: true });
+    }, 520);
+    if (drag) Object.assign(drag, { lx: x, ly: y });
+  }
+
+  function startPinch() {
+    clearTimeout(longPress);
+    if (drag && drag.type !== 'touchpan' && store.pending) store.cancel();
+    const [a, b] = [...touches.values()];
+    const mid = (a.x + b.x) / 2;
+    drag = { type: 'pinch', d0: Math.hypot(a.x - b.x, a.y - b.y) || 1, pps0: view.pps, t0: tOf(mid), sy: view.scrollY, my0: (a.y + b.y) / 2 };
+  }
+
+  function movePinch() {
+    const pts = [...touches.values()];
+    if (pts.length < 2) return;
+    const [a, b] = pts;
+    const d = drag;
+    const mid = (a.x + b.x) / 2;
+    view.pps = clamp(d.pps0 * (Math.hypot(a.x - b.x, a.y - b.y) / d.d0), 0.2, 3000);
+    savePref('tl.pps', view.pps);
+    view.scrollX = Math.max(0, d.t0 * view.pps - mid);
+    view.scrollY = clamp(d.sy - ((a.y + b.y) / 2 - d.my0), 0, Math.max(0, view.contentH - (view.height - RULER_H) + 20));
+    syncScrollbars();
+    renderHeaders();
+    invalidate();
+  }
+
   function onContextMenu(e) {
     e.preventDefault();
+    // a finger's native long-press menu is replaced by our own long-press handling
+    if (!e.synthetic && lastPointerType === 'touch') return;
     const { x, y } = localPos(e);
     const hit = hitTest(x, y);
     const s = store.seq;

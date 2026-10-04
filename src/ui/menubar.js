@@ -11,6 +11,9 @@ import { WORKSPACES } from './workspaces.js';
 
 const mod = isMac ? '⌘' : 'Ctrl+';
 
+/** Menu definitions, shared with the phone layout's menu sheet. */
+export const menubarApi = { menus: null };
+
 export function createMenubar(el) {
   const sel = () => store.selectedClips();
   const has = () => sel().length > 0;
@@ -60,7 +63,14 @@ export function createMenubar(el) {
       { label: '중첩 (Nest)…', disabled: !has(), action: c.nest },
       { label: '레이블 색상', disabled: !has(), submenu: () => LABEL_COLORS.map(([color, name]) => ({ label: name, swatch: color || 'transparent', action: () => c.setLabel(color) })) },
       '-',
-      { group: '분석' },
+      { group: '꾸미기' },
+      { label: '애니메이션 (등장·퇴장·반복)', action: () => c.quick('anim') },
+      { label: '필터', action: () => c.quick('filter') },
+      { label: '화면 위치 · 배경 채우기 · 비율', action: () => c.quick('frame') },
+      '-',
+      { group: '자동 편집' },
+      { label: '무음 구간 자동 삭제 (점프 컷)…', action: c.silenceCut },
+      { label: '비트 마커 (음악 박자 맞추기)…', action: c.beatMarkers },
       { label: '장면 전환 자동 감지…', disabled: !sel().some((x) => x.kind === 'video'), action: c.sceneDetect },
       { label: '멀티캠 소스 시퀀스 만들기…', action: c.multicamCreate },
       { label: '멀티캠 앵글 바꾸기', submenu: () => [1, 2, 3, 4, 5, 6, 7, 8, 9].map((n) => ({ label: `앵글 ${n}`, key: String(n), action: () => c.switchAngle(n) })) },
@@ -68,6 +78,7 @@ export function createMenubar(el) {
       { group: '오디오' },
       { label: '오디오 노멀라이즈 (최대 -1 dB)', disabled: !has(), action: c.normalize },
       { label: '오디오 추출 (영상에서 소리만 따로)…', action: c.extractAudio },
+      { label: '목소리 효과 (로봇·전화·동굴…)', action: () => c.quick('audio') },
       { label: '자동 더킹 (말할 때 음악 줄이기)…', action: c.autoDuck },
       '-',
       { label: '효과 모두 제거', disabled: !has(), action: c.removeEffects },
@@ -128,6 +139,9 @@ export function createMenubar(el) {
       { label: '새 텍스트', action: c.newText },
       { label: '문자 도구 (모니터를 클릭해 입력)', key: 'T', action: () => store.setTool('type') },
       { label: '타이틀 템플릿', submenu: () => TEMPLATES.map((t) => ({ label: t.name, action: () => c.template(t.id) })) },
+      { label: '글자 스타일', action: () => c.quick('text') },
+      { label: '스티커 (이모지)', action: () => c.quick('sticker') },
+      { label: '사진 슬라이드쇼 만들기…', action: c.slideshow },
       '-',
       { label: '새 사각형', action: c.newRectangle },
       { label: '새 타원', action: c.newEllipse },
@@ -157,6 +171,7 @@ export function createMenubar(el) {
       { label: '소스 모니터', action: () => c.showPanel('source') },
       { label: '효과 컨트롤', action: () => c.showPanel('effectControls') },
       { label: '오디오 트랙 믹서', action: () => c.showPanel('mixer') },
+      { label: '빠른 편집', action: () => c.showPanel('quick') },
       { label: '멀티캠', action: () => c.showPanel('multicam') },
       { label: '스코프', action: () => c.showPanel('scopes') },
       { label: '프로그램 모니터', action: () => c.showPanel('program') },
@@ -177,6 +192,7 @@ export function createMenubar(el) {
     ],
   };
 
+  menubarApi.menus = menus;
   el.append(h('span.brand', 'Montage'));
   const buttons = [];
   for (const [name, items] of Object.entries(menus)) {

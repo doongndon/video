@@ -9,7 +9,7 @@ import { EFFECTS } from './effects.js';
 import { clamp } from './util.js';
 
 const FILTER_FX = new Set(['brightnessContrast', 'basicColor', 'hueShift', 'gaussianBlur', 'blackWhite', 'sepia', 'invert', 'sharpen', 'findEdges', 'posterize']);
-const TRANSFORM_FX = new Set(['dropShadow', 'hFlip', 'vFlip', 'cameraShake', 'stabilize', 'trackMatte']);
+const TRANSFORM_FX = new Set(['dropShadow', 'hFlip', 'vFlip', 'cameraShake', 'stabilize', 'trackMatte', 'blurFill']);
 const SVG_NS = 'http://www.w3.org/2000/svg';
 let svgRoot = null;
 
@@ -136,7 +136,9 @@ export class Compositor {
    * provider.image(mediaId) -> {img,w,h} | {offline:true} | null
    * provider.media(id) -> media item
    */
-  render(ctx, seq, t, provider, { scale = 1, background = '#000000', angle = null } = {}) {
+  render(ctx, seq, t, provider, { scale = 1, background, angle = null } = {}) {
+    // undefined background = the sequence's own colour; null = transparent (nested sequences)
+    if (background === undefined) background = seq.background || '#000000';
     const W = seq.width;
     const H = seq.height;
     this.scale = scale;
@@ -518,6 +520,7 @@ export class Compositor {
     const shadow = userFx.find((f) => f.type === 'dropShadow')?.v;
     const shake = userFx.find((f) => f.type === 'cameraShake')?.v;
     const stab = userFx.find((f) => f.type === 'stabilize')?.v;
+    const fill = userFx.find((f) => f.type === 'blurFill')?.v;
     const stageFx = userFx.filter((f) => !TRANSFORM_FX.has(f.type));
     for (const f of userFx) {
       if (f.type === 'hFlip') flipX = -flipX;
@@ -529,6 +532,29 @@ export class Compositor {
       // process at roughly the on-screen resolution
       const onScreen = baseScale * this.scale * Math.max(1, Math.abs(motion.scale) / 100);
       img = this.processStage(src, stageFx, opts.dip, clamp(onScreen, 0.05, 1), clip, tl);
+    }
+
+    if (fill) {
+      // background fill behind a clip that does not cover the frame (e.g. a vertical phone video)
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      ctx.globalCompositeOperation = opts.composite || blend;
+      if (fill.mode === 'color') {
+        ctx.fillStyle = fill.color;
+        ctx.fillRect(0, 0, W, H);
+      } else {
+        const cover = Math.max(W / src.w, H / src.h) * 1.1;
+        const dw = src.w * cover;
+        const dh = src.h * cover;
+        if (fill.blur > 0.3) ctx.filter = `blur(${fill.blur * this.scale}px)`;
+        ctx.drawImage(img, (W - dw) / 2, (H - dh) / 2, dw, dh);
+        ctx.filter = 'none';
+        if (fill.dim > 0) {
+          ctx.fillStyle = `rgba(0,0,0,${clamp(fill.dim / 100, 0, 1)})`;
+          ctx.fillRect(0, 0, W, H);
+        }
+      }
+      ctx.restore();
     }
 
     ctx.save();
