@@ -1512,9 +1512,9 @@ function brushSettings(P, id) {
   preset.addEventListener('change', () => {
     const p = PRESETS[+preset.value];
     if (!p) return;
-    const v = { ...DYN, ...p[1] };
+    // every preset starts from the defaults (flow too), so settings from the last one don't linger
+    const v = { ...DYN, flow: 100, ...p[1] };
     for (const [k, val] of Object.entries(v)) {
-      if (k === 'flow' && id !== 'brush') continue;
       P.setOpt(id, k, val);
       ctl[k]?.(val);
     }
@@ -1552,12 +1552,16 @@ function brushSettings(P, id) {
   const pv = h('canvas', { width: 420, height: 110, style: { width: '100%', background: '#fff', borderRadius: '6px' } });
   function draw() {
     const g = pv.getContext('2d');
-    g.clearRect(0, 0, pv.width, pv.height);
     const oo = P.opts(id);
+    const col = id === 'eraser' ? '#333333' : P.fg;
+    // a light colour is shown on a dark background so it stays visible
+    const [r, gg, b] = hexRgb(col);
+    pv.style.background = 0.299 * r + 0.587 * gg + 0.114 * b > 170 ? '#2b2b2b' : '#fff';
+    g.clearRect(0, 0, pv.width, pv.height);
     const bo = brushOpts(oo, P, {});
     bo.hardness = (oo.hardness ?? 70) / 100;
     const size = clamp(oo.size || 30, 4, 48);
-    const eng = makeEngine(oo, bo, id === 'eraser' ? '#333333' : P.fg, P.bg);
+    const eng = makeEngine(oo, bo, col, P.bg);
     const mock = { bg: g, mode: 'paint', onMask: false, dir: 0, pressure: 1 };
     const step = Math.max(1, size * Math.max(0.01, dyn(oo).spacing / 100));
     let last = null;
