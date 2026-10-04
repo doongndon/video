@@ -508,11 +508,11 @@ export const AI_TOOLS = [
     name: 'apply_animation',
     label: '애니메이션',
     description: `클립에 움직임을 넣습니다. kind=in(등장): ${ANIM_IDS.in.join(', ')} / out(퇴장): ${ANIM_IDS.out.join(', ')} / loop(계속): ${ANIM_IDS.loop.join(', ')}`,
-    parameters: O({ clip_ids: IDS, kind: S('종류', { enum: ['in', 'out', 'loop'] }), preset_id: S('움직임 id'), duration: N('등장/퇴장 길이(초, 기본 0.6)') }, ['clip_ids', 'kind', 'preset_id']),
+    parameters: O({ clip_ids: IDS, kind: S('종류', { enum: ['in', 'out', 'loop'] }), preset_id: S('움직임 id'), duration: N('등장/퇴장 길이(초, 기본 0.6, 최소 1프레임)') }, ['clip_ids', 'kind', 'preset_id']),
     run({ clip_ids, kind, preset_id, duration = 0.6 }) {
       if (!ANIM_IDS[kind]?.includes(preset_id)) throw new Error(`없는 움직임입니다: ${kind}/${preset_id}`);
       const list = needClips(clip_ids);
-      const n = applyAnimation(list.map((c) => c.id), kind, preset_id, clamp(Number(duration) || 0.6, 0.1, 5));
+      const n = applyAnimation(list.map((c) => c.id), kind, preset_id, clamp(Number(duration) || 0.6, 1 / seqOf().fps, 5));
       return { clips: n };
     },
     summary: (r) => `${r.clips}개`,

@@ -384,6 +384,16 @@ label.check { display: inline-flex; align-items: center; gap: 6px; cursor: point
 .qp-grid.tools { grid-template-columns: repeat(auto-fill, minmax(calc(200px * var(--ui-scale)), 1fr)); }
 .qp-chip { min-height: calc(38px * var(--ui-scale)); display: grid; gap: 1px; justify-items: center; align-content: center; text-align: center; padding: 4px 6px; line-height: 1.25; }
 .qp-chip small { color: var(--text-faint); font-size: var(--fs-xs); }
+/* keyframe recording */
+.ibtn.autokey.on { color: #fff; background: #c2373c; border-color: #ff6b6f; }
+.pm-rec { position: absolute; top: 8px; left: 8px; z-index: 3; min-height: 0; padding: 3px 9px; border-radius: 12px; background: rgba(194, 55, 60, 0.92); border-color: #ff6b6f; color: #fff; font-size: var(--fs-s); font-weight: 600; }
+.qp-keyrow { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.qp-keyrow > button { display: inline-flex; align-items: center; gap: 4px; }
+.qp-rec { min-height: calc(40px * var(--ui-scale)); font-weight: 700; flex: 1 1 100%; justify-content: center; }
+.qp-rec.on { background: #c2373c; border-color: #ff6b6f; color: #fff; }
+.qp-keys { display: flex; flex-wrap: wrap; gap: 4px; }
+.qp-keys button { min-height: 0; padding: 2px 8px; font-variant-numeric: tabular-nums; }
+.qp-keys button.now { border-color: #ffd666; color: #ffd666; }
 .qp-chip.qp-split { display: flex; padding: 0; gap: 0; }
 .qp-split > button { flex: 1; min-width: 0; border-top-right-radius: 0; border-bottom-right-radius: 0; }
 .qp-split > input[type=color] { width: 44px; height: auto; border-radius: 0 4px 4px 0; border-left: 0; }
@@ -487,7 +497,7 @@ body.mobile #pg-top-right { flex: 1; height: 36dvh; min-height: 190px; width: au
 body.mobile #pg-timeline { flex: 1; min-width: 0; position: relative; }
 body.mobile #pg-top-right > .tabs, body.mobile #pg-timeline > .tabs { display: none; }
 body.mobile #pg-top-right .transport select,
-body.mobile #pg-top-right .transport .ibtn:not(.play):not([aria-label^="1프레임"]):not([aria-label^="반복"]),
+body.mobile #pg-top-right .transport .ibtn:not(.play):not([aria-label^="1프레임"]):not([aria-label^="반복"]):not(.autokey),
 body.mobile #pg-top-right .transport .sep { display: none; }
 body.mobile #pg-top-right .transport { justify-content: space-between; padding: 4px 10px; }
 body.mobile #pg-top-right .transport .grow { display: none; }
@@ -536,6 +546,9 @@ body.mobile .m-sheet-name { flex: 1; font-weight: 700; padding-top: 10px; }
 body.mobile .tabs { height: 40px; }
 body.mobile .tabs .tab { padding: 0 12px; }
 body.mobile .toasts { bottom: calc(var(--m-nav-h) + 72px + env(safe-area-inset-bottom, 0px)); width: calc(100vw - 32px); }
+/* with a sheet open, messages go over the preview instead of covering the sheet */
+body.mobile.m-sheet-open .toasts { bottom: auto; top: calc(var(--m-bar-bottom, 52px) + 44px); }
+body.mobile .toast { font-size: 14px; padding: 6px 12px; }
 body.mobile .toast { max-width: 100%; text-align: center; }
 body.mobile input[type=text], body.mobile input[type=number], body.mobile input[type=search], body.mobile input[type=password], body.mobile select, body.mobile textarea { font-size: 16px; }
 body.mobile button { min-height: 36px; }

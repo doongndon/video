@@ -71,6 +71,7 @@ export function initMobile() {
     tool('reverse', '역재생', () => edit.toggleReverse(selIds())),
     tool('freeze', '정지 화면', () => c.frameHold()),
     tool('wand', '애니메이션', () => openQuick('anim')),
+    tool('key', '키프레임', () => openQuick('motion')),
     tool('filter', '필터', () => openQuick('filter')),
     tool('frame', '위치·크기', () => openQuick('frame')),
     tool('audio', '소리', () => openQuick('audio')),

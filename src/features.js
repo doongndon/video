@@ -92,7 +92,8 @@ export function applyAnimation(clipIds, kind, presetId, duration = 0.6) {
         n++;
         continue;
       }
-      const d = q(Math.min(duration, D / 2));
+      // at least one frame, at most half the clip
+      const d = Math.max(1 / fps, q(Math.min(duration, D / 2)));
       const restT = kind === 'in' ? d : q(D - d);
       const rest = {
         posX: evalParam(motion.params.posX, restT),

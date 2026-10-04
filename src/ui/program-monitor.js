@@ -11,6 +11,7 @@ import { h, clamp, formatTimecode, parseTimecode, downloadBlob } from '../util.j
 import { fitRect, fitCanvasToBox, loadPref, savePref, toast, dnd, inlineEdit } from './common.js';
 import { icon, iconButton } from './icons.js';
 import { exportFrame } from '../export.js';
+import { motionPath, rawSetPathKey, setAutoKey } from '../motionkeys.js';
 
 export const programApi = {};
 
@@ -22,7 +23,8 @@ export function createProgramMonitor() {
   const frame = h('canvas.frame');
   const overlay = h('canvas.overlay');
   const empty = h('div.monitor-empty', '타임라인에 클립을 놓으면 여기에 결과 화면이 나옵니다.\n클립을 선택하면 화면에서 직접 옮기고 크기·회전을 바꿀 수 있습니다.');
-  view.append(frame, overlay, empty);
+  const recBadge = h('button.pm-rec', { title: '키프레임 기록 끄기', onclick: () => setAutoKey(false) }, '● 키프레임 기록 중');
+  view.append(frame, overlay, empty, recBadge);
   const compositor = new Compositor({ onAsyncReady: () => playback.requestRender() });
 
   let resolution = loadPref('program.res', 'auto');
@@ -37,6 +39,7 @@ export function createProgramMonitor() {
   const scrubBar = h('div.monitor-scrub', { title: '끌어서 이동' }, scrub);
   const playBtn = iconButton('play', '재생 / 정지 (Space)', () => playback.toggle(), { cls: 'play' });
   const loopBtn = iconButton('loop', '반복 재생 (Ctrl+Shift+L)', () => { playback.loop = !playback.loop; playback.emit('state'); });
+  const keyBtn = iconButton('key', '키프레임 기록: 켜면 화면에서 옮기거나 크기·회전을 바꿀 때마다 재생헤드 위치에 키프레임이 생깁니다', () => setAutoKey(!store.ui.autoKey), { cls: 'autokey' });
   const safeBtn = iconButton('safe', '안전 영역 표시 (TV 가장자리 잘림 확인)', () => { safe = !safe; savePref('program.safe', safe); playback.requestRender(); refresh(); });
   const resSel = h('select', { title: '재생 화질 (낮추면 빨라짐)', 'aria-label': '재생 화질' },
     [['auto', '화질 자동'], ['1', '화질 전체'], ['0.5', '화질 1/2'], ['0.25', '화질 1/4']].map(([v, l]) => h('option', { value: v, selected: v === String(resolution) }, l)));
@@ -56,6 +59,7 @@ export function createProgramMonitor() {
     playBtn,
     iconButton('stepForward', '1프레임 앞으로 (→)', () => playback.step(1)),
     iconButton('goOut', '끝 표시로 이동 (Shift+O)', () => { playback.stop(); store.setPlayhead(store.seq.outPoint ?? sequenceDuration(store.seq)); }),
+    keyBtn,
     h('span.sep'),
     iconButton('lift', '들어내기: 시작~끝 구간을 지우고 빈자리 남김 (;)', () => edit.liftExtract(false)),
     iconButton('extract', '추출: 시작~끝 구간을 지우고 당기기 (\')', () => edit.liftExtract(true)),
@@ -283,6 +287,7 @@ export function createProgramMonitor() {
     if (!c) return;
     const quad = quadFor(c);
     if (!quad) return;
+    drawMotionPath(ctx, c);
     const pts = quad.map(seqToScreen);
     ctx.strokeStyle = '#4aa3ff';
     ctx.lineWidth = 1;
@@ -316,6 +321,60 @@ export function createProgramMonitor() {
     }
     const g = maskTarget();
     if (g) drawMask(ctx, g);
+  }
+
+  /** Dashed path of the clip's position over time, with ◆ at its keyframes (the current one bigger). */
+  function drawMotionPath(ctx, c) {
+    const path = motionPath(c);
+    if (!path) return;
+    ctx.save();
+    ctx.strokeStyle = 'rgba(255, 214, 102, 0.9)';
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([5, 4]);
+    ctx.beginPath();
+    path.pts.forEach((p, i) => {
+      const [x, y] = seqToScreen(p);
+      if (i) ctx.lineTo(x, y);
+      else ctx.moveTo(x, y);
+    });
+    ctx.stroke();
+    ctx.setLineDash([]);
+    const tNow = store.ui.playhead - c.start;
+    for (const k of path.keys) {
+      const [x, y] = seqToScreen([k.x, k.y]);
+      const now = Math.abs(k.t - tNow) < 0.5 / store.seq.fps;
+      const r = now ? 8 : 6;
+      ctx.beginPath();
+      ctx.moveTo(x, y - r);
+      ctx.lineTo(x + r, y);
+      ctx.lineTo(x, y + r);
+      ctx.lineTo(x - r, y);
+      ctx.closePath();
+      ctx.fillStyle = now ? '#ffd666' : '#ffffff';
+      ctx.strokeStyle = '#1b1d22';
+      ctx.lineWidth = 1.5;
+      ctx.fill();
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  /**
+   * The ◆ of the selected clip's motion path under the pointer. On the object itself, grabbing it
+   * moves the object at the current time (that is how new keyframes are made), so there only the
+   * current time's own ◆ counts.
+   */
+  function pathKeyAt(c, px, py) {
+    const path = c && !playback.playing ? motionPath(c) : null;
+    if (!path) return null;
+    const quad = quadFor(c)?.map(seqToScreen);
+    const onBody = quad && pointInQuad(px, py, quad);
+    const tNow = store.ui.playhead - c.start;
+    return path.keys.find((k) => {
+      const [x, y] = seqToScreen([k.x, k.y]);
+      if (Math.hypot(px - x, py - y) > HANDLE + 2) return false;
+      return !onBody || Math.abs(k.t - tNow) < 0.5 / store.seq.fps;
+    }) || null;
   }
 
   function rotationHandle(pts) {
@@ -429,6 +488,14 @@ export function createProgramMonitor() {
       }
     }
     let c = activeClip();
+    const key = pathKeyAt(c, px, py);
+    if (key) {
+      // drag a ◆ to move that keyframe's position; a tap jumps to it
+      view.setPointerCapture(e.pointerId);
+      store.begin('키프레임 위치 (모션 경로)');
+      handleDrag = { mode: 'pathkey', clipId: c.id, t: key.t, kx: key.x, ky: key.y, x0: px, y0: py, moved: false };
+      return;
+    }
     let pts = c && quadFor(c)?.map(seqToScreen);
     let mode = null;
     // the selected clip's corner / rotation handles win, even where other clips lie on top
@@ -563,6 +630,14 @@ export function createProgramMonitor() {
     }
     const s = store.seq;
     const c = s.clips[d.clipId];
+    if (d.mode === 'pathkey') {
+      if (!c) return;
+      if (Math.hypot(px - d.x0, py - d.y0) > 3) d.moved = true;
+      if (!d.moved) return;
+      rawSetPathKey(c, d.t, Math.round((d.kx + (px - d.x0) / fr.s) * 10) / 10, Math.round((d.ky + (py - d.y0) / fr.s) * 10) / 10);
+      store.changed();
+      return;
+    }
     const fx = c?.effects.find((x) => x.id === d.fxId);
     if (!fx) return;
     if (d.mode === 'move') {
@@ -591,7 +666,15 @@ export function createProgramMonitor() {
       if (handleDrag?.mode === 'pinch' && touches.size >= 2) return;
     }
     if (!handleDrag) return;
+    const d = handleDrag;
     handleDrag = null;
+    if (d.mode === 'pathkey' && !d.moved) {
+      store.cancel();
+      const c = store.seq.clips[d.clipId];
+      if (c) store.setPlayhead(Math.min(c.start + d.t, clipEnd(c) - 1e-3));
+      touches.clear();
+      return;
+    }
     store.commit();
     touches.clear();
   };
@@ -626,6 +709,12 @@ export function createProgramMonitor() {
     const c = activeClip();
     const pts = c && !playback.playing ? quadFor(c)?.map(seqToScreen) : null;
     let cur = 'default';
+    if (pathKeyAt(c, px, py)) {
+      view.style.cursor = 'pointer';
+      view.title = '키프레임 위치: 끌어서 옮기기 · 눌러서 그 시간으로 이동';
+      return;
+    }
+    view.title = '';
     if (pts) {
       const rot = rotationHandle(pts);
       if (Math.hypot(px - rot[0], py - rot[1]) < 8) cur = 'grab';
@@ -709,6 +798,9 @@ export function createProgramMonitor() {
     }
     loopBtn.classList.toggle('on', playback.loop);
     loopBtn.setAttribute('aria-pressed', String(playback.loop));
+    keyBtn.classList.toggle('on', store.ui.autoKey);
+    keyBtn.setAttribute('aria-pressed', String(store.ui.autoKey));
+    recBadge.hidden = !store.ui.autoKey;
     safeBtn.classList.toggle('on', safe);
     safeBtn.setAttribute('aria-pressed', String(safe));
     drawScrub();
@@ -717,6 +809,10 @@ export function createProgramMonitor() {
   playback.addRenderer(draw);
   playback.on('state', refresh);
   store.on('selection', () => playback.requestRender());
+  store.on('autokey', () => {
+    refresh();
+    playback.requestRender();
+  });
   store.on('mask-target', () => playback.requestRender());
   store.on('tool', () => { view.classList.toggle('type-tool', store.ui.tool === 'type'); });
   new ResizeObserver(layout).observe(view);

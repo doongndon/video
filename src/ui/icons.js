@@ -32,6 +32,7 @@ const P = {
   down: '<path d="M4 6l4 4 4-4"/>',
   reset: '<path d="M3.5 6.5A5 5 0 1 1 3 9M3.5 3v3.5H7"/>',
   stopwatch: '<circle cx="8" cy="9" r="5"/><path d="M8 9V6.5M6.5 2h3M8 2v2"/>',
+  key: '<path d="M8 2.5 13.5 8 8 13.5 2.5 8z"/><circle cx="8" cy="8" r="1.4" fill="currentColor" stroke="none"/>',
   kfPrev: '<path d="M10 4 6 8l4 4"/>',
   kfNext: '<path d="M6 4l4 4-4 4"/>',
   diamond: '<path d="M8 3l5 5-5 5-5-5z"/>',

@@ -4,7 +4,7 @@
 import { store } from './store.js';
 import { uid, EPS, clamp, snapFrame, deepClone } from './util.js';
 import {
-  setParamValue, mediaTimeAt, contentTime, sourceOut, remapSpeedAt, createClip, createTrack, clipEnd, clipsOnTrack, linkedClips, getTrack, videoTracks, audioTracks,
+  setParamValue, isAnimated, keyframeDefaults, mediaTimeAt, contentTime, sourceOut, remapSpeedAt, createClip, createTrack, clipEnd, clipsOnTrack, linkedClips, getTrack, videoTracks, audioTracks,
   sequenceDuration, prevAdjacent, nextAdjacent, shiftClipKeyframes, scaleClipKeyframes, renameTracks,
   clampTransitionDuration, trackKindForClip, DEFAULT_STILL_DURATION, createEffect, isTimed,
   addSequenceToProject, createSequence, sequenceContains, sequenceMediaId,
@@ -757,11 +757,25 @@ export function setTransitionDuration(clipId, edge, d) {
 
 // ---------------------------------------------------------------- effects
 
-/** Write a param at the playhead (keyframing aware). Raw: caller wraps in a transaction/begin. */
+const AUTO_KEY_FX = new Set(['motion', 'opacity']);
+
+/**
+ * Write a param at the playhead (keyframing aware). Raw: caller wraps in a transaction/begin.
+ * With "키프레임 기록" on, a still motion/opacity value starts animating: the old value is kept as a
+ * keyframe at the clip start and the new one is keyed at the playhead, so moving the playhead and
+ * then dragging an object makes it travel there.
+ */
 export function rawSetParam(clip, fx, key, value) {
   const p = fx.params[key];
   if (!p) return;
-  setParamValue(p, value, clamp(store.ui.playhead - clip.start, 0, clip.duration), fd());
+  const t = clamp(store.ui.playhead - clip.start, 0, clip.duration);
+  if (store.ui.autoKey && !isAnimated(p) && AUTO_KEY_FX.has(fx.type) && typeof value === 'number' && typeof p.value === 'number') {
+    const ease = keyframeDefaults.ease;
+    p.kf = t > fd() / 2 ? [{ t: 0, v: p.value, ease }, { t, v: value, ease }] : [{ t, v: value, ease }];
+    p.value = value;
+    return;
+  }
+  setParamValue(p, value, t, fd());
 }
 
 export function addEffect(clipIds, type) {

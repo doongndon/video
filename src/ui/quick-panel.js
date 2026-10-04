@@ -15,10 +15,12 @@ import {
   EMOJIS, addSticker, PIP_POSITIONS, setPip, setBackgroundFill, setSequenceBackground, VOICES, applyVoice, clipVoice,
   ASPECTS, setAspect, targetVisualClips, targetAudioClips,
 } from '../features.js';
+import { setAutoKey, keyCurrentPose, jumpKey, deleteKeysHere, setMotionEase, keyTimes } from '../motionkeys.js';
 import { openSilenceCutDialog, openBeatDialog, openSlideshowDialog, openExtractAudioDialog, openAutoCaptionDialog, openDuckingDialog, openSceneDetectDialog } from './dialogs.js';
 
 export const QUICK_SECTIONS = [
   ['anim', '애니메이션', 'wand'],
+  ['motion', '움직임', 'key'],
   ['filter', '필터', 'image'],
   ['text', '글자', 'text'],
   ['sticker', '스티커', 'plus'],
@@ -87,7 +89,7 @@ export function createQuickPanel() {
   const SECTIONS = {
     anim() {
       let dur = loadPref('quick.animDur', 0.6);
-      const dSlider = slider('길이', 0.2, 2, 0.1, dur, (v) => { dur = v; savePref('quick.animDur', v); }, (v) => `${v.toFixed(1)}초`);
+      const dSlider = slider('길이', 0.05, 2, 0.05, dur, (v) => { dur = v; savePref('quick.animDur', v); }, (v) => `${v.toFixed(2)}초 (${Math.max(1, Math.round(v * store.seq.fps))}프레임)`);
       const run = (kind, id) => {
         const ids = targetVisualClips();
         if (!ids.length) return needClip();
@@ -104,6 +106,88 @@ export function createQuickPanel() {
         hint('계속 움직이기는 같은 값(크기·위치·회전)의 등장/퇴장 움직임을 덮어씁니다. 함께 쓰려면 계속 움직이기를 먼저 넣고 등장/퇴장을 나중에 넣으세요.'),
         h('div.qp-row', h('button', { onclick: () => { const ids = targetVisualClips(); if (!ids.length) return needClip(); clearAnimations(ids); } }, '애니메이션 모두 지우기')),
         hint('움직임은 모션·불투명도 키프레임으로 들어가므로 효과 컨트롤에서 이징과 시간을 더 다듬을 수 있습니다.'),
+      ];
+    },
+
+    motion() {
+      const clipId = () => targetVisualClips()[0] || null;
+      const recBtn = h('button.qp-rec', { onclick: () => setAutoKey(!store.ui.autoKey) });
+      const act = (ic, label, fn, tip) => h('button', {
+        title: tip || label,
+        onclick: () => {
+          const id = clipId();
+          if (!id) return needClip();
+          fn(id);
+        },
+      }, icon(ic), label);
+      const keyList = h('div.qp-keys');
+      // current values at the playhead (keyed automatically while recording)
+      const VALUES = [
+        ['motion', 'posX', '위치 X', () => -store.seq.width * 0.5, () => store.seq.width * 1.5, 1, (v) => `${Math.round(v)}`],
+        ['motion', 'posY', '위치 Y', () => -store.seq.height * 0.5, () => store.seq.height * 1.5, 1, (v) => `${Math.round(v)}`],
+        ['motion', 'scale', '크기', () => 0, () => 400, 1, (v) => `${Math.round(v)}%`],
+        ['motion', 'rotation', '회전', () => -360, () => 360, 1, (v) => `${Math.round(v)}°`],
+        ['opacity', 'opacity', '불투명도', () => 0, () => 100, 1, (v) => `${Math.round(v)}%`],
+      ];
+      let editing = false;
+      const sliders = VALUES.map(([type, key, label, min, max, step, fmt]) => {
+        const sl = slider(label, min(), max(), step, 0, (v, done) => {
+          const id = clipId();
+          const c = id && store.seq.clips[id];
+          const fx = c?.effects.find((e) => e.type === type);
+          if (!fx) return;
+          if (!editing) {
+            store.begin(`${label} 바꾸기`);
+            editing = true;
+          }
+          edit.rawSetParam(c, fx, key, v);
+          store.changed();
+          if (done) {
+            store.commit();
+            editing = false;
+          }
+        }, fmt);
+        return { type, key, min, max, sl };
+      });
+      const EASES = [['linear', '일정하게'], ['inOutSine', '부드럽게'], ['outCubic', '빠르게→천천히'], ['inCubic', '천천히→빠르게'], ['outBack', '살짝 넘쳤다 제자리'], ['outBounce', '통통 튀기'], ['outElastic', '출렁출렁']];
+      renderers.push(() => {
+        const on = store.ui.autoKey;
+        recBtn.classList.toggle('on', on);
+        recBtn.setAttribute('aria-pressed', String(on));
+        recBtn.replaceChildren(icon('key'), on ? ' 키프레임 기록 중 (누르면 끄기)' : ' 키프레임 기록 켜기');
+        const id = clipId();
+        const c = id && store.seq.clips[id];
+        const t = c ? clamp(store.ui.playhead - c.start, 0, c.duration) : 0;
+        for (const { type, key, min, max, sl } of sliders) {
+          const p = c?.effects.find((e) => e.type === type)?.params[key];
+          sl.input.disabled = !p;
+          sl.input.min = min();
+          sl.input.max = max();
+          if (p && !editing) sl.set(evalParam(p, t));
+        }
+        const ts = c ? keyTimes(c) : [];
+        keyList.replaceChildren(...(ts.length
+          ? ts.map((k) => {
+            const b = h('button.small', { onclick: () => store.setPlayhead(Math.min(c.start + k, clipEnd(c) - 1e-3)), title: '이 키프레임으로 이동' }, `◆ ${k.toFixed(2)}초`);
+            b.classList.toggle('now', Math.abs(k - t) < 0.5 / store.seq.fps);
+            return b;
+          })
+          : [h('span.note', '아직 키프레임이 없습니다')]));
+      });
+      return [
+        targetInfo(),
+        recBtn,
+        hint('① 키프레임 기록을 켭니다 ② 움직임이 시작될 곳에 재생헤드를 두고 물체 위치·크기를 정합니다 ③ 재생헤드를 옮긴 뒤 미리보기에서 물체를 끌거나 아래 값을 바꾸면, 그 사이를 이어서 움직입니다. 노란 점선이 이동 경로이고 ◆를 끌면 그 키프레임 위치가 바뀝니다.'),
+        h('div.qp-keyrow',
+          act('kfPrev', '이전', (id) => { if (!jumpKey(id, -1)) toast('앞쪽에 키프레임이 없습니다'); }, '이전 키프레임으로'),
+          act('key', '지금 모습 키프레임', (id) => keyCurrentPose(id), '위치·크기·회전·불투명도를 지금 값으로 키프레임'),
+          act('kfNext', '다음', (id) => { if (!jumpKey(id, 1)) toast('뒤쪽에 키프레임이 없습니다'); }, '다음 키프레임으로'),
+          act('trash', '여기 지우기', (id) => { if (!deleteKeysHere(id)) toast('재생헤드 위치에 키프레임이 없습니다'); }, '재생헤드 위치의 키프레임 지우기')),
+        title('키프레임'), keyList,
+        title('지금 값 (재생헤드 위치)'), ...sliders.map((x) => x.sl.el),
+        title('움직임 느낌 (이 클립의 모든 키프레임)'),
+        grid(EASES.map(([id, name]) => h('button.qp-chip', { onclick: () => { const c = clipId(); if (!c) return needClip(); setMotionEase(c, id); toast(`움직임 느낌: ${name}`); } }, name))),
+        h('div.qp-row', act('trash', '움직임 모두 지우기', (id) => clearAnimations([id]), '이 클립의 위치·크기·회전·불투명도 키프레임을 모두 지우고 지금 모습으로 고정')),
       ];
     },
 
@@ -352,6 +436,7 @@ export function createQuickPanel() {
   quickApi.show = (id) => show(id);
   store.on('selection', refresh);
   store.on('change', refresh);
+  store.on('autokey', refresh);
   let last = 0;
   store.on('playhead', () => {
     const now = performance.now();

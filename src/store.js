@@ -25,6 +25,7 @@ class Store extends Emitter {
       clipboard: null,
       selectedMedia: new Set(),
       audioScrub: true,
+      autoKey: false, // "키프레임 기록": edits to motion/opacity write keyframes at the playhead
     };
   }
 
