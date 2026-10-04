@@ -13,6 +13,8 @@ import { icon, iconButton } from './icons.js';
 import { curveTable } from '../compositor.js';
 import { analyzeMotion, mediaStatus } from '../media.js';
 import { savePreset } from './presets.js';
+import { openFontPicker } from './font-picker.js';
+import { fontLabel, loadFontFor } from '../fonts.js';
 
 /** Stabilization analyses in progress, keyed by clip id (survive panel rebuilds). */
 const analyses = new Map();
@@ -276,6 +278,41 @@ export function createEffectControls() {
             });
           }
         }
+        break;
+      }
+      case 'font': {
+        const btn = h('button.font-btn', { title: '글꼴 고르기 — 목록에서 미리 보고 고를 수 있습니다' });
+        const paint = () => {
+          const fam = findFx(c.id, fx.id)?.params[key].value || '';
+          btn.replaceChildren(h('span.fname', { style: { fontFamily: `"${fam}", "Noto Sans KR", sans-serif` } }, fontLabel(fam)), h('span.caret', '▾'));
+          loadFontFor(fam, fontLabel(fam)).catch(() => {});
+        };
+        paint();
+        updaters.push(paint);
+        btn.addEventListener('click', () => {
+          const f0 = findFx(c.id, fx.id);
+          if (!f0) return;
+          const original = f0.params[key].value;
+          const sample = String(f0.params.content?.value || '');
+          store.begin('글꼴 변경');
+          const set = (fam) => {
+            const f = findFx(c.id, fx.id);
+            if (!f) return;
+            f.params[key].value = fam;
+            store.changed();
+          };
+          openFontPicker(btn, {
+            current: original,
+            sample,
+            onPreview: (fam) => set(fam || original),
+            onPick: (fam) => {
+              set(fam);
+              store.commit();
+            },
+            onCancel: () => store.cancel(),
+          });
+        });
+        control = btn;
         break;
       }
       case 'select': {

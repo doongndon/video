@@ -9,12 +9,12 @@ import { LABEL_COLORS } from '../model.js';
 import { h, uid, formatTimecode, formatShort, formatBytes, modKey } from '../util.js';
 import { showMenu, openModal, promptDialog, confirmDialog, loadPref, savePref, toast, dnd } from './common.js';
 import { icon, iconButton } from './icons.js';
-import { openColorMatteDialog, openMulticamDialog } from './dialogs.js';
+import { openColorMatteDialog, openMulticamDialog, openExtractAudioDialog } from './dialogs.js';
 
-const KIND_NAMES = { video: '영상', audio: '오디오', image: '이미지', color: '색상 매트', adjustment: '조정 레이어', sequence: '시퀀스', lut: 'LUT' };
-const KIND_ICONS = { video: 'film', audio: 'audio', image: 'image', adjustment: 'wand', sequence: 'sequence', lut: 'grid', color: 'image' };
+const KIND_NAMES = { video: '영상', audio: '오디오', image: '이미지', color: '색상 매트', adjustment: '조정 레이어', sequence: '시퀀스', lut: 'LUT', font: '글꼴' };
+const KIND_ICONS = { video: 'film', audio: 'audio', image: 'image', adjustment: 'wand', sequence: 'sequence', lut: 'grid', color: 'image', font: 'type' };
 
-export function pickFiles({ accept = 'video/*,audio/*,image/*,.cube', multiple = true } = {}) {
+export function pickFiles({ accept = 'video/*,audio/*,image/*,.cube,.ttf,.otf,.woff,.woff2', multiple = true } = {}) {
   return new Promise((resolve) => {
     const input = h('input', { type: 'file', accept, multiple });
     input.addEventListener('change', () => resolve([...input.files]));
@@ -156,9 +156,30 @@ export function createProjectPanel() {
       toast('LUT는 클립에 적용해서 씁니다: 클립을 선택하고 오른쪽 클릭 ▸ 선택한 클립에 LUT 적용');
       return;
     }
+    if (m.kind === 'font') {
+      toast(`"${m.fontFamily || m.name}" 글꼴은 텍스트 클립의 효과 컨트롤 ▸ 글꼴 목록(내 글꼴)에서 고를 수 있습니다`);
+      return;
+    }
     store.ui.sourceMediaId = id;
     store.ui.sourceSeek = null;
     store.emit('source');
+  }
+
+  function applyFont(id) {
+    const family = store.project.media[id]?.fontFamily;
+    const ids = store.selectedClips().filter((c) => c.kind === 'text').map((c) => c.id);
+    if (!family) return;
+    if (!ids.length) {
+      toast('타임라인에서 글꼴을 바꿀 텍스트 클립을 먼저 선택하세요');
+      return;
+    }
+    store.transact('글꼴 적용', () => {
+      for (const cid of ids) {
+        const fx = store.seq.clips[cid]?.effects.find((e) => e.type === 'text');
+        if (fx) fx.params.font.value = family;
+      }
+    });
+    store.emit('reveal-effect-controls');
   }
 
   function applyLut(id) {
@@ -297,7 +318,8 @@ export function createProjectPanel() {
     const badge = st === 'offline' || st === 'error' ? h('span.badge.offline', st === 'error' ? '오류' : '오프라인') : st === 'loading' ? h('span.badge.loading', '불러오는 중…') : null;
     const metaParts = [KIND_NAMES[m.kind] || m.kind];
     if (Number.isFinite(m.duration)) metaParts.push(formatShort(m.duration));
-    if (m.width && !['audio', 'adjustment', 'lut'].includes(m.kind)) metaParts.push(`${m.width}×${m.height}`);
+    if (m.width && !['audio', 'adjustment', 'lut', 'font'].includes(m.kind)) metaParts.push(`${m.width}×${m.height}`);
+    if (m.kind === 'font' && m.fontFamily) metaParts.push(m.fontFamily);
     if (m.fps) metaParts.push(`${Math.round(m.fps * 100) / 100}fps`);
     if (m.kind === 'video' && m.hasAudio === false) metaParts.push('소리 없음');
     if (m.kind === 'sequence' && store.project.sequences[m.sequenceId]?.multicam) metaParts.unshift('멀티캠');
@@ -335,7 +357,7 @@ export function createProjectPanel() {
         store.ui.selectedMedia.add(id);
       }
       const selected = [...store.ui.selectedMedia].filter((x) => store.project.media[x]);
-      const items = selected.filter((x) => mediaStatus(x) === 'ready' && store.project.media[x].kind !== 'lut').map((mediaId) => ({ mediaId }));
+      const items = selected.filter((x) => mediaStatus(x) === 'ready' && !['lut', 'font'].includes(store.project.media[x].kind)).map((mediaId) => ({ mediaId }));
       dnd.payload = { items, mediaIds: selected };
       e.dataTransfer.setData('application/x-montage-media', JSON.stringify({ items }));
       e.dataTransfer.effectAllowed = 'copyMove';
@@ -376,6 +398,17 @@ export function createProjectPanel() {
         ], e.clientX, e.clientY);
         return;
       }
+      if (m.kind === 'font') {
+        showMenu([
+          { label: '선택한 텍스트 클립에 이 글꼴 적용', action: () => applyFont(id) },
+          { label: '이름 바꾸기…', action: () => rename(id) },
+          '-',
+          ...common,
+          '-',
+          { label: '지우기', key: 'Del', action: clearSelected },
+        ], e.clientX, e.clientY);
+        return;
+      }
       if (m.kind === 'lut') {
         showMenu([
           { label: '선택한 클립에 LUT 적용', action: () => applyLut(id) },
@@ -395,6 +428,7 @@ export function createProjectPanel() {
         { label: '재생헤드에 덮어쓰기', key: '.', disabled: st !== 'ready', action: () => edit.placeMedia(id, { mode: 'overwrite' }) },
         { label: '시퀀스 끝에 이어 붙이기', disabled: st !== 'ready', action: () => appendToEnd(selIds) },
         '-',
+        { label: '오디오 추출 (소리만 따로 만들기)…', disabled: !['video', 'audio'].includes(m.kind) || !m.hasAudio || st !== 'ready', action: () => openExtractAudioDialog({ mediaId: id }) },
         { label: `멀티캠 소스 시퀀스 만들기… (${videos.length}개 선택)`, disabled: videos.length < 2, action: openMulticamDialog },
         { label: '이 클립에 맞춰 시퀀스 설정 바꾸기', disabled: !(m.width && m.kind === 'video') && m.kind !== 'image', action: () => matchSequence(m) },
         m.kind === 'color' ? { label: '색상 바꾸기…', action: () => changeColor(id) } : null,
@@ -418,7 +452,7 @@ export function createProjectPanel() {
 
   function appendToEnd(ids) {
     for (const id of ids) {
-      if (mediaStatus(id) !== 'ready' || store.project.media[id]?.kind === 'lut') continue;
+      if (mediaStatus(id) !== 'ready' || ['lut', 'font'].includes(store.project.media[id]?.kind)) continue;
       let end = 0;
       for (const c of Object.values(store.seq.clips)) end = Math.max(end, c.start + c.duration);
       edit.placeMedia(id, { mode: 'overwrite', start: end });

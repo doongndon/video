@@ -5,6 +5,7 @@
 import * as MB from '../vendor/mediabunny/mediabunny.min.mjs';
 import { store } from './store.js';
 import { uid, once, Emitter } from './util.js';
+import { registerFontFile } from './fonts.js';
 
 export const mediaEvents = new Emitter();
 export const runtime = new Map();
@@ -19,10 +20,12 @@ const VIDEO_EXT = /\.(mp4|m4v|mov|webm|mkv|ogv|avi|3gp|ts|mts|m2ts)$/i;
 const AUDIO_EXT = /\.(mp3|wav|wave|ogg|oga|opus|m4a|aac|flac|weba)$/i;
 const IMAGE_EXT = /\.(png|jpe?g|gif|webp|bmp|svg|avif)$/i;
 const LUT_EXT = /\.cube$/i;
+const FONT_EXT = /\.(ttf|otf|woff2?)$/i;
 
 export function guessKind(file) {
   const t = file.type || '';
   if (LUT_EXT.test(file.name)) return 'lut';
+  if (FONT_EXT.test(file.name) || t.startsWith('font/')) return 'font';
   if (t.startsWith('image/') || IMAGE_EXT.test(file.name)) return 'image';
   if (t.startsWith('audio/') || AUDIO_EXT.test(file.name)) return 'audio';
   if (t.startsWith('video/') || VIDEO_EXT.test(file.name)) return 'video';
@@ -126,7 +129,20 @@ async function probeMedia(id) {
   const info = {};
   if (!media) return;
 
-  if (media.kind === 'lut') {
+  if (media.kind === 'font') {
+    // fonts get a family name of their own; keep it stable across reloads
+    let family = media.fontFamily;
+    if (!family) {
+      const base = rt.file.name.replace(/\.(ttf|otf|woff2?)$/i, '').replace(/["\\]/g, '').trim() || '내 글꼴';
+      const taken = new Set(Object.values(store.project.media).filter((m) => m.kind === 'font' && m.id !== id).map((m) => m.fontFamily));
+      family = base;
+      for (let n = 2; taken.has(family); n++) family = `${base} ${n}`;
+    }
+    info.fontFamily = await registerFontFile(rt.file, family);
+    info.duration = null;
+    info.hasAudio = false;
+    info.hasVideo = false;
+  } else if (media.kind === 'lut') {
     rt.lut = parseCube(await rt.file.text());
     info.duration = null;
     info.width = rt.lut.size;
@@ -225,7 +241,7 @@ function enqueueAnalysis(id) {
 async function analyse(id) {
   const media = store.project.media[id];
   const rt = getRuntime(id);
-  if (!media || rt.status !== 'ready' || media.kind === 'lut') return;
+  if (!media || rt.status !== 'ready' || media.kind === 'lut' || media.kind === 'font') return;
   if (media.kind === 'video') {
     await buildFilmstrip(id).catch((err) => console.warn('filmstrip failed', err));
     mediaEvents.emit('updated', id);
@@ -783,4 +799,74 @@ export async function analyzeMotion(id, start, end, { onProgress = () => {}, tok
   onProgress(1);
   const round = (arr, k) => arr.map((v) => Math.round(v * k) / k);
   return { fps, t0: start, x: round(xs, 100), y: round(ys, 100), a: round(as, 100000) };
+}
+
+// ---------------------------------------------------------------- audio extraction
+
+/** Audio file formats for "오디오 추출" and audio-only export. */
+export const AUDIO_FILE_FORMATS = [
+  { id: 'wav', label: 'WAV (무손실 · 파일 큼)', ext: 'wav', codec: 'pcm-s16' },
+  { id: 'm4a', label: 'M4A (AAC · 작음 · 대부분 기기에서 재생)', ext: 'm4a', codec: 'aac' },
+  { id: 'ogg', label: 'Ogg (Opus · 작음)', ext: 'ogg', codec: 'opus' },
+];
+
+/** Which audio formats this browser can write: {wav: true, m4a: bool, ogg: bool}. */
+export async function audioFileFormatSupport() {
+  const out = {};
+  for (const f of AUDIO_FILE_FORMATS) {
+    if (f.id === 'wav') out.wav = true;
+    else out[f.id] = await MB.canEncodeAudio(f.codec, { numberOfChannels: 2, sampleRate: 48000 }).catch(() => false);
+  }
+  return out;
+}
+
+function audioOutputFormat(id) {
+  if (id === 'm4a') return new MB.Mp4OutputFormat({ fastStart: 'in-memory' });
+  if (id === 'ogg') return new MB.OggOutputFormat();
+  return new MB.WavOutputFormat();
+}
+
+/**
+ * Extract the audio of a media file between [start, end) seconds into a new audio file, streamed
+ * (the whole soundtrack is never held in memory). Compressed audio that already matches the
+ * target codec is copied without re-encoding. Returns a Blob.
+ */
+export async function extractAudioFile(id, { start = 0, end = null, format = 'wav', onProgress = () => {}, token = {} } = {}) {
+  const rt = getRuntime(id);
+  if (!rt.file) throw new Error('파일이 연결되어 있지 않습니다 (오프라인)');
+  const fmt = AUDIO_FILE_FORMATS.find((f) => f.id === format) || AUDIO_FILE_FORMATS[0];
+  const input = new MB.Input({ source: new MB.BlobSource(rt.file), formats: MB.ALL_FORMATS });
+  try {
+    const at = await input.getPrimaryAudioTrack();
+    if (!at) throw new Error('이 파일에는 소리가 없습니다');
+    const outFormat = audioOutputFormat(fmt.id);
+    const output = new MB.Output({ format: outFormat, target: new MB.BufferTarget() });
+    const dur = await input.computeDuration();
+    const trim = { start: Math.max(0, start), end: Math.min(end ?? dur, dur) };
+    if (!(trim.end > trim.start)) throw new Error('추출할 구간이 비어 있습니다');
+    const conv = await MB.Conversion.init({
+      input,
+      output,
+      tracks: 'primary',
+      video: { discard: true },
+      audio: (track) => ({
+        codec: fmt.codec,
+        // the Opus encoder works at 48 kHz
+        sampleRate: fmt.id === 'ogg' && track.sampleRate !== 48000 ? 48000 : undefined,
+        quality: fmt.id === 'wav' ? undefined : MB.QUALITY_HIGH,
+      }),
+      trim,
+      showWarnings: false,
+    });
+    if (!conv.isValid) {
+      const why = conv.discardedTracks.map((d) => d.reason).join(', ');
+      throw new Error(`이 브라우저에서는 이 형식으로 만들 수 없습니다 (${why || '알 수 없는 이유'})`);
+    }
+    conv.onProgress = (p) => onProgress(p);
+    token.cancel = () => conv.cancel();
+    await conv.execute();
+    return new Blob([output.target.buffer], { type: outFormat.mimeType });
+  } finally {
+    try { input.dispose?.(); } catch { /* ignore */ }
+  }
 }

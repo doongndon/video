@@ -6,8 +6,8 @@ import * as edit from '../edit.js';
 import { h, formatTimecode, parseTimecode, formatBytes, downloadBlob, clamp, dbToGain } from '../util.js';
 import { openModal, formRow, toast, showPanel } from './common.js';
 import { FORMATS, EXPORT_PRESETS, exportRange, exportSequence, exportFrame } from '../export.js';
-import { createSyntheticMedia, detectScenes, mediaStatus, getRuntime, audioSyncOffsets } from '../media.js';
-import { clipEnd, clipsOnTrack, videoTracks, audioTracks, isTimed, mediaTimeAt, hasSpeedRamp } from '../model.js';
+import { createSyntheticMedia, detectScenes, mediaStatus, getRuntime, audioSyncOffsets, AUDIO_FILE_FORMATS, audioFileFormatSupport, extractAudioFile, importFiles } from '../media.js';
+import { clipEnd, clipsOnTrack, videoTracks, audioTracks, isTimed, mediaTimeAt, hasSpeedRamp, sourceOut } from '../model.js';
 import { ASR_MODELS, ASR_LANGUAGES, transcribeSequence, createCaptionTrack } from '../captions.js';
 
 const note = (...t) => h('div.note', ...t);
@@ -730,6 +730,144 @@ export function openMulticamDialog() {
         },
       },
     ],
+  });
+}
+
+// ---------------------------------------------------------------- audio extraction
+
+/**
+ * "오디오 추출": make an audio-only file from a video (or audio) file — the whole file, its source
+ * In/Out range, or the part a timeline clip uses. opts: { mediaId, clipId }
+ */
+export function openExtractAudioDialog({ mediaId, clipId = null } = {}) {
+  const s = store.seq;
+  const clip = clipId ? s.clips[clipId] : null;
+  const id = clip?.mediaId || mediaId;
+  const m = store.project.media[id];
+  if (!m || !['video', 'audio'].includes(m.kind)) {
+    toast('영상이나 소리 파일을 고르세요');
+    return;
+  }
+  if (!m.hasAudio) {
+    toast(`"${m.name}"에는 소리가 없습니다`);
+    return;
+  }
+  if (mediaStatus(id) !== 'ready') {
+    toast('파일이 아직 준비되지 않았거나 오프라인입니다');
+    return;
+  }
+  const fmtT = (t) => formatTimecode(t, m.fps || s.fps);
+  const ranges = [['all', `파일 전체 (${fmtT(m.duration || 0)})`]];
+  let clipRange = null;
+  if (clip) {
+    const a = Math.min(clip.inPoint, sourceOut(clip));
+    const b = Math.max(clip.inPoint, sourceOut(clip));
+    clipRange = [a, b];
+    ranges.unshift(['clip', `이 클립이 쓰는 부분 (${fmtT(a)} ~ ${fmtT(b)})`]);
+  }
+  if (m.inPoint != null || m.outPoint != null) ranges.push(['inout', `소스 시작~끝 표시 (${fmtT(m.inPoint ?? 0)} ~ ${fmtT(m.outPoint ?? m.duration)})`]);
+  const range = select(ranges, ranges[0][0]);
+  const format = select(AUDIO_FILE_FORMATS.map((f) => [f.id, f.label]), 'wav');
+  const addToProject = check(true, '프로젝트 패널에 오디오 항목으로 추가');
+  const save = check(false, '내 컴퓨터에 파일로 저장');
+  const plain = clip && clip.speed === 1 && !clip.reverse && !clip.hold && !hasSpeedRamp(clip);
+  const place = check(false, '추출한 소리를 원래 클립과 같은 위치의 빈 오디오 트랙에 놓기');
+  if (!plain) place.box.disabled = true;
+  const syncPlace = () => {
+    place.el.hidden = !clip;
+    place.box.disabled = !plain || range.value !== 'clip' || !addToProject.box.checked;
+    if (place.box.disabled) place.box.checked = false;
+  };
+  range.addEventListener('change', syncPlace);
+  addToProject.box.addEventListener('change', syncPlace);
+  syncPlace();
+  const prog = progressBar();
+  const status = note('');
+  audioFileFormatSupport().then((ok) => {
+    for (const opt of format.options) {
+      if (!ok[opt.value]) {
+        opt.disabled = true;
+        opt.textContent += ' — 이 브라우저에서 사용 불가';
+      }
+    }
+  });
+  const token = {};
+  let running = false;
+  const modal = openModal({
+    title: `오디오 추출 — ${m.name}`,
+    width: '560px',
+    body: [
+      formRow('구간', range),
+      formRow('형식', format),
+      formRow('결과', h('div', { style: { display: 'grid', gap: '4px' } }, addToProject.el, save.el, clip ? place.el : null)),
+      prog.el,
+      status,
+      note('영상에서 소리만 뽑아 새 오디오 파일을 만듭니다. 원본 소리가 같은 형식(AAC·Opus)이면 다시 압축하지 않고 그대로 복사합니다. 긴 영상은 M4A나 Ogg가 WAV보다 훨씬 작습니다.'),
+      clip && !plain ? h('div.note.warn', '이 클립은 속도·역재생·속도 램프가 걸려 있어, 추출한 소리는 원본 속도 그대로입니다 (타임라인 위치 맞추기는 끔).') : null,
+    ],
+    buttons: [
+      { label: '닫기', action: () => { token.cancel?.(); } },
+      {
+        label: '추출', primary: true, action: async () => {
+          if (running) return false;
+          if (!addToProject.box.checked && !save.box.checked) {
+            status.textContent = '"프로젝트에 추가"나 "파일로 저장" 중 하나는 골라야 합니다.';
+            return false;
+          }
+          running = true;
+          const btn = modal.footer.querySelector('button.primary');
+          btn.disabled = true;
+          const fmt = AUDIO_FILE_FORMATS.find((f) => f.id === format.value);
+          let start = 0;
+          let end = null;
+          if (range.value === 'clip' && clipRange) [start, end] = clipRange;
+          if (range.value === 'inout') {
+            start = m.inPoint ?? 0;
+            end = m.outPoint ?? m.duration;
+          }
+          const base = m.name.replace(/\.[^.]+$/, '');
+          const name = `${base}${range.value === 'all' ? '' : ' (구간)'} 오디오.${fmt.ext}`;
+          try {
+            status.textContent = '소리를 뽑는 중…';
+            const blob = await extractAudioFile(id, { start, end, format: fmt.id, token, onProgress: prog.set });
+            prog.set(1);
+            const done = [`${name} · ${formatBytes(blob.size)}`];
+            if (save.box.checked && (await downloadBlob(blob, name))) done.push('파일 저장');
+            if (addToProject.box.checked) {
+              const [newId] = await importFiles([new File([blob], name, { type: blob.type })]);
+              if (newId) {
+                done.push('프로젝트에 추가');
+                if (place.box.checked && clip && mediaStatus(newId) === 'ready') {
+                  const c = store.seq.clips[clip.id];
+                  if (c) {
+                    const free = () => audioTracks(store.seq).find((t) => !t.locked && !clipsOnTrack(store.seq, t.id).some((x) => x.start < clipEnd(c) && clipEnd(x) > c.start));
+                    if (!free()) edit.addTrack('audio');
+                    const tr = free();
+                    if (tr) {
+                      edit.placeMedia(newId, { mode: 'overwrite', start: c.start, aTrackId: tr.id, video: false });
+                      done.push(`${tr.name} 트랙에 배치`);
+                    }
+                  }
+                }
+              }
+            }
+            status.textContent = `완료: ${done.join(' · ')}`;
+            toast(`오디오를 추출했습니다: ${name}`);
+          } catch (err) {
+            console.error(err);
+            status.textContent = token.cancelled ? '취소했습니다' : `실패: ${err.message || err}`;
+          } finally {
+            running = false;
+            btn.disabled = false;
+          }
+          return false;
+        },
+      },
+    ],
+    onClose: () => {
+      token.cancelled = true;
+      token.cancel?.();
+    },
   });
 }
 

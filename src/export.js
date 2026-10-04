@@ -13,12 +13,15 @@ import { clamp, dbToGain, once } from './util.js';
 import { createChain, loadAudioWorklets } from './audio-fx.js';
 import { retimeAudio } from './timestretch.js';
 import { encodeGif } from './gif.js';
+import { loadFontFor } from './fonts.js';
 
 export const FORMATS = {
   mp4: { label: 'MP4 (H.264 / AAC) — 가장 널리 쓰임', ext: 'mp4', video: ['avc', 'hevc', 'vp9', 'av1'], audio: ['aac', 'opus'] },
   webm: { label: 'WebM (VP9 / Opus) — 웹용', ext: 'webm', video: ['vp9', 'vp8', 'av1'], audio: ['opus', 'vorbis'] },
   gif: { label: 'GIF (움직이는 이미지, 소리 없음)', ext: 'gif', gif: true },
-  wav: { label: 'WAV (소리만)', ext: 'wav', audioOnly: true },
+  wav: { label: 'WAV (소리만, 무손실)', ext: 'wav', audioOnly: true },
+  m4a: { label: 'M4A (AAC, 소리만)', ext: 'm4a', audioOnly: true, codec: 'aac' },
+  ogg: { label: 'Ogg (Opus, 소리만)', ext: 'ogg', audioOnly: true, codec: 'opus' },
   png: { label: 'PNG (현재 프레임 한 장)', ext: 'png', still: true },
 };
 
@@ -290,6 +293,32 @@ export async function renderAudioMix(seq, start, end, sampleRate = 48000, onProg
   return ctx.startRendering();
 }
 
+/** Compress a rendered mix to AAC (.m4a) or Opus (.ogg). */
+async function encodeAudioBuffer(buffer, fmt, onProgress = () => {}, token = {}) {
+  const ok = await MB.canEncodeAudio(fmt.codec, { numberOfChannels: buffer.numberOfChannels, sampleRate: buffer.sampleRate }).catch(() => false);
+  if (!ok) throw new Error(`이 브라우저는 ${fmt.label.split(' (')[0]} 소리를 만들 수 없습니다. WAV를 고르세요.`);
+  const output = new MB.Output({
+    format: fmt.codec === 'aac' ? new MB.Mp4OutputFormat({ fastStart: 'in-memory' }) : new MB.OggOutputFormat(),
+    target: new MB.BufferTarget(),
+  });
+  const src = new MB.AudioBufferSource({ codec: fmt.codec, quality: MB.QUALITY_HIGH });
+  output.addAudioTrack(src);
+  await output.start();
+  const sr = buffer.sampleRate;
+  try {
+    for (let a = 0; a < buffer.length; a += sr) {
+      if (token.cancelled) throw new Error('내보내기를 취소했습니다');
+      await src.add(sliceBuffer(buffer, a, Math.min(buffer.length, a + sr)));
+      onProgress(Math.min(1, (a + sr) / buffer.length));
+    }
+    await output.finalize();
+  } catch (err) {
+    try { await output.cancel(); } catch { /* ignore */ }
+    throw err;
+  }
+  return new Blob([output.target.buffer], { type: fmt.codec === 'aac' ? 'audio/mp4' : 'audio/ogg' });
+}
+
 function sliceBuffer(buf, s0, s1) {
   const out = new AudioBuffer({ length: Math.max(1, s1 - s0), numberOfChannels: buf.numberOfChannels, sampleRate: buf.sampleRate });
   for (let c = 0; c < buf.numberOfChannels; c++) out.getChannelData(c).set(buf.getChannelData(c).subarray(s0, s1));
@@ -331,15 +360,13 @@ export function encodeWav(buffer) {
 /** Make sure every web font used by text clips is loaded before frames are rendered. */
 export async function preloadFonts(seq) {
   if (!document.fonts) return;
-  const specs = new Set();
+  const jobs = [];
   for (const c of Object.values(seq.clips)) {
     const fx = c.effects.find((e) => e.type === 'text');
     if (!fx) continue;
-    const font = fx.params.font.value;
-    if (/^(sans-serif|serif|monospace)$/.test(font)) continue;
-    specs.add(`${fx.params.italic.value ? 'italic ' : ''}${fx.params.bold.value ? '700' : '400'} 32px "${font}"`);
+    jobs.push(loadFontFor(fx.params.font.value, String(fx.params.content.value || ' '), { bold: !!fx.params.bold.value, italic: !!fx.params.italic.value }));
   }
-  await Promise.all([...specs].map((s) => document.fonts.load(s).catch(() => null)));
+  await Promise.all(jobs);
 }
 
 /**
@@ -359,7 +386,12 @@ export async function exportSequence(opts) {
     await preloadFonts(seq);
     if (fmt.audioOnly) {
       progress(0, '오디오 믹싱 중');
-      const mix = await renderAudioMix(seq, start, end, 48000, (f) => progress(f * 0.9, '오디오 믹싱 중'));
+      const mix = await renderAudioMix(seq, start, end, 48000, (f) => progress(f * (fmt.codec ? 0.6 : 0.9), '오디오 믹싱 중'));
+      if (fmt.codec) {
+        const blob = await encodeAudioBuffer(mix, fmt, (f) => progress(0.6 + 0.39 * f, '소리 압축 중'), token);
+        progress(1, '완료');
+        return { blob, info: `${fmt.codec.toUpperCase()} · 48 kHz · 스테레오` };
+      }
       progress(1, '완료');
       return { blob: encodeWav(mix), info: 'PCM 16비트 · 48 kHz · 스테레오' };
     }

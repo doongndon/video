@@ -20,7 +20,7 @@ import { toggleVoiceover } from './recorder.js';
 import {
   openSpeedDialog, openSequenceSettings, openExportDialog, openShortcutsDialog, openAboutDialog,
   openColorMatteDialog, importSrt, exportSrt, openMarkerDialog, openSceneDetectDialog,
-  openDuckingDialog, openReframeDialog, openMulticamDialog, openAutoCaptionDialog, openGuideDialog,
+  openDuckingDialog, openReframeDialog, openMulticamDialog, openAutoCaptionDialog, openGuideDialog, openExtractAudioDialog,
 } from './ui/dialogs.js';
 
 const inSource = () => store.ui.focusPanel === 'source' && sourceApi.hasMedia?.();
@@ -104,7 +104,7 @@ async function openProject() {
 }
 
 async function linkMedia() {
-  const files = await pickFiles({ accept: 'video/*,audio/*,image/*,.cube' });
+  const files = await pickFiles({ accept: 'video/*,audio/*,image/*,.cube,.ttf,.otf,.woff,.woff2' });
   if (!files.length) return;
   const n = await relinkFromFiles(files);
   toast(n ? `${n}개 항목을 다시 연결했습니다` : '이름이 같은 파일을 찾지 못했습니다');
@@ -179,6 +179,13 @@ export const commands = {
     toast(n ? `오디오 클립 ${n}개를 최대 -1 dB로 맞췄습니다` : '오디오 클립을 선택하세요 (파형 분석이 끝나야 합니다)');
   },
   autoDuck: () => openDuckingDialog(),
+  extractAudio: () => {
+    const c = sel().find((x) => x.mediaId && ['video', 'audio'].includes(store.project.media[x.mediaId]?.kind));
+    if (c) return openExtractAudioDialog({ clipId: c.id });
+    const mid = [...store.ui.selectedMedia].find((id) => ['video', 'audio'].includes(store.project.media[id]?.kind));
+    if (mid) return openExtractAudioDialog({ mediaId: mid });
+    toast('타임라인 클립이나 프로젝트 패널의 영상을 먼저 선택하세요');
+  },
   sceneDetect: () => openSceneDetectDialog(),
   setLabel: (color) => {
     if (!sel().length) return toast('클립을 먼저 선택하세요');

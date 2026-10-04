@@ -20,6 +20,7 @@ import {
 import { openGuideDialog } from './ui/dialogs.js';
 import { formatTimecode } from './util.js';
 import { loadSampleProject } from './sample.js';
+import { ensureProjectFonts } from './fonts.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -109,6 +110,9 @@ async function boot() {
   installShortcuts();
   installFileDrop();
   store.on('toast', toast);
+  store.on('change', (reason) => {
+    if (reason === 'load' || reason === 'restore') ensureProjectFonts(store.project);
+  });
   window.addEventListener('montage:toast', (e) => toast(e.detail));
   const restored = await restoreSession();
   initAutosave();

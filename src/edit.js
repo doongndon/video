@@ -177,6 +177,10 @@ export function withLinked(ids) {
 export function placeMedia(mediaId, opts) {
   const m = media(mediaId);
   if (!m) return [];
+  if (m.kind === 'font') {
+    store.toast('글꼴 파일은 타임라인에 놓지 않습니다. 텍스트 클립을 선택하고 효과 컨트롤 ▸ 글꼴에서 고르세요.');
+    return [];
+  }
   if (m.kind === 'lut') {
     store.toast('LUT 파일은 타임라인에 놓지 않습니다. 클립을 선택한 뒤 프로젝트 패널에서 LUT를 오른쪽 클릭 ▸ 선택한 클립에 LUT 적용을 누르세요.');
     return [];

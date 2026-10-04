@@ -4,6 +4,7 @@
 // decoded frames for export).
 
 import { clipsOnTrack, clipEnd, evalEffect, mediaTimeAt, transitionsOnTrack, videoTracks, getTrack } from './model.js';
+import { ensureFont, fontSheetPending, isGenericFamily } from './fonts.js';
 import { EFFECTS } from './effects.js';
 import { clamp } from './util.js';
 
@@ -386,14 +387,23 @@ export class Compositor {
     const weight = p.bold ? '700' : '400';
     const style = p.italic ? 'italic ' : '';
     const fontSpec = `${style}${weight} ${p.size}px "${p.font}"`;
-    const generic = /^(sans-serif|serif|monospace)$/.test(p.font);
-    const font = generic ? `${style}${weight} ${p.size}px ${p.font}` : `${fontSpec}, sans-serif`;
-    if (!generic && document.fonts && !document.fonts.check(fontSpec) && !this.pendingFonts.has(fontSpec)) {
-      this.pendingFonts.add(fontSpec);
-      document.fonts.load(fontSpec).then(() => {
-        this.textCache.clear();
-        this.onAsyncReady();
-      }).catch(() => {});
+    const generic = isGenericFamily(p.font);
+    const font = generic ? `${style}${weight} ${p.size}px ${p.font}` : `${fontSpec}, "Noto Sans KR", sans-serif`;
+    if (!generic && document.fonts) {
+      // Korean web fonts are split into many unicode-range files: load the ones this text needs
+      // (after the family's stylesheet), then redraw.
+      const text = String(p.content ?? '') || ' ';
+      if (fontSheetPending(p.font) || !document.fonts.check(fontSpec, text)) {
+        const pk = `${fontSpec}|${text}`;
+        if (!this.pendingFonts.has(pk)) {
+          if (this.pendingFonts.size > 400) this.pendingFonts.clear();
+          this.pendingFonts.add(pk);
+          ensureFont(p.font).then(() => document.fonts.load(fontSpec, text)).then(() => {
+            this.textCache.clear();
+            this.onAsyncReady();
+          }).catch(() => {});
+        }
+      }
     }
     const lines = String(p.content ?? '').split('\n');
     const measure = makeCanvas(2, 2).getContext('2d');

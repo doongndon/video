@@ -266,6 +266,27 @@ kbd { font: var(--fs-xs) ui-monospace, Menlo, Consolas, monospace; background: v
 .ec-action { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .ec-action .note { flex: 1; min-width: 120px; }
 
+/* ---------------- font picker */
+.font-btn { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 6px; background: var(--bg); text-align: left; }
+.font-btn .fname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-l); }
+.font-btn .caret { color: var(--text-faint); }
+.font-picker { position: fixed; z-index: 1100; display: flex; flex-direction: column; background: #262a31; border: 1px solid #4c5361; border-radius: 8px; box-shadow: 0 12px 30px rgba(0,0,0,.6); overflow: hidden; }
+.font-picker .fp-head { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; padding: 8px; border-bottom: 1px solid var(--line); }
+.font-picker .fp-head input { min-width: 0; }
+.font-picker .fp-cats { display: flex; flex-wrap: wrap; gap: 4px; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+.font-picker .fp-cats button.on { background: var(--accent-soft); border-color: var(--accent); color: var(--value); }
+.font-picker .fp-cats.dim { opacity: 0.45; }
+.font-picker .fp-list { flex: 1; min-height: 120px; overflow-y: auto; }
+.font-picker .fp-item { padding: 6px 12px; cursor: pointer; border-bottom: 1px solid #2f343c; }
+.font-picker .fp-item.active { background: var(--accent); color: #fff; }
+.font-picker .fp-item.current { box-shadow: inset 3px 0 0 var(--value); }
+.font-picker .fp-name { font-size: var(--fs-xs); color: var(--text-faint); display: flex; gap: 6px; align-items: center; }
+.font-picker .fp-item.active .fp-name { color: #e3edff; }
+.font-picker .fp-tag { border: 1px solid currentColor; border-radius: 3px; padding: 0 4px; font-size: 10px; }
+.font-picker .fp-preview { font-size: calc(22px * var(--ui-scale)); line-height: 1.35; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.font-picker .fp-foot { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 8px; border-top: 1px solid var(--line); }
+.font-picker .fp-foot .note { flex: 1; min-width: 140px; font-size: var(--fs-xs); }
+
 /* ---------------- effects browser */
 .fx-browser { flex: 1; overflow: auto; padding: 4px 0; }
 .fx-folder > .fx-folder-head { padding: 5px 10px; cursor: pointer; user-select: none; font-weight: 700; color: var(--text-dim); display: flex; gap: 6px; align-items: center; }

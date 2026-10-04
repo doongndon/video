@@ -67,6 +67,7 @@ export function createMenubar(el) {
       '-',
       { group: '오디오' },
       { label: '오디오 노멀라이즈 (최대 -1 dB)', disabled: !has(), action: c.normalize },
+      { label: '오디오 추출 (영상에서 소리만 따로)…', action: c.extractAudio },
       { label: '자동 더킹 (말할 때 음악 줄이기)…', action: c.autoDuck },
       '-',
       { label: '효과 모두 제거', disabled: !has(), action: c.removeEffects },

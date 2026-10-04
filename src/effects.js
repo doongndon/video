@@ -21,21 +21,6 @@ export const BLEND_MODES = [
   ['luminosity', '광도'],
 ];
 
-export const FONTS = [
-  ['Noto Sans KR', '본고딕 (Noto Sans KR)'],
-  ['Noto Serif KR', '본명조 (Noto Serif KR)'],
-  ['Black Han Sans', '검은고딕 (Black Han Sans)'],
-  ['Do Hyeon', '도현 (Do Hyeon)'],
-  ['Jua', '주아 (Jua)'],
-  ['Nanum Pen Script', '나눔손글씨 펜'],
-  ['sans-serif', '시스템 고딕'],
-  ['serif', '시스템 명조'],
-  ['monospace', '시스템 고정폭'],
-  ['Arial', 'Arial'],
-  ['Georgia', 'Georgia'],
-  ['Impact', 'Impact'],
-  ['Courier New', 'Courier New'],
-];
 
 const DIRECTIONS = [['left', '왼쪽으로'], ['right', '오른쪽으로'], ['up', '위로'], ['down', '아래로']];
 
@@ -80,7 +65,7 @@ export const EFFECTS = {
     name: '텍스트', kind: 'video', fixed: true,
     params: [
       { key: 'content', label: '내용', type: 'text', default: '여기에 텍스트 입력' },
-      { key: 'font', label: '글꼴', type: 'select', default: 'Noto Sans KR', options: FONTS },
+      { key: 'font', label: '글꼴', type: 'font', default: 'Noto Sans KR', hint: '목록에서 미리 보고 고르거나 글꼴 파일을 가져올 수 있습니다' },
       num('size', '글꼴 크기', 96, { min: 4, max: 1000, unit: 'px' }),
       { key: 'bold', label: '굵게', type: 'bool', default: true },
       { key: 'italic', label: '기울임', type: 'bool', default: false },

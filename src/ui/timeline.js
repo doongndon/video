@@ -11,7 +11,7 @@ import {
 import { EFFECTS, TRANSITIONS } from '../effects.js';
 import { h, clamp, EPS, formatTimecode, parseTimecode, snapFrame, dbToGain, modKey } from '../util.js';
 import { showMenu, loadPref, savePref, fitCanvasToBox, promptDialog, toast, dnd, inlineEdit, uiScale } from './common.js';
-import { openSpeedDialog, openMarkerDialog } from './dialogs.js';
+import { openSpeedDialog, openMarkerDialog, openExtractAudioDialog } from './dialogs.js';
 import { icon, iconButton } from './icons.js';
 import { toggleVoiceover, recordingTrack } from '../recorder.js';
 import { getPreset } from './presets.js';
@@ -1409,6 +1409,8 @@ export function createTimeline() {
         { label: '이름 바꾸기…', action: async () => { const n = await promptDialog('클립 이름 바꾸기', '이름', c.name); if (n != null) edit.renameClip(c.id, n); } },
         { label: '레이블 색상', submenu: LABEL_COLORS.map(([col, n]) => ({ label: n, swatch: col || 'transparent', checked: (c.label || '') === col, action: () => edit.setLabel([...edit.withLinked(ids)], col) })) },
         '-',
+        { label: '오디오 추출 (이 클립의 소리를 새 파일로)…', disabled: !(c.mediaId && ['video', 'audio'].includes(store.project.media[c.mediaId]?.kind) && store.project.media[c.mediaId]?.hasAudio), action: () => openExtractAudioDialog({ clipId: c.id }) },
+        '-',
         { label: '속도/지속 시간…', key: 'Ctrl+R', action: () => openSpeedDialog(ids) },
         { label: '프레임 고정 추가 (재생헤드부터 정지 화면)', disabled: c.kind !== 'video', action: () => edit.addFrameHold(c) },
         { label: '역재생', checked: !!c.reverse, disabled: !isTimed(c), action: () => edit.toggleReverse(ids) },
@@ -1505,7 +1507,7 @@ export function createTimeline() {
   function mediaPlacement(payload, x, y, insert) {
     const s = store.seq;
     const m = store.project.media[payload.mediaId];
-    if (!m || m.kind === 'lut') return null;
+    if (!m || m.kind === 'lut' || m.kind === 'font') return null;
     const row = rowAtY(y);
     const inP = payload.inPoint ?? m.inPoint ?? 0;
     const outP = payload.outPoint ?? m.outPoint ?? (m.duration ?? inP + 5);
@@ -1611,7 +1613,7 @@ export function createTimeline() {
       const ids = await importFiles(files);
       let t = Math.max(0, snapFrame(tOf(x), fps()));
       for (const id of ids) {
-        if (mediaStatus(id) !== 'ready' || store.project.media[id]?.kind === 'lut') continue;
+        if (mediaStatus(id) !== 'ready' || ['lut', 'font'].includes(store.project.media[id]?.kind)) continue;
         const pl = mediaPlacement({ mediaId: id }, xOf(t), y, false);
         if (!pl) continue;
         edit.placeMedia(id, { mode: 'overwrite', start: t, vTrackId: pl.vTrack?.id, aTrackId: pl.aTrack?.id });
