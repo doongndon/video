@@ -75,6 +75,7 @@ export const EFFECTS = {
       { key: 'align', label: 'Align', type: 'select', default: 'center', options: [['left', 'Left'], ['center', 'Center'], ['right', 'Right']] },
       num('lineHeight', 'Line Spacing', 120, { min: 50, max: 400, unit: '%' }),
       num('tracking', 'Tracking', 0, { min: -50, max: 200, unit: 'px' }),
+      pct('reveal', 'Reveal (typewriter)', 100),
       { key: 'color', label: 'Fill', type: 'color', default: '#ffffff' },
       { key: 'strokeColor', label: 'Stroke', type: 'color', default: '#000000' },
       num('strokeWidth', 'Stroke Width', 0, { min: 0, max: 100, unit: 'px' }),
@@ -87,6 +88,22 @@ export const EFFECTS = {
   fill: {
     name: 'Color Matte', kind: 'video', fixed: true,
     params: [{ key: 'color', label: 'Color', type: 'color', default: '#1e3a8a' }],
+  },
+  shape: {
+    name: 'Shape', kind: 'video', fixed: true,
+    params: [
+      { key: 'shape', label: 'Shape', type: 'select', default: 'rectangle', options: [['rectangle', 'Rectangle'], ['ellipse', 'Ellipse'], ['triangle', 'Triangle'], ['line', 'Line']] },
+      num('width', 'Width', 600, { min: 1, max: 8000, unit: 'px' }),
+      num('height', 'Height', 200, { min: 1, max: 8000, unit: 'px' }),
+      num('radius', 'Corner Radius', 0, { min: 0, max: 2000, unit: 'px' }),
+      { key: 'fillOn', label: 'Fill', type: 'bool', default: true },
+      { key: 'fill', label: 'Fill Color', type: 'color', default: '#2d8ceb' },
+      { key: 'gradient', label: 'Gradient', type: 'bool', default: false },
+      { key: 'fill2', label: 'Gradient End Color', type: 'color', default: '#9b5de5' },
+      num('gradAngle', 'Gradient Angle', 0, { unit: '°' }),
+      { key: 'strokeColor', label: 'Stroke', type: 'color', default: '#ffffff' },
+      num('strokeWidth', 'Stroke Width', 0, { min: 0, max: 200, unit: 'px' }),
+    ],
   },
 
   // ---- user video effects ----
@@ -149,6 +166,43 @@ export const EFFECTS = {
   hFlip: { name: 'Horizontal Flip', kind: 'video', category: 'Transform', params: [] },
   vFlip: { name: 'Vertical Flip', kind: 'video', category: 'Transform', params: [] },
 
+  sharpen: {
+    name: 'Sharpen', kind: 'video', category: 'Blur & Sharpen',
+    params: [num('amount', 'Sharpen Amount', 50, { min: 0, max: 300 })],
+  },
+  findEdges: { name: 'Find Edges', kind: 'video', category: 'Stylize', params: [] },
+  posterize: {
+    name: 'Posterize', kind: 'video', category: 'Stylize',
+    params: [num('levels', 'Level', 6, { min: 2, max: 32 })],
+  },
+  glow: {
+    name: 'Glow', kind: 'video', category: 'Stylize',
+    params: [num('radius', 'Glow Radius', 20, { min: 0, max: 200, unit: 'px' }), pct('intensity', 'Glow Intensity', 60)],
+  },
+  filmGrain: {
+    name: 'Film Grain', kind: 'video', category: 'Noise & Grain',
+    params: [pct('amount', 'Amount', 35), num('size', 'Grain Size', 1, { min: 1, max: 8, step: 0.5 })],
+  },
+  tint: {
+    name: 'Tint', kind: 'video', category: 'Color Correction',
+    params: [
+      { key: 'black', label: 'Map Black To', type: 'color', default: '#1a1a40' },
+      { key: 'white', label: 'Map White To', type: 'color', default: '#ffe8b0' },
+      pct('amount', 'Amount to Tint', 100),
+    ],
+  },
+  letterbox: {
+    name: 'Letterbox', kind: 'video', category: 'Transform',
+    params: [
+      num('aspect', 'Aspect Ratio', 2.39, { min: 0.5, max: 4, step: 0.01, animatable: true }),
+      { key: 'color', label: 'Bar Color', type: 'color', default: '#000000' },
+    ],
+  },
+  cameraShake: {
+    name: 'Camera Shake', kind: 'video', category: 'Distort',
+    params: [num('amount', 'Amount', 20, { min: 0, max: 400, unit: 'px' }), num('speed', 'Speed', 8, { min: 0.1, max: 60, unit: 'Hz', step: 0.1 }), num('rotation', 'Rotation', 1, { min: 0, max: 45, unit: '°', step: 0.1 })],
+  },
+
   // ---- fixed audio ----
   volume: {
     name: 'Volume', kind: 'audio', fixed: true,
@@ -163,6 +217,49 @@ export const EFFECTS = {
   gain: {
     name: 'Amplify', kind: 'audio', category: 'Amplitude',
     params: [num('gain', 'Gain', 6, { min: -30, max: 30, unit: 'dB', step: 0.1 })],
+  },
+  eq3: {
+    name: 'Parametric EQ (3-Band)', kind: 'audio', category: 'Filter and EQ',
+    params: [
+      num('lowFreq', 'Low Shelf Freq', 200, { min: 20, max: 1000, unit: 'Hz' }),
+      num('lowGain', 'Low Gain', 0, { min: -24, max: 24, unit: 'dB', step: 0.1 }),
+      num('midFreq', 'Mid Freq', 1000, { min: 100, max: 8000, unit: 'Hz', step: 10 }),
+      num('midGain', 'Mid Gain', 0, { min: -24, max: 24, unit: 'dB', step: 0.1 }),
+      num('midQ', 'Mid Q', 1, { min: 0.1, max: 18, step: 0.1 }),
+      num('highFreq', 'High Shelf Freq', 5000, { min: 1000, max: 20000, unit: 'Hz', step: 10 }),
+      num('highGain', 'High Gain', 0, { min: -24, max: 24, unit: 'dB', step: 0.1 }),
+    ],
+  },
+  highpass: {
+    name: 'Highpass', kind: 'audio', category: 'Filter and EQ',
+    params: [num('frequency', 'Cutoff', 120, { min: 20, max: 20000, unit: 'Hz' }), num('q', 'Q', 0.7, { min: 0.1, max: 18, step: 0.1 })],
+  },
+  lowpass: {
+    name: 'Lowpass', kind: 'audio', category: 'Filter and EQ',
+    params: [num('frequency', 'Cutoff', 6000, { min: 20, max: 20000, unit: 'Hz', step: 10 }), num('q', 'Q', 0.7, { min: 0.1, max: 18, step: 0.1 })],
+  },
+  bandpass: {
+    name: 'Bandpass (Telephone)', kind: 'audio', category: 'Filter and EQ',
+    params: [num('frequency', 'Center', 1500, { min: 20, max: 20000, unit: 'Hz', step: 10 }), num('q', 'Q', 1.2, { min: 0.1, max: 18, step: 0.1 })],
+  },
+  compressor: {
+    name: 'Dynamics (Compressor)', kind: 'audio', category: 'Amplitude',
+    params: [
+      num('threshold', 'Threshold', -24, { min: -100, max: 0, unit: 'dB' }),
+      num('ratio', 'Ratio', 4, { min: 1, max: 20, step: 0.1 }),
+      num('knee', 'Knee', 30, { min: 0, max: 40, unit: 'dB' }),
+      num('attack', 'Attack', 3, { min: 0, max: 1000, unit: 'ms' }),
+      num('release', 'Release', 250, { min: 0, max: 1000, unit: 'ms' }),
+      num('makeup', 'Make-up Gain', 0, { min: 0, max: 30, unit: 'dB', step: 0.1 }),
+    ],
+  },
+  reverb: {
+    name: 'Reverb', kind: 'audio', category: 'Reverb',
+    params: [pct('mix', 'Mix', 30), num('decay', 'Decay', 2, { min: 0.1, max: 10, unit: 's', step: 0.1, animatable: false })],
+  },
+  delay: {
+    name: 'Delay (Echo)', kind: 'audio', category: 'Delay and Echo',
+    params: [num('time', 'Delay Time', 0.3, { min: 0.01, max: 5, unit: 's', step: 0.01 }), pct('feedback', 'Feedback', 35), pct('mix', 'Mix', 30)],
   },
 };
 
@@ -185,11 +282,14 @@ export function fixedEffectsFor(kind) {
   switch (kind) {
     case 'video':
     case 'image':
+    case 'nest':
       return ['motion', 'opacity'];
     case 'text':
       return ['text', 'motion', 'opacity'];
     case 'color':
       return ['fill', 'motion', 'opacity'];
+    case 'shape':
+      return ['shape', 'motion', 'opacity'];
     case 'adjustment':
       return ['opacity'];
     case 'audio':

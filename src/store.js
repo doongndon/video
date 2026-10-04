@@ -3,7 +3,7 @@
 // the whole project tree, so always look things up by id.
 
 import { Emitter } from './util.js';
-import { createProject } from './model.js';
+import { createProject, migrateProject, deriveSequenceMedia } from './model.js';
 
 const MAX_UNDO = 200;
 
@@ -28,7 +28,7 @@ class Store extends Emitter {
   }
 
   get seq() {
-    return this.project.sequence;
+    return this.project.sequences[this.project.activeSequenceId];
   }
 
   snapshot() {
@@ -111,7 +111,7 @@ class Store extends Emitter {
 
   /** Replace the whole project (open / new). Clears history. */
   loadProject(project) {
-    this.project = project;
+    this.project = migrateProject(project);
     this.undoStack = [];
     this.redoStack = [];
     this.pending = null;
@@ -126,7 +126,20 @@ class Store extends Emitter {
   }
 
   changed(reason) {
+    deriveSequenceMedia(this.project);
     this.emit('change', reason);
+  }
+
+  /** Switch the sequence shown in the Timeline / Program monitor (not an undoable edit). */
+  openSequence(id) {
+    if (!this.project.sequences[id] || this.project.activeSequenceId === id) return;
+    this.project.activeSequenceId = id;
+    this.selection = { clips: new Set(), transition: null, gap: null };
+    this.ui.playhead = 0;
+    this.changed('sequence');
+    this.emit('selection');
+    this.emit('playhead');
+    this.emit('sequence');
   }
 
   pruneSelection() {

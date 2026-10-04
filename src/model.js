@@ -7,13 +7,69 @@ import { EFFECTS, fixedEffectsFor } from './effects.js';
 export const DEFAULT_STILL_DURATION = 5;
 
 export function createProject(name = 'Untitled Project') {
-  return {
-    version: 1,
-    name,
-    media: {},
-    mediaOrder: [],
-    sequence: createSequence(),
+  const project = { version: 2, name, media: {}, mediaOrder: [], sequences: {}, activeSequenceId: null };
+  addSequenceToProject(project, createSequence());
+  return project;
+}
+
+/** Register a sequence in a project together with its project-panel item (kind 'sequence'). */
+export function addSequenceToProject(project, seq) {
+  project.sequences[seq.id] = seq;
+  const mid = `seqm_${seq.id}`;
+  project.media[mid] = {
+    id: mid, kind: 'sequence', sequenceId: seq.id, name: seq.name, duration: Math.max(sequenceDuration(seq), 1 / seq.fps),
+    width: seq.width, height: seq.height, fps: seq.fps, hasAudio: false, hasVideo: true, inPoint: null, outPoint: null, analyzed: true,
   };
+  project.mediaOrder.push(mid);
+  if (!project.activeSequenceId) project.activeSequenceId = seq.id;
+  return mid;
+}
+
+export const sequenceMediaId = (seqId) => `seqm_${seqId}`;
+
+/** Upgrade older single-sequence projects and make sure every sequence has its project item. */
+export function migrateProject(project) {
+  if (project.sequence && !project.sequences) {
+    const seq = project.sequence;
+    delete project.sequence;
+    project.sequences = {};
+    project.activeSequenceId = null;
+    addSequenceToProject(project, seq);
+  }
+  for (const seq of Object.values(project.sequences)) {
+    if (!project.media[sequenceMediaId(seq.id)]) addSequenceToProject(project, seq);
+  }
+  if (!project.sequences[project.activeSequenceId]) project.activeSequenceId = Object.keys(project.sequences)[0];
+  project.version = 2;
+  return project;
+}
+
+/** Recompute derived fields of sequence items (duration, size, audio presence). */
+export function deriveSequenceMedia(project) {
+  for (const m of Object.values(project.media)) {
+    if (m.kind !== 'sequence') continue;
+    const seq = project.sequences[m.sequenceId];
+    if (!seq) continue;
+    m.name = seq.name;
+    m.duration = Math.max(sequenceDuration(seq), 1 / seq.fps);
+    m.width = seq.width;
+    m.height = seq.height;
+    m.fps = seq.fps;
+    m.hasAudio = Object.values(seq.clips).some((c) => c.kind === 'audio');
+  }
+}
+
+/** True if sequence `outerId` contains (directly or through nests) sequence `innerId`. */
+export function sequenceContains(project, outerId, innerId, depth = 0) {
+  if (outerId === innerId) return true;
+  if (depth > 16) return true;
+  const seq = project.sequences[outerId];
+  if (!seq) return false;
+  for (const c of Object.values(seq.clips)) {
+    const m = c.mediaId && project.media[c.mediaId];
+    if (m?.kind === 'sequence' && sequenceContains(project, m.sequenceId, innerId, depth + 1)) return true;
+  }
+  return false;
 }
 
 export function createSequence({ name = 'Sequence 01', width = 1920, height = 1080, fps = 30, videoTracks = 3, audioTracks = 3 } = {}) {
@@ -184,9 +240,12 @@ export function mediaTimeAt(clip, t) {
   return clip.inPoint + (t - clip.start) * clip.speed;
 }
 
+/** Clips whose content runs in time (video, audio, nested sequences) — speed/slip/trim limits apply. */
+export const isTimed = (clip) => clip.kind === 'video' || clip.kind === 'audio' || clip.kind === 'nest';
+
 /** Media-backed clips are limited by source duration; generated clips are not. */
 export function isMediaBounded(clip, media) {
-  return (clip.kind === 'video' || clip.kind === 'audio') && media && Number.isFinite(media.duration);
+  return isTimed(clip) && media && Number.isFinite(media.duration);
 }
 
 export function clipsOnTrack(seq, trackId) {

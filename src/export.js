@@ -10,6 +10,7 @@ import {
   audioTracks, clipEnd, clipsOnTrack, evalEffect, mediaTimeAt, sequenceDuration, transitionExtents, videoTracks,
 } from './model.js';
 import { clamp, dbToGain, once } from './util.js';
+import { createChain } from './audio-fx.js';
 
 export const FORMATS = {
   mp4: { label: 'MP4 (H.264 / AAC)', ext: 'mp4', video: ['avc', 'hevc', 'vp9', 'av1'], audio: ['aac', 'opus'] },
@@ -39,40 +40,52 @@ class ExportProvider {
     return store.project.media[id];
   }
 
+  sequence(id) {
+    return store.project.sequences[id];
+  }
+
   image(id) {
     const rt = getRuntime(id);
     if (!rt.image) return { offline: true };
     return { img: rt.image, w: rt.image.naturalWidth, h: rt.image.naturalHeight, fit: true };
   }
 
-  videoFrame(clip) {
+  videoFrame(clip, mt, key = clip.id) {
     const st = mediaStatus(clip.mediaId);
     if (st !== 'ready') return { offline: true };
-    return this.frames.get(clip.id) || null;
+    return this.frames.get(key) || null;
   }
 
-  async prepare(seq, t) {
-    this.frames.clear();
+  /** Decode the exact frame of every visible video clip (recursing into nested sequences). */
+  async prepare(seq, t, prefix = '', depth = 0) {
+    if (depth === 0) this.frames.clear();
+    if (depth > 8) return;
     for (const tr of videoTracks(seq)) {
       if (tr.hidden) continue;
       for (const clip of clipsOnTrack(seq, tr.id)) {
-        if (clip.kind !== 'video' || clip.enabled === false || mediaStatus(clip.mediaId) !== 'ready') continue;
+        if ((clip.kind !== 'video' && clip.kind !== 'nest') || clip.enabled === false || mediaStatus(clip.mediaId) !== 'ready') continue;
         const { lead, tail } = transitionExtents(seq, clip);
         if (t < clip.start - lead || t >= clipEnd(clip) + tail) continue;
         const m = store.project.media[clip.mediaId];
         const maxT = Math.max(0, (m.duration || 0) - 1 / (m.fps || seq.fps));
         const mt = clamp(mediaTimeAt(clip, t), 0, maxT);
-        const f = await this.frameAt(clip, m, mt);
-        if (f) this.frames.set(clip.id, f);
+        if (clip.kind === 'nest') {
+          const inner = store.project.sequences[m.sequenceId];
+          if (inner) await this.prepare(inner, mt, `${prefix}${clip.id}/`, depth + 1);
+          continue;
+        }
+        const key = prefix + clip.id;
+        const f = await this.frameAt(clip, m, mt, key);
+        if (f) this.frames.set(key, f);
       }
     }
   }
 
-  async frameAt(clip, m, mt) {
-    let r = this.readers.get(clip.id);
+  async frameAt(clip, m, mt, key) {
+    let r = this.readers.get(key);
     if (!r) {
       r = await this.open(clip, m, mt);
-      this.readers.set(clip.id, r);
+      this.readers.set(key, r);
     }
     return r.get(mt);
   }
@@ -142,7 +155,7 @@ class ExportProvider {
 
 // ---------------------------------------------------------------- audio mix
 
-export async function renderAudioMix(seq, start, end, sampleRate = 48000, onProgress = () => {}) {
+export async function renderAudioMix(seq, start, end, sampleRate = 48000, onProgress = () => {}, depth = 0) {
   const length = Math.max(1, Math.ceil((end - start) * sampleRate));
   const ctx = new OfflineAudioContext(2, length, sampleRate);
   const master = ctx.createGain();
@@ -180,7 +193,9 @@ export async function renderAudioMix(seq, start, end, sampleRate = 48000, onProg
       m1 = mdur;
     }
     if (to <= from || m1 <= m0) continue;
-    const buffer = await decodeAudioRange(clip.mediaId, m0, m1);
+    const buffer = m.kind === 'sequence'
+      ? (depth < 8 && store.project.sequences[m.sequenceId] ? await renderAudioMix(store.project.sequences[m.sequenceId], m0, m1, sampleRate, () => {}, depth + 1) : null)
+      : await decodeAudioRange(clip.mediaId, m0, m1);
     done++;
     onProgress(done / jobs.length);
     if (!buffer) continue;
@@ -201,6 +216,9 @@ export async function renderAudioMix(seq, start, end, sampleRate = 48000, onProg
     src.playbackRate.value = clip.speed;
     const gain = ctx.createGain();
     const pan = ctx.createStereoPanner();
+    const chain = createChain(ctx, clip);
+    const chainAnimated = chain?.animated(clip);
+    chain?.apply(clip, Math.max(0, from - clip.start), Math.max(0, from - start), 'set');
     // automation at 100 Hz for volume keyframes, Amplify and crossfades
     const step = 0.01;
     let first = true;
@@ -223,9 +241,13 @@ export async function renderAudioMix(seq, start, end, sampleRate = 48000, onProg
       } else {
         gain.gain.linearRampToValueAtTime(g, at);
         pan.pan.linearRampToValueAtTime(clamp(bal, -1, 1), at);
+        if (chainAnimated) chain.apply(clip, clamp(tl, 0, clip.duration), at, 'ramp');
       }
     }
-    src.connect(gain).connect(pan).connect(bus);
+    if (chain) {
+      src.connect(gain).connect(chain.input);
+      chain.output.connect(pan).connect(bus);
+    } else src.connect(gain).connect(pan).connect(bus);
     src.start(Math.max(0, from - start), 0, (to - from) * clip.speed);
   }
   return ctx.startRendering();

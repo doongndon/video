@@ -6,7 +6,7 @@ import { runtime, mediaEvents, mediaStatus, importFiles } from '../media.js';
 import * as edit from '../edit.js';
 import {
   clipEnd, clipsOnTrack, videoTracks, audioTracks, getTrack, sequenceDuration, transitionsOnTrack,
-  mediaTimeAt, evalEffect, linkedClips, prevAdjacent, nextAdjacent, editPoints, isAnimated,
+  mediaTimeAt, evalEffect, linkedClips, prevAdjacent, nextAdjacent, editPoints, isAnimated, isTimed,
 } from '../model.js';
 import { EFFECTS, TRANSITIONS } from '../effects.js';
 import { h, clamp, EPS, formatTimecode, parseTimecode, snapFrame, dbToGain, modKey } from '../util.js';
@@ -25,6 +25,8 @@ const COLORS = {
   text: ['#a1518a', '#d07ab8'],
   color: ['#2f7680', '#53a9b5'],
   adjustment: ['#9a5f3c', '#cf8a5f'],
+  shape: ['#a1518a', '#d07ab8'],
+  nest: ['#6b7d2a', '#93a94a'],
 };
 
 export const timelineApi = {};
@@ -55,6 +57,7 @@ export function createTimeline() {
   const markerBtn = h('button.icon', { title: 'Add Marker (M)', onclick: () => edit.addMarker() }, '◆');
   const settingsBtn = h('button.icon', { title: 'Timeline display settings', onclick: (e) => showSettingsMenu(e) }, '⚙');
   const top = h('div.tl-top', tcEl, seqName, h('span.grow'), snapBtn, linkBtn, markerBtn, settingsBtn);
+  const seqTabs = h('div.seq-tabs');
 
   const headersInner = h('div.tl-headers-inner');
   const rulerSpacer = h('div.tl-ruler-spacer', h('span', { style: { color: 'var(--text-faint)', fontSize: '11px' } }, 'Tracks'));
@@ -67,7 +70,7 @@ export function createTimeline() {
   const zoomSlider = h('input', { type: 'range', min: 0, max: 1000, step: 1, title: 'Zoom' });
   const durEl = h('span', { style: { color: 'var(--text-faint)' } });
   const bottom = h('div.tl-bottom', h('span', '−'), zoomSlider, h('span', '+'), h('span.grow', { style: { flex: 1 } }), durEl);
-  const root = h('div.timeline', top, main, h('div', { style: { paddingLeft: '172px' } }, hscroll), bottom);
+  const root = h('div.timeline', seqTabs, top, main, h('div', { style: { paddingLeft: '172px' } }, hscroll), bottom);
 
   const staticCanvas = document.createElement('canvas');
 
@@ -224,6 +227,33 @@ export function createTimeline() {
       });
       headersInner.append(el);
     }
+  }
+
+  function renderSeqTabs() {
+    const p = store.project;
+    seqTabs.replaceChildren();
+    for (const id of p.mediaOrder) {
+      const m = p.media[id];
+      if (m?.kind !== 'sequence' || !p.sequences[m.sequenceId]) continue;
+      const sid = m.sequenceId;
+      const tab = h(`span.seq-tab${sid === p.activeSequenceId ? '.active' : ''}`, { title: 'Click to open · double-click to rename · right-click for options' }, p.sequences[sid].name);
+      tab.addEventListener('click', () => store.openSequence(sid));
+      tab.addEventListener('dblclick', async () => {
+        const n = await promptDialog('Rename Sequence', 'Name', p.sequences[sid].name);
+        if (n) store.transact('Rename Sequence', () => { store.project.sequences[sid].name = n; });
+      });
+      tab.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        showMenu([
+          { label: 'Open', action: () => store.openSequence(sid) },
+          { label: 'Rename…', action: () => tab.dispatchEvent(new Event('dblclick')) },
+          { label: 'Duplicate', action: () => edit.duplicateSequence(sid) },
+          { label: 'Delete', action: () => edit.deleteSequence(sid) },
+        ], e.clientX, e.clientY);
+      });
+      seqTabs.append(tab);
+    }
+    seqTabs.append(h('button.icon', { title: 'New Sequence', onclick: () => edit.newSequence() }, '+'));
   }
 
   function refreshTopBar() {
@@ -535,7 +565,7 @@ export function createTimeline() {
       ctx.fillRect(x, y, w, hh);
     }
     // in/out handle hints
-    if (m && Number.isFinite(m.duration) && (c.kind === 'video' || c.kind === 'audio') && !c.hold) {
+    if (m && Number.isFinite(m.duration) && isTimed(c) && !c.hold) {
       ctx.fillStyle = 'rgba(255,255,255,0.7)';
       if (c.inPoint < 1e-3) ctx.fillRect(x, y, 3, 3);
       if (Math.abs(c.inPoint + c.duration * c.speed - m.duration) < 1 / fps()) ctx.fillRect(x + w - 3, y, 3, 3);
@@ -883,7 +913,7 @@ export function createTimeline() {
         return;
       }
       case 'slip':
-        if (hit.area === 'clip' && (hit.clip.kind === 'video' || hit.clip.kind === 'audio')) {
+        if (hit.area === 'clip' && isTimed(hit.clip)) {
           store.selectClips([...edit.withLinked([hit.clip.id])]);
           beginSlip(x, hit.clip);
         }
@@ -1283,6 +1313,14 @@ export function createTimeline() {
     }
     if (hit.area === 'clip') {
       const c = hit.clip;
+      const nm = c.mediaId && store.project.media[c.mediaId];
+      if (nm?.kind === 'sequence') {
+        // open the nested sequence, parking the playhead at the matching time
+        const t = mediaTimeAt(c, store.ui.playhead >= c.start && store.ui.playhead < clipEnd(c) ? store.ui.playhead : c.start);
+        store.openSequence(nm.sequenceId);
+        store.setPlayhead(Math.max(0, t));
+        return;
+      }
       if (c.mediaId && store.project.media[c.mediaId] && (c.kind === 'video' || c.kind === 'audio' || c.kind === 'image')) {
         store.ui.sourceMediaId = c.mediaId;
         store.ui.sourceSeek = mediaTimeAt(c, store.ui.playhead >= c.start && store.ui.playhead < clipEnd(c) ? store.ui.playhead : c.start);
@@ -1333,9 +1371,11 @@ export function createTimeline() {
         '-',
         { label: 'Speed/Duration…', key: 'Ctrl+R', action: () => openSpeedDialog(ids) },
         { label: 'Add Frame Hold', disabled: c.kind !== 'video', action: () => edit.addFrameHold(c) },
-        { label: 'Reverse Speed', checked: !!c.reverse, disabled: !(c.kind === 'video' || c.kind === 'audio'), action: () => edit.setSpeed(ids, { speed: c.speed, reverse: !c.reverse }) },
+        { label: 'Reverse Speed', checked: !!c.reverse, disabled: !isTimed(c), action: () => edit.setSpeed(ids, { speed: c.speed, reverse: !c.reverse }) },
         '-',
         { label: 'Apply Default Transitions', key: 'Shift+D', action: () => edit.applyDefaultTransitions() },
+        { label: 'Nest…', action: async () => { const n = await promptDialog('Nested Sequence Name', 'Name', `Nested Sequence ${Object.keys(store.project.sequences).length}`); if (n != null) edit.nestSelection(n); } },
+        c.kind === 'nest' ? { label: 'Open Nested Sequence', action: () => store.openSequence(store.project.media[c.mediaId]?.sequenceId) } : null,
         { label: 'Scale to Fill Frame', disabled: !(c.kind === 'video' || c.kind === 'image'), action: () => scaleToFill(sel) },
         { label: 'Reset Motion', disabled: !c.effects.some((fx) => fx.type === 'motion'), action: () => { for (const x of sel) { const fx = x.effects.find((f) => f.type === 'motion'); if (fx) edit.resetEffect(x.id, fx.id); } } },
         '-',
@@ -1531,6 +1571,7 @@ export function createTimeline() {
   // ---------------------------------------------------------------- subscriptions
 
   function fullRefresh() {
+    renderSeqTabs();
     layoutRows();
     renderHeaders();
     refreshTopBar();

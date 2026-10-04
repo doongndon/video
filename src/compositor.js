@@ -7,7 +7,74 @@ import { clipsOnTrack, clipEnd, evalEffect, mediaTimeAt, transitionsOnTrack, vid
 import { EFFECTS } from './effects.js';
 import { clamp } from './util.js';
 
-const FILTER_FX = new Set(['brightnessContrast', 'basicColor', 'hueShift', 'gaussianBlur', 'blackWhite', 'sepia', 'invert']);
+const FILTER_FX = new Set(['brightnessContrast', 'basicColor', 'hueShift', 'gaussianBlur', 'blackWhite', 'sepia', 'invert', 'sharpen', 'findEdges', 'posterize']);
+const TRANSFORM_FX = new Set(['dropShadow', 'hFlip', 'vFlip', 'cameraShake']);
+const SVG_NS = 'http://www.w3.org/2000/svg';
+let svgRoot = null;
+
+/** Smooth pseudo-random wobble in [-1, 1] (sum of incommensurate sines). */
+function wobble(x) {
+  return (Math.sin(x * 2.1) + 0.6 * Math.sin(x * 3.7 + 1.3) + 0.3 * Math.sin(x * 5.3 + 2.1)) / 1.9;
+}
+
+/** Register (once) an SVG filter usable from canvas `ctx.filter = url(#id)`. */
+function svgFilter(kind, value) {
+  const id = `mf-${kind}-${String(value).replace(/[^\w-]/g, '')}`;
+  if (document.getElementById(id)) return `url(#${id})`;
+  if (!svgRoot) {
+    svgRoot = document.createElementNS(SVG_NS, 'svg');
+    svgRoot.setAttribute('width', '0');
+    svgRoot.setAttribute('height', '0');
+    svgRoot.style.position = 'absolute';
+    svgRoot.setAttribute('aria-hidden', 'true');
+    document.body.append(svgRoot);
+  }
+  const f = document.createElementNS(SVG_NS, 'filter');
+  f.id = id;
+  f.setAttribute('color-interpolation-filters', 'sRGB');
+  const el = (tag, attrs, parent = f) => {
+    const e = document.createElementNS(SVG_NS, tag);
+    for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v);
+    parent.append(e);
+    return e;
+  };
+  if (kind === 'sharpen') {
+    const k = value / 100;
+    el('feConvolveMatrix', { order: '3', kernelMatrix: `0 ${-k} 0 ${-k} ${1 + 4 * k} ${-k} 0 ${-k} 0`, preserveAlpha: 'true' });
+  } else if (kind === 'edges') {
+    el('feConvolveMatrix', { order: '3', kernelMatrix: '-1 -1 -1 -1 8 -1 -1 -1 -1', preserveAlpha: 'true' });
+  } else if (kind === 'posterize') {
+    const n = Math.max(2, value);
+    const table = Array.from({ length: n }, (_, i) => (i / (n - 1)).toFixed(4)).join(' ');
+    const ct = el('feComponentTransfer', {});
+    for (const ch of ['feFuncR', 'feFuncG', 'feFuncB']) el(ch, { type: 'discrete', tableValues: table }, ct);
+  } else if (kind === 'tint') {
+    const [b, w] = [value.slice(0, 6), value.slice(6, 12)];
+    const c = (hex, i) => (parseInt(hex.slice(i * 2, i * 2 + 2), 16) / 255).toFixed(4);
+    el('feColorMatrix', { type: 'saturate', values: '0' });
+    const ct = el('feComponentTransfer', {});
+    ['feFuncR', 'feFuncG', 'feFuncB'].forEach((ch, i) => el(ch, { type: 'table', tableValues: `${c(b, i)} ${c(w, i)}` }, ct));
+  }
+  svgRoot.append(f);
+  return `url(#${id})`;
+}
+
+let noiseTile = null;
+function grainTile() {
+  if (!noiseTile) {
+    noiseTile = document.createElement('canvas');
+    noiseTile.width = noiseTile.height = 256;
+    const ctx = noiseTile.getContext('2d');
+    const img = ctx.createImageData(256, 256);
+    for (let i = 0; i < img.data.length; i += 4) {
+      const v = Math.random() * 255;
+      img.data[i] = img.data[i + 1] = img.data[i + 2] = v;
+      img.data[i + 3] = 255;
+    }
+    ctx.putImageData(img, 0, 0);
+  }
+  return noiseTile;
+}
 
 function makeCanvas(w = 2, h = 2) {
   const c = document.createElement('canvas');
@@ -50,6 +117,9 @@ export class Compositor {
     this.keyer = null;
     this.onAsyncReady = onAsyncReady || (() => {});
     this.pendingFonts = new Set();
+    this.depth = 0;
+    this.prefix = '';
+    this.subs = new Map();
   }
 
   /**
@@ -62,6 +132,7 @@ export class Compositor {
     const W = seq.width;
     const H = seq.height;
     this.scale = scale;
+    this.frameT = t;
     this.seq = seq;
     this.provider = provider;
     ctx.save();
@@ -69,8 +140,10 @@ export class Compositor {
     ctx.globalAlpha = 1;
     ctx.globalCompositeOperation = 'source-over';
     ctx.filter = 'none';
-    ctx.fillStyle = background;
-    ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+    if (background) {
+      ctx.fillStyle = background;
+      ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+    } else ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
     ctx.setTransform(scale, 0, 0, scale, 0, 0);
 
     for (const track of videoTracks(seq)) {
@@ -184,7 +257,33 @@ export class Compositor {
       case 'video': {
         const m = this.provider.media(clip.mediaId);
         const mt = clampMediaTime(mediaTimeAt(clip, t), m);
-        return this.provider.videoFrame(clip, mt);
+        return this.provider.videoFrame(clip, mt, this.prefix + clip.id);
+      }
+      case 'nest': {
+        // nested sequence: render it (transparent background) into its own canvas
+        const m = this.provider.media(clip.mediaId);
+        const inner = m && this.provider.sequence?.(m.sequenceId);
+        if (!inner || this.depth >= 8) return null;
+        const mt = clampMediaTime(mediaTimeAt(clip, t), m);
+        const key = `${this.prefix}${clip.id}/`;
+        let sub = this.subs.get(key);
+        if (!sub) {
+          sub = new Compositor({ onAsyncReady: this.onAsyncReady });
+          sub.depth = this.depth + 1;
+          sub.prefix = key;
+          sub.canvas = makeCanvas();
+          if (this.subs.size > 32) this.subs.clear();
+          this.subs.set(key, sub);
+        }
+        const sc = clamp(this.scale * Math.max(W / inner.width, H / inner.height), 0.05, 2);
+        const cw = Math.max(2, Math.round(inner.width * sc));
+        const ch = Math.max(2, Math.round(inner.height * sc));
+        if (sub.canvas.width !== cw || sub.canvas.height !== ch) {
+          sub.canvas.width = cw;
+          sub.canvas.height = ch;
+        }
+        sub.render(sub.canvas.getContext('2d'), inner, mt, this.provider, { scale: cw / inner.width, background: null });
+        return { img: sub.canvas, w: inner.width, h: inner.height, fit: true };
       }
       case 'image':
         return this.provider.image(clip.mediaId);
@@ -193,12 +292,13 @@ export class Compositor {
         const color = fill ? evalEffect(fill, tl).color : '#000000';
         return { img: this.solid(color), w: W, h: H, fit: false };
       }
-      case 'text': {
-        const fx = clip.effects.find((e) => e.type === 'text');
+      case 'text':
+      case 'shape': {
+        const fx = clip.effects.find((e) => e.type === clip.kind);
         const motion = clip.effects.find((e) => e.type === 'motion');
         const sc = motion ? Math.abs(evalEffect(motion, tl).scale) / 100 : 1;
         const k = clamp(this.scale * Math.max(1, sc), 0.25, 4);
-        return this.textSource(evalEffect(fx, tl), k);
+        return clip.kind === 'text' ? this.textSource(evalEffect(fx, tl), k) : this.shapeSource(evalEffect(fx, tl), k);
       }
       default:
         return null;
@@ -216,6 +316,58 @@ export class Compositor {
       this.solidCache.set(color, c);
     }
     return c;
+  }
+
+  shapeSource(p, k) {
+    const key = 'shape:' + JSON.stringify(p) + '|' + k.toFixed(3);
+    const hit = this.textCache.get(key);
+    if (hit) return hit;
+    const sw = Math.max(0, p.strokeWidth || 0);
+    const isLine = p.shape === 'line';
+    const sw2 = isLine ? Math.max(1, sw) : sw;
+    const bw = Math.max(1, p.width);
+    const bh = isLine ? sw2 : Math.max(1, p.height);
+    const w = Math.ceil(bw + sw2 + 2);
+    const h = Math.ceil(bh + (isLine ? 2 : sw2 + 2));
+    const c = makeCanvas(Math.max(1, Math.ceil(w * k)), Math.max(1, Math.ceil(h * k)));
+    const ctx = c.getContext('2d');
+    ctx.scale(k, k);
+    const x0 = (w - bw) / 2;
+    const y0 = (h - bh) / 2;
+    ctx.beginPath();
+    if (p.shape === 'ellipse') ctx.ellipse(w / 2, h / 2, bw / 2, bh / 2, 0, 0, Math.PI * 2);
+    else if (p.shape === 'triangle') {
+      ctx.moveTo(w / 2, y0);
+      ctx.lineTo(x0 + bw, y0 + bh);
+      ctx.lineTo(x0, y0 + bh);
+      ctx.closePath();
+    } else if (isLine) {
+      ctx.moveTo(x0, h / 2);
+      ctx.lineTo(x0 + bw, h / 2);
+    } else roundRectPath(ctx, x0, y0, bw, bh, Math.min(p.radius || 0, bw / 2, bh / 2));
+    if (p.fillOn && !isLine) {
+      if (p.gradient) {
+        const a = ((p.gradAngle || 0) * Math.PI) / 180;
+        const dx = (Math.cos(a) * bw) / 2;
+        const dy = (Math.sin(a) * bh) / 2;
+        const g = ctx.createLinearGradient(w / 2 - dx, h / 2 - dy, w / 2 + dx, h / 2 + dy);
+        g.addColorStop(0, p.fill);
+        g.addColorStop(1, p.fill2);
+        ctx.fillStyle = g;
+      } else ctx.fillStyle = p.fill;
+      ctx.fill();
+    }
+    if (sw2 > 0 && (sw > 0 || isLine)) {
+      ctx.strokeStyle = isLine && !sw ? p.fill : p.strokeColor;
+      ctx.lineWidth = sw2;
+      ctx.lineJoin = 'round';
+      ctx.lineCap = 'round';
+      ctx.stroke();
+    }
+    const src = { img: c, w, h, fit: false };
+    if (this.textCache.size > 80) this.textCache.clear();
+    this.textCache.set(key, src);
+    return src;
   }
 
   textSource(p, k) {
@@ -258,7 +410,14 @@ export class Compositor {
     ctx.textBaseline = 'middle';
     ctx.lineJoin = 'round';
     const inner = w - pad * 2 - stroke * 2;
-    lines.forEach((line, i) => {
+    // typewriter reveal: show only the first N characters, laid out in their final positions
+    const total = Array.from(String(p.content ?? '')).length;
+    let remaining = p.reveal == null ? Infinity : Math.round((total * clamp(p.reveal, 0, 100)) / 100);
+    lines.forEach((full, i) => {
+      const chars = Array.from(full);
+      const line = remaining >= chars.length ? full : chars.slice(0, Math.max(0, remaining)).join('');
+      remaining -= chars.length + 1;
+      if (!line) return;
       const lw = widths[i];
       let x = pad + stroke + 2;
       if (p.align === 'center') x += (inner - 4 - lw) / 2;
@@ -281,7 +440,7 @@ export class Compositor {
   /** Logical size of a clip's source (for bounding boxes in the monitor). */
   sourceSize(clip, t) {
     const tl = t - clip.start;
-    if (clip.kind === 'text') {
+    if (clip.kind === 'text' || clip.kind === 'shape') {
       const src = this.getSourceSafe(clip, t, tl);
       return src ? { w: src.w, h: src.h, fit: false } : null;
     }
@@ -336,7 +495,8 @@ export class Compositor {
     let flipX = 1;
     let flipY = 1;
     const shadow = userFx.find((f) => f.type === 'dropShadow')?.v;
-    const stageFx = userFx.filter((f) => f.type !== 'dropShadow' && f.type !== 'hFlip' && f.type !== 'vFlip');
+    const shake = userFx.find((f) => f.type === 'cameraShake')?.v;
+    const stageFx = userFx.filter((f) => !TRANSFORM_FX.has(f.type));
     for (const f of userFx) {
       if (f.type === 'hFlip') flipX = -flipX;
       if (f.type === 'vFlip') flipY = -flipY;
@@ -366,8 +526,17 @@ export class Compositor {
       ctx.shadowBlur = shadow.softness * this.scale;
     }
     const s = (baseScale * motion.scale) / 100;
-    ctx.translate(motion.posX + (opts.offsetX || 0), motion.posY);
-    ctx.rotate((motion.rotation * Math.PI) / 180);
+    let shX = 0;
+    let shY = 0;
+    let shR = 0;
+    if (shake) {
+      const ph = t * shake.speed;
+      shX = shake.amount * wobble(ph);
+      shY = shake.amount * wobble(ph + 31.7);
+      shR = shake.rotation * wobble(ph + 77.1);
+    }
+    ctx.translate(motion.posX + (opts.offsetX || 0) + shX, motion.posY + shY);
+    ctx.rotate(((motion.rotation + shR) * Math.PI) / 180);
     ctx.scale(s * flipX, s * flipY);
     ctx.translate(-(motion.anchorX || 0) / (s || 1), -(motion.anchorY || 0) / (s || 1));
     ctx.drawImage(img, -src.w / 2, -src.h / 2, src.w, src.h);
@@ -423,6 +592,15 @@ export class Compositor {
           case 'invert':
             filters.push(`invert(${v.amount / 100})`);
             break;
+          case 'sharpen':
+            if (v.amount > 0) filters.push(svgFilter('sharpen', Math.round(v.amount)));
+            break;
+          case 'findEdges':
+            filters.push(svgFilter('edges', 0), 'invert(1)');
+            break;
+          case 'posterize':
+            filters.push(svgFilter('posterize', Math.round(clamp(v.levels, 2, 32))));
+            break;
         }
         continue;
       }
@@ -451,6 +629,68 @@ export class Compositor {
           cctx.globalCompositeOperation = 'source-atop';
           cctx.fillStyle = grad;
           cctx.fillRect(0, 0, w, h);
+          cctx.restore();
+          break;
+        }
+        case 'glow': {
+          if (v.radius <= 0 || v.intensity <= 0) break;
+          const actx = sizeCanvas(alt, w, h);
+          actx.filter = `blur(${Math.max(0.5, v.radius * ps)}px) brightness(1.15)`;
+          actx.drawImage(cur, 0, 0);
+          actx.filter = 'none';
+          cctx.save();
+          cctx.globalCompositeOperation = 'lighter';
+          cctx.globalAlpha = clamp(v.intensity / 100, 0, 1);
+          cctx.drawImage(alt, 0, 0);
+          cctx.restore();
+          break;
+        }
+        case 'filmGrain': {
+          if (v.amount <= 0) break;
+          const mask = sizeCanvas(this.small, w, h);
+          mask.drawImage(cur, 0, 0);
+          const frame = Math.floor((this.frameT || 0) * 30);
+          const ox = (frame * 97) % 256;
+          const oy = (frame * 57) % 256;
+          const pat = cctx.createPattern(grainTile(), 'repeat');
+          pat.setTransform(new DOMMatrix().translate(ox, oy).scale(Math.max(0.5, v.size * ps)));
+          cctx.save();
+          cctx.globalCompositeOperation = 'overlay';
+          cctx.globalAlpha = clamp(v.amount / 100, 0, 1);
+          cctx.fillStyle = pat;
+          cctx.fillRect(0, 0, w, h);
+          cctx.globalCompositeOperation = 'destination-in';
+          cctx.globalAlpha = 1;
+          cctx.drawImage(this.small, 0, 0);
+          cctx.restore();
+          break;
+        }
+        case 'tint': {
+          if (v.amount <= 0) break;
+          const actx = sizeCanvas(alt, w, h);
+          actx.filter = svgFilter('tint', `${v.black.slice(1, 7)}${v.white.slice(1, 7)}`);
+          actx.drawImage(cur, 0, 0);
+          actx.filter = 'none';
+          cctx.save();
+          cctx.globalCompositeOperation = 'source-atop';
+          cctx.globalAlpha = clamp(v.amount / 100, 0, 1);
+          cctx.drawImage(alt, 0, 0);
+          cctx.restore();
+          break;
+        }
+        case 'letterbox': {
+          const target = Math.max(0.1, v.aspect);
+          cctx.save();
+          cctx.fillStyle = v.color;
+          if (w / h < target) {
+            const bar = (h - w / target) / 2;
+            cctx.fillRect(0, 0, w, bar);
+            cctx.fillRect(0, h - bar, w, bar);
+          } else {
+            const bar = (w - h * target) / 2;
+            cctx.fillRect(0, 0, bar, h);
+            cctx.fillRect(w - bar, 0, bar, h);
+          }
           cctx.restore();
           break;
         }
@@ -523,7 +763,7 @@ export class Compositor {
       if (e.type === 'opacity') {
         opacity = v.opacity / 100;
         blend = v.blend;
-      } else if (!EFFECTS[e.type].fixed && e.type !== 'dropShadow' && e.type !== 'hFlip' && e.type !== 'vFlip') userFx.push({ type: e.type, v });
+      } else if (!EFFECTS[e.type].fixed && !TRANSFORM_FX.has(e.type)) userFx.push({ type: e.type, v });
     }
     if (!userFx.length) return;
     const cw = ctx.canvas.width;
@@ -616,6 +856,11 @@ function clampMediaTime(mt, media) {
   if (!media || !Number.isFinite(media.duration)) return Math.max(0, mt);
   const fps = media.fps || 30;
   return clamp(mt, 0, Math.max(0, media.duration - 1 / fps));
+}
+
+function roundRectPath(ctx, x, y, w, h, r) {
+  if (ctx.roundRect) ctx.roundRect(x, y, w, h, r);
+  else ctx.rect(x, y, w, h);
 }
 
 function roundRect(ctx, x, y, w, h, r) {

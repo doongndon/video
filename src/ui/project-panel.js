@@ -91,7 +91,10 @@ export function createProjectPanel() {
       { label: 'Color Matte…', action: openColorMatteDialog },
       { label: 'Black Video', action: () => createSyntheticMedia('color', { name: 'Black Video', color: '#000000' }) },
       { label: 'Adjustment Layer', action: () => createSyntheticMedia('adjustment', { name: 'Adjustment Layer' }) },
+      { label: 'Sequence…', action: () => edit.newSequence() },
       { label: 'Text (at playhead)', action: () => edit.addTextClip() },
+      { label: 'Rectangle (at playhead)', action: () => edit.addShapeClip('rectangle') },
+      { label: 'Ellipse (at playhead)', action: () => edit.addShapeClip('ellipse') },
     ];
   }
 
@@ -170,7 +173,8 @@ export function createProjectPanel() {
     } else if (m.kind === 'color') {
       thumb.style.background = m.color;
     } else {
-      thumb.textContent = { audio: '♪', video: '▶', image: '🖼', adjustment: 'ADJ', color: '' }[m.kind] || '';
+      thumb.textContent = { audio: '♪', video: '▶', image: '🖼', adjustment: 'ADJ', color: '', sequence: 'SEQ' }[m.kind] || '';
+      if (m.kind === 'sequence') thumb.style.background = '#3d4a18';
     }
     const badge = st === 'offline' || st === 'error' ? h('span.badge.offline', st === 'error' ? 'Error' : 'Offline') : st === 'loading' ? h('span.badge.loading', 'Loading…') : null;
     const metaParts = [];
@@ -201,6 +205,7 @@ export function createProjectPanel() {
       store.emit('media-selection');
     });
     el.addEventListener('dblclick', () => {
+      if (m.kind === 'sequence') return store.openSequence(m.sequenceId);
       if (m.kind === 'color' || m.kind === 'adjustment') return;
       if (st === 'offline' || st === 'error') return relinkOne(id);
       openInSource(id);
@@ -223,7 +228,22 @@ export function createProjectPanel() {
         store.ui.selectedMedia.add(id);
         render();
       }
-      const real = m.kind !== 'color' && m.kind !== 'adjustment';
+      const real = m.kind !== 'color' && m.kind !== 'adjustment' && m.kind !== 'sequence';
+      if (m.kind === 'sequence') {
+        showMenu([
+          { label: 'Open in Timeline', action: () => store.openSequence(m.sequenceId) },
+          { label: 'Insert at Playhead', disabled: m.sequenceId === store.seq.id, action: () => edit.placeMedia(id, { mode: 'insert' }) },
+          { label: 'Overwrite at Playhead (Nest)', disabled: m.sequenceId === store.seq.id, action: () => edit.placeMedia(id, { mode: 'overwrite' }) },
+          '-',
+          { label: 'Rename…', action: async () => {
+            const n = await promptDialog('Rename Sequence', 'Name', m.name);
+            if (n) store.transact('Rename Sequence', () => { store.project.sequences[m.sequenceId].name = n; });
+          } },
+          { label: 'Duplicate', action: () => edit.duplicateSequence(m.sequenceId) },
+          { label: 'Delete Sequence', action: () => edit.deleteSequence(m.sequenceId) },
+        ], e.clientX, e.clientY);
+        return;
+      }
       showMenu([
         { label: 'Open in Source Monitor', disabled: !real || st !== 'ready', action: () => openInSource(id) },
         { label: 'Insert at Playhead', key: ',', disabled: st !== 'ready', action: () => edit.placeMedia(id, { mode: 'insert' }) },

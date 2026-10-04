@@ -8,6 +8,7 @@ import {
   sequenceDuration, transitionsOnTrack,
 } from './model.js';
 import { Emitter, clamp, dbToGain, snapFrame } from './util.js';
+import { createChain, chainSignature } from './audio-fx.js';
 
 const MAX_VIDEO_ELEMENTS = 12;
 const MAX_AUDIO_ELEMENTS = 16;
@@ -23,22 +24,23 @@ class Pool {
     this.free = [];
   }
 
-  get(clipId) {
-    return this.byClip.get(clipId);
+  get(key) {
+    return this.byClip.get(key);
   }
 
-  acquire(clip, onReady) {
-    let e = this.byClip.get(clip.id);
+  /** Get the element for a clip instance. key = clip id, prefixed by nest path for nested clips. */
+  acquire(clip, key, onReady) {
+    let e = this.byClip.get(key);
     if (e) {
       e.used = performance.now();
       if (e.mediaId !== clip.mediaId) this.setSource(e, clip.mediaId);
       return e;
     }
     e = this.free.pop() || this.create(onReady);
-    e.clipId = clip.id;
+    e.clipId = key;
     e.used = performance.now();
     if (e.mediaId !== clip.mediaId) this.setSource(e, clip.mediaId);
-    this.byClip.set(clip.id, e);
+    this.byClip.set(key, e);
     return e;
   }
 
@@ -137,10 +139,11 @@ class Playback extends Emitter {
     if (!this._provider) {
       this._provider = {
         media: (id) => store.project.media[id],
-        videoFrame: (clip) => {
+        sequence: (id) => store.project.sequences[id],
+        videoFrame: (clip, mt, key = clip.id) => {
           const st = mediaStatus(clip.mediaId);
           if (st === 'offline' || st === 'error' || st === 'missing') return { offline: true };
-          const e = this.videoPool.get(clip.id);
+          const e = this.videoPool.get(key);
           if (!e || e.el.readyState < 2) return null;
           const m = store.project.media[clip.mediaId];
           return { img: e.el, w: m?.width || e.el.videoWidth, h: m?.height || e.el.videoHeight, fit: true };
@@ -332,36 +335,62 @@ class Playback extends Emitter {
     }
   }
 
-  /** Align media elements with time t. */
+  /** Align media elements (including those inside nested sequences) with time t. */
   sync(t) {
     const seq = store.seq;
-    const fps = seq.fps;
-    const playing = this.playing && this.rate > 0;
     const keepV = new Set();
     const keepA = new Set();
+    // track buses of the active sequence carry track volume / pan / mute / solo
     const anySolo = audioTracks(seq).some((tr) => tr.solo);
+    if (this.audio) {
+      for (const tr of audioTracks(seq)) {
+        const bus = this.trackBus(tr.id);
+        const audible = !tr.muted && (!anySolo || tr.solo);
+        bus.gain.gain.value = audible ? dbToGain(tr.volume || 0) : 0;
+        bus.pan.pan.value = clamp((tr.pan || 0) / 100, -1, 1);
+      }
+      this.audio.master.gain.value = dbToGain(seq.masterVolume || 0);
+    }
+    this.visitSequence(seq, t, '', 0, { keepV, keepA, speed: 1, video: true, audio: true, busTrackId: null, gain: 1, audible: true, playing: true });
+    this.videoPool.trim(keepV);
+    this.audioPool.trim(keepA);
+  }
 
-    const visit = (clip, kind, track) => {
+  visitSequence(seq, t, prefix, depth, ctx) {
+    const fps = seq.fps;
+    const anySolo = audioTracks(seq).some((tr) => tr.solo);
+    const playingFwd = this.playing && this.rate > 0 && ctx.playing;
+
+    const span = (clip) => {
       const { lead, tail } = transitionExtents(seq, clip);
       const s = clip.start - lead;
       const e = clipEnd(clip) + tail;
       const active = t >= s && t < e;
       const preroll = !active && t < s && s - t <= PREROLL && this.playing;
-      if (!active && !preroll) return;
-      if (mediaStatus(clip.mediaId) !== 'ready') return;
-      const pool = kind === 'video' ? this.videoPool : this.audioPool;
-      const entry = pool.acquire(clip, this.requestRender);
-      (kind === 'video' ? keepV : keepA).add(clip.id);
-      const m = store.project.media[clip.mediaId];
-      const raw = mediaTimeAt(clip, active ? t : s);
+      return { s, active, preroll };
+    };
+
+    const mediaTime = (clip, m, at) => {
+      const raw = mediaTimeAt(clip, at);
       const maxT = Number.isFinite(m?.duration) ? Math.max(0, m.duration - 1 / (m.fps || fps)) : Infinity;
-      const mt = clamp(raw, 0, maxT);
-      const outside = raw < 0 || raw > maxT;
+      return { mt: clamp(raw, 0, maxT), outside: raw < 0 || raw > maxT };
+    };
+
+    const visit = (clip, kind, track) => {
+      const w = span(clip);
+      if (!w.active && !w.preroll) return;
+      if (mediaStatus(clip.mediaId) !== 'ready') return;
+      const key = prefix + clip.id;
+      const pool = kind === 'video' ? this.videoPool : this.audioPool;
+      const entry = pool.acquire(clip, key, this.requestRender);
+      (kind === 'video' ? ctx.keepV : ctx.keepA).add(key);
+      const m = store.project.media[clip.mediaId];
+      const { mt, outside } = mediaTime(clip, m, w.active ? t : w.s);
       const el = entry.el;
-      if (kind === 'audio') this.updateAudioNodes(entry, clip, track, t, anySolo, active);
-      const canRoll = active && playing && !clip.hold && !clip.reverse && !outside && clip.enabled !== false;
+      if (kind === 'audio') this.updateAudioNodes(entry, seq, clip, track, t, anySolo, w.active, ctx);
+      const canRoll = w.active && playingFwd && !clip.hold && !clip.reverse && !outside && clip.enabled !== false;
       if (canRoll) {
-        const r = clamp(clip.speed * this.rate, 0.0625, 16);
+        const r = clamp(clip.speed * ctx.speed * this.rate, 0.0625, 16);
         if (Math.abs(el.playbackRate - r) > 1e-3) el.playbackRate = r;
         const drift = el.currentTime - mt;
         if (el.paused) {
@@ -383,49 +412,89 @@ class Playback extends Emitter {
       }
     };
 
-    for (const tr of videoTracks(seq)) {
-      if (tr.hidden) continue;
-      for (const c of clipsOnTrack(seq, tr.id)) if (c.kind === 'video' && c.enabled !== false) visit(c, 'video', tr);
+    /** Recurse into a nested sequence clip. */
+    const nest = (clip, track, kind) => {
+      if (depth >= 8) return;
+      const w = span(clip);
+      if (!w.active && !w.preroll) return;
+      const m = store.project.media[clip.mediaId];
+      const inner = m && store.project.sequences[m.sequenceId];
+      if (!inner) return;
+      const { mt } = mediaTime(clip, m, w.active ? t : w.s);
+      const sub = {
+        ...ctx,
+        speed: ctx.speed * clip.speed,
+        video: kind === 'video',
+        audio: kind === 'audio',
+        playing: ctx.playing && w.active && !clip.hold && !clip.reverse && clip.enabled !== false,
+      };
+      if (kind === 'audio') {
+        const trackAudible = depth === 0 ? true : !track.muted && (!anySolo || track.solo);
+        sub.busTrackId = ctx.busTrackId || track.id;
+        sub.audible = ctx.audible && trackAudible && clip.enabled !== false && w.active && !clip.hold && !clip.reverse;
+        sub.gain = ctx.gain * (depth === 0 ? 1 : dbToGain(track.volume || 0)) * clipGain(seq, clip, t);
+      }
+      this.visitSequence(inner, mt, `${prefix}${clip.id}/`, depth + 1, sub);
+    };
+
+    if (ctx.video) {
+      for (const tr of videoTracks(seq)) {
+        if (tr.hidden) continue;
+        for (const c of clipsOnTrack(seq, tr.id)) {
+          if (c.enabled === false) continue;
+          if (c.kind === 'video') visit(c, 'video', tr);
+          else if (c.kind === 'nest') nest(c, tr, 'video');
+        }
+      }
     }
-    for (const tr of audioTracks(seq)) {
-      for (const c of clipsOnTrack(seq, tr.id)) if (c.kind === 'audio') visit(c, 'audio', tr);
+    if (ctx.audio) {
+      for (const tr of audioTracks(seq)) {
+        for (const c of clipsOnTrack(seq, tr.id)) {
+          if (c.kind !== 'audio') continue;
+          if (store.project.media[c.mediaId]?.kind === 'sequence') nest(c, tr, 'audio');
+          else visit(c, 'audio', tr);
+        }
+      }
     }
-    this.videoPool.trim(keepV);
-    this.audioPool.trim(keepA);
-    if (this.audio) this.audio.master.gain.value = dbToGain(seq.masterVolume || 0);
   }
 
-  updateAudioNodes(entry, clip, track, t, anySolo, active) {
+  updateAudioNodes(entry, seq, clip, track, t, anySolo, active, ctx) {
     const a = this.ensureAudio();
     if (!entry.nodes) {
       const src = a.ctx.createMediaElementSource(entry.el);
       const gain = a.ctx.createGain();
       const pan = a.ctx.createStereoPanner();
       src.connect(gain).connect(pan);
-      entry.nodes = { src, gain, pan, bus: null };
+      entry.nodes = { src, gain, pan, bus: null, chain: null, chainSig: '' };
     }
-    const bus = this.trackBus(track.id);
+    // (re)build the clip's audio effect chain when its structure changes
+    const sig = chainSignature(clip);
+    if (sig !== entry.nodes.chainSig) {
+      const n = entry.nodes;
+      try { n.gain.disconnect(); } catch { /* not connected */ }
+      n.chain?.disconnect();
+      n.chain = sig ? createChain(a.ctx, clip) : null;
+      if (n.chain) {
+        n.gain.connect(n.chain.input);
+        n.chain.output.connect(n.pan);
+      } else n.gain.connect(n.pan);
+      n.chainSig = sig;
+    }
+    entry.nodes.chain?.apply(clip, clamp(t - clip.start, 0, clip.duration), 0, 'now');
+    // nested audio is routed to the bus of the outer track that holds the nest
+    const bus = this.trackBus(ctx.busTrackId || track.id);
     if (entry.nodes.bus !== bus) {
       try { entry.nodes.pan.disconnect(); } catch { /* not connected */ }
       entry.nodes.pan.connect(bus.gain);
       entry.nodes.bus = bus;
     }
-    const audible = !track.muted && (!anySolo || track.solo);
-    bus.gain.gain.value = audible ? dbToGain(track.volume || 0) : 0;
-    bus.pan.pan.value = clamp((track.pan || 0) / 100, -1, 1);
-
     let g = 0;
     let p = 0;
-    if (active && clip.enabled !== false && !clip.reverse && !clip.hold) {
-      const tl = t - clip.start;
-      let db = 0;
-      for (const fx of clip.effects) {
-        if (!fx.enabled) continue;
-        if (fx.type === 'volume') db += evalEffect(fx, tl).level;
-        else if (fx.type === 'gain') db += evalEffect(fx, tl).gain;
-        else if (fx.type === 'panner') p = evalEffect(fx, tl).balance / 100;
-      }
-      g = dbToGain(db) * audioTransitionGain(store.seq, clip, t);
+    if (active && ctx.audible && clip.enabled !== false && !clip.reverse && !clip.hold) {
+      const nestedTrack = ctx.busTrackId ? (!track.muted && (!anySolo || track.solo) ? dbToGain(track.volume || 0) : 0) : 1;
+      g = clipGain(seq, clip, t) * ctx.gain * nestedTrack;
+      const pfx = clip.effects.find((fx) => fx.type === 'panner' && fx.enabled);
+      if (pfx) p = evalEffect(pfx, t - clip.start).balance / 100;
     }
     entry.nodes.gain.gain.setTargetAtTime(g, a.ctx.currentTime, 0.01);
     entry.nodes.pan.pan.value = clamp(p, -1, 1);
@@ -437,6 +506,18 @@ class Playback extends Emitter {
     this.audioPool.reset();
     this.requestRender();
   }
+}
+
+/** Linear gain of an audio clip at time t: Volume + Amplify + crossfades. */
+export function clipGain(seq, clip, t) {
+  const tl = t - clip.start;
+  let db = 0;
+  for (const fx of clip.effects) {
+    if (!fx.enabled) continue;
+    if (fx.type === 'volume') db += evalEffect(fx, tl).level;
+    else if (fx.type === 'gain') db += evalEffect(fx, tl).gain;
+  }
+  return dbToGain(db) * audioTransitionGain(seq, clip, t);
 }
 
 /** Gain multiplier from audio transitions touching a clip at time t. */

@@ -39,7 +39,7 @@ export function getRuntime(id) {
 export function mediaStatus(id) {
   const m = store.project.media[id];
   if (!m) return 'missing';
-  if (m.kind === 'color' || m.kind === 'adjustment') return 'ready';
+  if (m.kind === 'color' || m.kind === 'adjustment' || m.kind === 'sequence') return 'ready';
   return getRuntime(id).status;
 }
 
@@ -461,13 +461,25 @@ export function createSyntheticMedia(kind, { name, color, width, height } = {}) 
 }
 
 export function removeMedia(ids) {
+  const p = store.project;
+  const seqIds = ids.map((id) => p.media[id]).filter((m) => m?.kind === 'sequence').map((m) => m.sequenceId);
+  if (seqIds.length && seqIds.length >= Object.keys(p.sequences).length) {
+    store.toast('A project needs at least one sequence');
+    ids = ids.filter((id) => p.media[id]?.kind !== 'sequence');
+    seqIds.length = 0;
+  }
   store.transact('Clear media', () => {
     for (const id of ids) {
-      delete store.project.media[id];
-      store.project.mediaOrder = store.project.mediaOrder.filter((m) => m !== id);
-      for (const c of Object.values(store.seq.clips)) if (c.mediaId === id) delete store.seq.clips[c.id];
+      delete p.media[id];
+      p.mediaOrder = p.mediaOrder.filter((m) => m !== id);
+      for (const sq of Object.values(p.sequences)) {
+        for (const c of Object.values(sq.clips)) if (c.mediaId === id) delete sq.clips[c.id];
+      }
     }
+    for (const sid of seqIds) delete p.sequences[sid];
+    if (!p.sequences[p.activeSequenceId]) p.activeSequenceId = Object.keys(p.sequences)[0];
   });
+  store.pruneSelection();
   for (const id of ids) {
     const rt = runtime.get(id);
     if (rt?.url) URL.revokeObjectURL(rt.url);

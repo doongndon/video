@@ -6,7 +6,7 @@ import { h, formatTimecode, parseTimecode, formatBytes, downloadBlob, clamp } fr
 import { openModal, formRow, toast } from './common.js';
 import { FORMATS, exportRange, exportSequence, exportFrame } from '../export.js';
 import { createSyntheticMedia, detectScenes, mediaStatus } from '../media.js';
-import { clipEnd, clipsOnTrack, createClip, createTrack, renameTracks, videoTracks } from '../model.js';
+import { clipEnd, clipsOnTrack, createClip, createTrack, renameTracks, videoTracks, isTimed } from '../model.js';
 
 // ---------------------------------------------------------------- speed / duration
 
@@ -15,7 +15,7 @@ export function openSpeedDialog(ids) {
   const clips = ids.map((id) => s.clips[id]).filter(Boolean);
   if (!clips.length) return;
   const c = clips[0];
-  const timed = c.kind === 'video' || c.kind === 'audio';
+  const timed = isTimed(c);
   const speed = h('input', { type: 'number', value: Math.round(c.speed * 10000) / 100, min: 1, max: 10000, step: 1, style: { width: '90px' }, disabled: !timed });
   const dur = h('input', { type: 'text', value: formatTimecode(c.duration, s.fps), style: { width: '110px' } });
   const linkBox = h('input', { type: 'checkbox', checked: true, disabled: !timed });

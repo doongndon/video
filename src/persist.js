@@ -81,12 +81,12 @@ export async function restoreSession() {
     const json = await tx('kv', 'readonly', (s) => s.get('project'));
     if (!json) return false;
     const project = JSON.parse(json);
-    if (!project?.sequence) return false;
+    if (!project?.sequence && !project?.sequences) return false;
     store.loadProject(project);
     const pending = [];
-    for (const id of project.mediaOrder) {
-      const m = project.media[id];
-      if (!m || m.kind === 'color' || m.kind === 'adjustment') continue;
+    for (const id of store.project.mediaOrder) {
+      const m = store.project.media[id];
+      if (!m || ['color', 'adjustment', 'sequence'].includes(m.kind)) continue;
       const file = await tx('files', 'readonly', (s) => s.get(id)).catch(() => null);
       if (file) {
         savedFiles.add(id);
@@ -129,11 +129,11 @@ export function saveProjectFile() {
 export async function openProjectFile(file) {
   const data = JSON.parse(await file.text());
   const project = data.project || data;
-  if (!project?.sequence?.tracks || !project.media) throw new Error('Not a Montage project file');
+  if (!(project?.sequence?.tracks || project?.sequences) || !project.media) throw new Error('Not a Montage project file');
   for (const rt of runtime.values()) if (rt.url) URL.revokeObjectURL(rt.url);
   runtime.clear();
   store.loadProject(project);
-  for (const id of project.mediaOrder) getRuntime(id).status = project.media[id]?.kind === 'color' || project.media[id]?.kind === 'adjustment' ? 'ready' : 'offline';
+  for (const id of store.project.mediaOrder) getRuntime(id).status = ['color', 'adjustment', 'sequence'].includes(store.project.media[id]?.kind) ? 'ready' : 'offline';
   store.changed('media');
 }
 
@@ -142,7 +142,7 @@ export async function relinkFromFiles(files) {
   let linked = 0;
   for (const id of store.project.mediaOrder) {
     const m = store.project.media[id];
-    if (!m || getRuntime(id).status === 'ready' || m.kind === 'color' || m.kind === 'adjustment') continue;
+    if (!m || getRuntime(id).status === 'ready' || ['color', 'adjustment', 'sequence'].includes(m.kind)) continue;
     const match = files.find((f) => f.name === m.name && (!m.size || f.size === m.size)) || files.find((f) => f.name === m.name);
     if (match) {
       await attachFile(id, match);

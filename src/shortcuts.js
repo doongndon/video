@@ -107,6 +107,7 @@ export function installShortcuts() {
         else run = c.toggleSnap;
         break;
       case 'KeyF': if (!mod) run = c.matchFrame; break;
+      case 'KeyN': if (mod) run = c.newSequence; break;
       case 'Equal':
       case 'NumpadAdd':
         run = c.zoomIn;

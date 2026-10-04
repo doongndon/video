@@ -6,7 +6,7 @@ import { playback } from './playback.js';
 import * as edit from './edit.js';
 import { createSyntheticMedia, importFiles, mediaStatus, runtime, peakInRange } from './media.js';
 import { saveProjectFile, openProjectFile, clearSession, relinkFromFiles, setAutosave, saveProjectNow } from './persist.js';
-import { createProject, clipEnd, clipsOnTrack, editPoints, sequenceDuration, videoTracks, mediaTimeAt } from './model.js';
+import { createProject, clipEnd, clipsOnTrack, editPoints, sequenceDuration, videoTracks, mediaTimeAt, isTimed } from './model.js';
 import { snapFrame, EPS } from './util.js';
 import { sourceApi } from './ui/source-monitor.js';
 import { programApi } from './ui/program-monitor.js';
@@ -150,7 +150,7 @@ export const commands = {
     if (c) edit.addFrameHold(c);
   },
   reverse: () => {
-    const s = sel().filter((c) => c.kind === 'video' || c.kind === 'audio');
+    const s = sel().filter(isTimed);
     if (s.length) edit.setSpeed(s.map((c) => c.id), { speed: s[0].speed, reverse: !s[0].reverse });
   },
   insert: () => sourceApi.insert?.(),
@@ -169,6 +169,14 @@ export const commands = {
 
   // ---- sequence
   sequenceSettings: () => openSequenceSettings(),
+  newSequence: () => edit.newSequence(),
+  duplicateSequence: () => edit.duplicateSequence(),
+  deleteSequence: () => edit.deleteSequence(store.seq.id),
+  nest: async () => {
+    if (!sel().length) return toast('Select clips to nest');
+    const n = await promptDialog('Nested Sequence Name', 'Name', `Nested Sequence ${Object.keys(store.project.sequences).length}`);
+    if (n != null) edit.nestSelection(n);
+  },
   addEdit: () => edit.addEdit(),
   addEditAll: () => edit.addEdit({ allTracks: true }),
   applyVideoTransition: () => edit.applyDefaultTransitions({ video: true, audio: false }),
@@ -213,6 +221,10 @@ export const commands = {
 
   // ---- graphics
   newText: () => edit.addTextClip(),
+  newRectangle: () => edit.addShapeClip('rectangle'),
+  newEllipse: () => edit.addShapeClip('ellipse'),
+  newTriangle: () => edit.addShapeClip('triangle'),
+  newLine: () => edit.addShapeClip('line'),
   newColorMatte: () => openColorMatteDialog(),
   newAdjustment: () => createSyntheticMedia('adjustment', { name: 'Adjustment Layer' }),
   newBlack: () => createSyntheticMedia('color', { name: 'Black Video', color: '#000000' }),

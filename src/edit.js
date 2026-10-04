@@ -6,7 +6,8 @@ import { uid, EPS, clamp, snapFrame, deepClone } from './util.js';
 import {
   setParamValue, createClip, createTrack, clipEnd, clipsOnTrack, linkedClips, getTrack, videoTracks, audioTracks,
   sequenceDuration, prevAdjacent, nextAdjacent, shiftClipKeyframes, scaleClipKeyframes, renameTracks,
-  clampTransitionDuration, trackKindForClip, DEFAULT_STILL_DURATION, createEffect,
+  clampTransitionDuration, trackKindForClip, DEFAULT_STILL_DURATION, createEffect, isTimed,
+  addSequenceToProject, createSequence, sequenceContains, sequenceMediaId,
 } from './model.js';
 import { DEFAULT_AUDIO_TRANSITION, DEFAULT_VIDEO_TRANSITION, TRANSITIONS, EFFECTS } from './effects.js';
 
@@ -162,6 +163,10 @@ export function placeMedia(mediaId, opts) {
   const m = media(mediaId);
   if (!m) return [];
   const s = seq();
+  if (m.kind === 'sequence' && sequenceContains(store.project, m.sequenceId, s.id)) {
+    store.toast('A sequence cannot be nested inside itself');
+    return [];
+  }
   const mode = opts.mode || 'overwrite';
   const start = q(Math.max(0, opts.start ?? store.ui.playhead));
   const inPoint = opts.inPoint ?? m.inPoint ?? 0;
@@ -169,7 +174,7 @@ export function placeMedia(mediaId, opts) {
   if (m.duration == null && outPoint - inPoint <= 0) outPoint = inPoint + DEFAULT_STILL_DURATION;
   const duration = Math.max(fd(), outPoint - inPoint);
   const wantVideo = opts.video !== false && m.kind !== 'audio';
-  const wantAudio = opts.audio !== false && (m.kind === 'audio' || (m.kind === 'video' && m.hasAudio));
+  const wantAudio = opts.audio !== false && (m.kind === 'audio' || ((m.kind === 'video' || m.kind === 'sequence') && m.hasAudio));
 
   const vTrack = wantVideo ? getTrack(s, opts.vTrackId) || targetTrack('video') : null;
   const aTrack = wantAudio ? getTrack(s, opts.aTrackId) || targetTrack('audio') : null;
@@ -190,7 +195,7 @@ export function placeMedia(mediaId, opts) {
       rawClearRangeMulti(trackIds, start, start + duration);
     }
     const created = [];
-    const clipKind = m.kind === 'video' ? 'video' : m.kind;
+    const clipKind = m.kind === 'sequence' ? 'nest' : m.kind;
     if (vTrack) {
       const c = createClip(s, { kind: clipKind, trackId: vTrack.id, mediaId, name: m.name, start, duration, inPoint, linkId, color: m.color });
       s.clips[c.id] = c;
@@ -231,6 +236,37 @@ export function addTextClip({ start = store.ui.playhead, x, y, content } = {}) {
     if (x != null) motion.params.posX.value = Math.round(x);
     if (y != null) motion.params.posY.value = Math.round(y);
     if (content) c.effects.find((e) => e.type === 'text').params.content.value = content;
+    s.clips[c.id] = c;
+    store.selectClips([c.id]);
+    return c.id;
+  });
+}
+
+/** Create a shape clip (rectangle / ellipse / triangle / line) at the playhead. */
+export function addShapeClip(shape = 'rectangle', { start = store.ui.playhead } = {}) {
+  const s = seq();
+  start = q(start);
+  const dur = DEFAULT_STILL_DURATION;
+  const tracks = videoTracks(s).filter((t) => !t.locked);
+  let track = tracks.find((t, i) => i > 0 && !clipsOnTrack(s, t.id).some((c) => c.start < start + dur && clipEnd(c) > start));
+  return store.transact('New Shape', () => {
+    if (!track) {
+      track = createTrack('video', videoTracks(s).length);
+      const lastVideoIdx = s.tracks.findLastIndex((t) => t.kind === 'video');
+      s.tracks.splice(lastVideoIdx + 1, 0, track);
+      renameTracks(s);
+    }
+    const c = createClip(s, { kind: 'shape', trackId: track.id, name: shape[0].toUpperCase() + shape.slice(1), start, duration: dur });
+    const fx = c.effects.find((e) => e.type === 'shape');
+    fx.params.shape.value = shape;
+    if (shape === 'ellipse') {
+      fx.params.width.value = 400;
+      fx.params.height.value = 400;
+    }
+    if (shape === 'line') {
+      fx.params.strokeWidth.value = 8;
+      fx.params.height.value = 8;
+    }
     s.clips[c.id] = c;
     store.selectClips([c.id]);
     return c.id;
@@ -408,7 +444,7 @@ export function rawMoveClips(ids, dt, dTrackVideo, dTrackAudio, { mode = 'overwr
 export function trimLimits(c, edge, { ripple = false, rolling = false } = {}) {
   const s = seq();
   const m = media(c.mediaId);
-  const bounded = (c.kind === 'video' || c.kind === 'audio') && m && Number.isFinite(m.duration) && !c.hold;
+  const bounded = isTimed(c) && m && Number.isFinite(m.duration) && !c.hold;
   let min = -Infinity;
   let max = Infinity;
   const f = fd();
@@ -498,7 +534,7 @@ export function setSpeed(ids, { speed, duration, ripple = false, hold = false, r
       const c = s.clips[id];
       if (!c) continue;
       const oldDur = c.duration;
-      if (c.kind === 'video' || c.kind === 'audio') {
+      if (isTimed(c)) {
         const newSpeed = speed ?? c.speed;
         let newDur = duration ?? (c.duration * c.speed) / newSpeed;
         const m = media(c.mediaId);
@@ -792,6 +828,131 @@ export function paste({ insert = false } = {}) {
     store.selectClips(created);
     store.setPlayhead(t + span);
   });
+}
+
+// ---------------------------------------------------------------- sequences
+
+export function newSequence({ name, width, height, fps } = {}) {
+  const cur = seq();
+  const s = createSequence({
+    name: name || `Sequence ${String(Object.keys(store.project.sequences).length + 1).padStart(2, '0')}`,
+    width: width || cur.width, height: height || cur.height, fps: fps || cur.fps,
+  });
+  store.transact('New Sequence', () => addSequenceToProject(store.project, s));
+  store.openSequence(s.id);
+  return s.id;
+}
+
+export function duplicateSequence(id = seq().id) {
+  const src = store.project.sequences[id];
+  if (!src) return null;
+  const copy = deepClone(src);
+  copy.id = uid('seq');
+  copy.name = `${src.name} Copy`;
+  // fresh ids, preserving links and track references
+  const trackMap = new Map();
+  for (const t of copy.tracks) {
+    const nid = uid(t.kind === 'video' ? 'vt' : 'at');
+    trackMap.set(t.id, nid);
+    t.id = nid;
+  }
+  const linkMap = new Map();
+  const clips = {};
+  for (const c of Object.values(copy.clips)) {
+    c.id = uid('clip');
+    c.trackId = trackMap.get(c.trackId);
+    if (c.linkId) {
+      if (!linkMap.has(c.linkId)) linkMap.set(c.linkId, uid('link'));
+      c.linkId = linkMap.get(c.linkId);
+    }
+    for (const fx of c.effects) fx.id = uid('fx');
+    clips[c.id] = c;
+  }
+  copy.clips = clips;
+  for (const mk of copy.markers) mk.id = uid('mk');
+  store.transact('Duplicate Sequence', () => addSequenceToProject(store.project, copy));
+  return copy.id;
+}
+
+export function deleteSequence(id) {
+  const p = store.project;
+  if (Object.keys(p.sequences).length <= 1) {
+    store.toast('A project needs at least one sequence');
+    return;
+  }
+  const mid = sequenceMediaId(id);
+  store.transact('Delete Sequence', () => {
+    for (const other of Object.values(p.sequences)) {
+      for (const c of Object.values(other.clips)) if (c.mediaId === mid) delete other.clips[c.id];
+    }
+    delete p.sequences[id];
+    delete p.media[mid];
+    p.mediaOrder = p.mediaOrder.filter((x) => x !== mid);
+    if (p.activeSequenceId === id) p.activeSequenceId = Object.keys(p.sequences)[0];
+  });
+  store.pruneSelection();
+  store.emit('sequence');
+}
+
+/**
+ * Nest: move the selected clips into a new sequence and replace them with a nested-sequence clip.
+ */
+export function nestSelection(name) {
+  const s = seq();
+  const ids = [...withLinked(store.selection.clips)].filter((id) => s.clips[id] && !isLocked(s.clips[id].trackId));
+  if (!ids.length) {
+    store.toast('Select clips to nest');
+    return null;
+  }
+  const clips = ids.map((id) => s.clips[id]);
+  const t0 = Math.min(...clips.map((c) => c.start));
+  const t1 = Math.max(...clips.map(clipEnd));
+  const vts = videoTracks(s);
+  const ats = audioTracks(s);
+  const usedV = clips.filter((c) => c.kind !== 'audio').map((c) => vts.findIndex((t) => t.id === c.trackId));
+  const usedA = clips.filter((c) => c.kind === 'audio').map((c) => ats.findIndex((t) => t.id === c.trackId));
+  const minV = usedV.length ? Math.min(...usedV) : 0;
+  const minA = usedA.length ? Math.min(...usedA) : 0;
+  const nested = createSequence({
+    name: name || `Nested Sequence ${String(Object.keys(store.project.sequences).length).padStart(2, '0')}`,
+    width: s.width, height: s.height, fps: s.fps,
+    videoTracks: Math.max(3, (usedV.length ? Math.max(...usedV) - minV : 0) + 1),
+    audioTracks: Math.max(3, (usedA.length ? Math.max(...usedA) - minA : 0) + 1),
+  });
+  const nvts = videoTracks(nested);
+  const nats = audioTracks(nested);
+  let nestId = null;
+  store.transact('Nest', () => {
+    for (const c of clips) {
+      const copy = deepClone(c);
+      copy.start = c.start - t0;
+      copy.trackId = c.kind === 'audio'
+        ? nats[ats.findIndex((t) => t.id === c.trackId) - minA].id
+        : nvts[vts.findIndex((t) => t.id === c.trackId) - minV].id;
+      nested.clips[copy.id] = copy;
+      delete s.clips[c.id];
+    }
+    const mid = addSequenceToProject(store.project, nested);
+    const m = store.project.media[mid];
+    m.duration = t1 - t0;
+    m.hasAudio = usedA.length > 0;
+    const link = usedV.length && usedA.length ? uid('link') : null;
+    const created = [];
+    if (usedV.length) {
+      const c = createClip(s, { kind: 'nest', trackId: vts[minV].id, mediaId: mid, name: nested.name, start: t0, duration: t1 - t0, linkId: link });
+      s.clips[c.id] = c;
+      created.push(c.id);
+      nestId = c.id;
+    }
+    if (usedA.length) {
+      const c = createClip(s, { kind: 'audio', trackId: ats[minA].id, mediaId: mid, name: nested.name, start: t0, duration: t1 - t0, linkId: link });
+      s.clips[c.id] = c;
+      created.push(c.id);
+      nestId = nestId || c.id;
+    }
+    store.selectClips(created);
+  });
+  return nestId;
 }
 
 // ---------------------------------------------------------------- tracks
