@@ -8,7 +8,7 @@ import { toast, loadPref, savePref } from './common.js';
 import { icon } from './icons.js';
 import { clipEnd, clipsOnTrack, videoTracks } from '../model.js';
 import {
-  geminiSettings, saveGeminiSettings, listGeminiModels, runAssistant, AI_TOOLS, API_KEY_PAGE,
+  geminiSettings, saveGeminiSettings, listGeminiModels, runAssistant, AI_TOOLS, API_KEY_PAGE, sceneTimes, MAX_SCENES,
 } from '../ai.js';
 import { openAutoCaptionDialog } from './dialogs.js';
 import { AUTO_STYLES, AUTO_STEPS, runAutoEdit } from '../autoedit.js';
@@ -110,8 +110,9 @@ export function createAiPanel() {
       startBtn.hidden = auto.running;
       stopBtn.hidden = !auto.running;
       startBtn.disabled = !steps.size;
+      const nScenes = geminiSettings.scenes !== 'off' ? sceneTimes(store.seq).length : 0;
       keyNote.textContent = geminiSettings.key
-        ? `Gemini(${geminiSettings.model || '자동 선택'})가 자막을 읽고 내용 편집을 합니다. 자막이 없으면 Gemini로 만듭니다.`
+        ? `Gemini(${geminiSettings.model || '자동 선택'})가 자막${nScenes ? `과 장면 사진 약 ${nScenes}장(${geminiSettings.sceneEvery}초마다)` : ''}을 보고 내용 편집을 합니다. 자막이 없으면 Gemini로 만듭니다.${nScenes ? '' : ' 장면 사진 보내기는 설정에서 켤 수 있습니다.'}`
         : 'Gemini 키가 없습니다: 자막은 Whisper(처음 한 번 약 80MB 내려받기)로 만들고, 내용 편집(길이 맞추기·강조 문구 등)은 건너뜁니다. 설정 탭에서 키를 넣으면 전부 됩니다.';
       result.replaceChildren();
       if (auto.summary) {
@@ -199,7 +200,7 @@ export function createAiPanel() {
       if (m.role === 'user') return h('div.ai-msg.user', m.text);
       if (m.role === 'tool') return h(`div.ai-step${m.error ? '.err' : ''}`, m.error ? '✗ ' : '✓ ', h('b', m.label), m.error ? ` — ${m.error}` : m.summary ? ` — ${m.summary}` : '');
       if (m.role === 'error') return h('div.ai-msg.err', m.text);
-      if (m.role === 'pending') return h('div.ai-msg.pending', '생각하는 중…');
+      if (m.role === 'pending') return h('div.ai-msg.pending', m.text || '생각하는 중…');
       const msg = h('div.ai-msg.model', m.text);
       if (m.edits && m.undoLabel) {
         msg.append(h('div.inline', h('button.small', {
@@ -232,6 +233,11 @@ export function createAiPanel() {
         const res = await runAssistant(text, {
           history: chat.history,
           signal: chat.controller.signal,
+          scenes: geminiSettings.scenes === 'always',
+          onStatus: (t) => {
+            pending.text = t;
+            renderLog();
+          },
           onEvent: (ev) => {
             chat.log.splice(chat.log.indexOf(pending), 0, { role: 'tool', ...ev });
             renderLog();
@@ -445,6 +451,24 @@ export function createAiPanel() {
     };
     model.addEventListener('change', save);
     remember.addEventListener('change', save);
+    // scene snapshots
+    const scenes = h('select', { 'aria-label': '장면 사진 보내기' },
+      [['off', '보내지 않기'], ['auto', '전체 편집할 때만 (권장)'], ['always', '전체 편집 + 도우미 대화마다']].map(([v, t]) => h('option', { value: v }, t)));
+    scenes.value = geminiSettings.scenes;
+    const every = h('select', { 'aria-label': '장면 사진 간격' }, [1, 2, 3, 5, 10].map((v) => h('option', { value: v }, `${v}초마다`)));
+    every.value = String(geminiSettings.sceneEvery);
+    const sceneInfo = h('div.note');
+    const syncScenes = () => {
+      saveGeminiSettings({ scenes: scenes.value, sceneEvery: Number(every.value) });
+      const n = sceneTimes(store.seq).length;
+      every.disabled = scenes.value === 'off';
+      sceneInfo.textContent = scenes.value === 'off'
+        ? 'AI는 화면을 보지 못하고 자막 글자로만 판단합니다.'
+        : `지금 타임라인이면 사진 ${n}장(한 장에 384px 이하 JPEG)을 보냅니다. 영상이 길면 최대 ${MAX_SCENES}장이 되도록 간격이 넓어집니다. 사진이 많을수록 정확해지지만 사용량(요금·무료 한도)이 늘고, 요청 한 번에 여러 차례 주고받으면 그때마다 다시 보냅니다.`;
+    };
+    scenes.addEventListener('change', syncScenes);
+    every.addEventListener('change', syncScenes);
+    syncScenes();
     return [
       h('div.ai-card',
         h('b', 'Gemini 연결'),
@@ -455,9 +479,16 @@ export function createAiPanel() {
         status,
         keyHint()),
       h('div.ai-card',
+        h('b', 'AI가 영상 화면 보기 (장면 사진)'),
+        h('div.note', '몇 초마다 타임라인 화면을 작은 사진으로 찍어 시간과 함께 보냅니다. 말이 없는 장면도 보고 고르고(예: "고양이 나오는 장면만"), 흔들리거나 어두운 부분을 빼고, 화면에 맞는 제목을 붙일 수 있습니다. 시간 정확도는 사진 간격 정도(1~2초)입니다.'),
+        h('label.ai-field', h('span', '장면 사진 보내기'), scenes),
+        h('label.ai-field', h('span', '간격'), every),
+        sceneInfo),
+      h('div.ai-card',
         h('b', '무엇이 보내지나요?'),
         h('ul.ai-list',
-          h('li', 'AI 도우미: 타임라인 정보(트랙, 클립 이름·시간, 자막·글자 내용, 마커)와 요청 글. 영상 화면은 보내지 않습니다.'),
+          h('li', 'AI 도우미·전체 편집: 타임라인 정보(트랙, 클립 이름·시간, 자막·글자 내용, 마커)와 요청 글.'),
+          h('li', '장면 사진을 켜면: 몇 초마다 찍은 영상 화면(작은 JPEG). 끄면 화면은 보내지 않습니다.'),
           h('li', 'Gemini 자동 자막: 섞인 소리(오디오).'),
           h('li', '키와 요청은 이 브라우저에서 Google(generativelanguage.googleapis.com)로 바로 갑니다. 이 편집기에는 따로 서버가 없습니다.')),
         h('div.note.warn', 'Gemini API 약관상 무료 등급에서 보낸 내용은 Google이 서비스 개선에 쓰고 사람이 검토할 수 있다고 되어 있습니다(약관은 바뀔 수 있으니 원문을 확인하세요). 민감한 영상에는 주의하세요. 키가 기억된 브라우저를 쓰는 사람은 누구나 키를 쓸 수 있습니다.'),

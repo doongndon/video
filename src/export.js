@@ -128,8 +128,8 @@ class ExportProvider {
       let lastT = mt;
       return {
         async get(t) {
-          if (t < lastT - 1e-3 || (cur && t < cur.ts - 1e-3)) {
-            // went backwards: restart iterator
+          // went backwards, or jumped far ahead (sparse sampling): restart the iterator there
+          if (t < lastT - 1e-3 || (cur && t < cur.ts - 1e-3) || (cur && t - cur.ts > 1)) {
             await iter.return?.();
             iter = sink.canvases(Math.max(0, t) + first);
             cur = wrap((await iter.next()).value);
@@ -479,6 +479,34 @@ export async function exportSequence(opts) {
 }
 
 /** Render the current program frame at full sequence resolution to a PNG blob. */
+/**
+ * Small JPEG snapshots of the sequence (what the viewer sees) at the given times, e.g. so an AI can
+ * look at the scenes. Returns [{t, blob}].
+ */
+export async function sampleFrames(seq, times, { maxSide = 384, quality = 0.7, onProgress = () => {}, signal } = {}) {
+  const sc = Math.min(1, maxSide / Math.max(seq.width, seq.height));
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(2, Math.round(seq.width * sc));
+  canvas.height = Math.max(2, Math.round(seq.height * sc));
+  const ctx = canvas.getContext('2d');
+  const provider = new ExportProvider(canvas.width);
+  const comp = new Compositor();
+  const out = [];
+  try {
+    await preloadFonts(seq);
+    for (const [i, t] of times.entries()) {
+      if (signal?.aborted) throw Object.assign(new Error('멈춤'), { name: 'AbortError' });
+      await provider.prepare(seq, t);
+      comp.render(ctx, seq, t, provider, { scale: sc });
+      out.push({ t, blob: await new Promise((r) => canvas.toBlob(r, 'image/jpeg', quality)) });
+      onProgress(i + 1, times.length);
+    }
+  } finally {
+    await provider.close();
+  }
+  return out;
+}
+
 export async function exportFrame(t = store.ui.playhead) {
   const seq = store.seq;
   const canvas = document.createElement('canvas');

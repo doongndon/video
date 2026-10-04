@@ -72,20 +72,24 @@ function mainVideoTrack(s) {
   return best;
 }
 
-function buildPrompt(style, opts, { hasCaptions }) {
+function buildPrompt(style, opts, { hasCaptions, hasScenes }) {
+  const known = hasCaptions || hasScenes;
+  const basis = hasCaptions && hasScenes ? '자막(말 내용)과 장면 사진(화면 내용)' : hasCaptions ? '자막(말 내용)' : '장면 사진(화면 내용)';
   const lines = [`[전체 편집 요청] 스타일: ${style.name} (${style.desc}).`];
-  lines.push('아래 일을 순서대로 해 줘. 자막 내용을 근거로 판단하고, 확실하지 않은 편집은 하지 마.');
+  lines.push(`아래 일을 순서대로 해 줘. ${known ? `${basis}을 근거로 판단하고, ` : ''}확실하지 않은 편집은 하지 마.`);
   let n = 1;
-  if (!hasCaptions) lines.push('(자막이 없어 내용은 알 수 없음. 내용에 따른 자르기·강조는 하지 말고 제목만 넣어.)');
-  if (hasCaptions && opts.mistakes) lines.push(`${n++}) 말을 더듬거나 같은 말을 되풀이한 부분, "음/어" 같은 군더더기만 cut_time_ranges로 잘라 내.`);
-  if (hasCaptions && opts.targetLen) lines.push(`${n++}) 덜 중요한 부분을 잘라 전체 길이를 약 ${opts.targetLen}초로 맞춰. 지금 길이가 이미 그보다 짧으면 자르지 마. 말 중간을 끊지 말고 자막 경계에 맞춰서, 겹치지 않는 구간들을 한 번에 넘겨.`);
-  if (opts.title) lines.push(`${n++}) 영상 맨 앞(0초~3초)에 내용을 요약한 짧은 제목(15자 이내)을 add_title로 넣어. position=${style.aspect === '9:16' ? 'top' : 'center'}, style_id=${style.title}, animation_in=${style.titleAnim}.`);
-  if (hasCaptions && opts.emphasis) {
+  if (!known) lines.push('(자막도 장면 사진도 없어 내용은 알 수 없음. 내용에 따른 자르기·강조는 하지 말고 제목만 넣어.)');
+  if (hasCaptions && opts.mistakes) lines.push(`${n++}) 말을 더듬거나 같은 말을 되풀이한 부분, "음/어" 같은 군더더기를 찾아.`);
+  if (hasScenes) lines.push(`${n++}) 장면 사진을 보고 흔들리거나 초점이 나갔거나 너무 어둡거나 아무것도 안 나오는(바닥·주머니 등) 구간을 찾아.`);
+  if (known && opts.targetLen) lines.push(`${n++}) 덜 중요하거나 지루한 부분을 골라 전체 길이가 약 ${opts.targetLen}초가 되게 해. 지금 길이가 이미 그보다 짧으면 이 단계는 건너뛰어.${hasCaptions ? ' 말 중간을 끊지 말고 자막 경계에 맞춰.' : ''}`);
+  if (known && (opts.mistakes || hasScenes || opts.targetLen)) lines.push(`${n++}) 위에서 찾은 잘라 낼 구간을 겹치지 않게 모아 cut_time_ranges 한 번으로 잘라 내.`);
+  if (opts.title) lines.push(`${n++}) 영상 맨 앞(0초~3초)에 내용을 요약한 짧은 제목(15자 이내)을 add_title로 넣어. position=${style.aspect === '9:16' ? 'top' : 'center'}, style_id=${style.title}, animation_in=${style.titleAnim}.${hasScenes ? ' 화면에 중요한 것이 가려지지 않는 위치를 골라.' : ''}`);
+  if (known && opts.emphasis) {
     lines.push(`${n++}) 강조할 만한 순간 2~4곳에 2~3초짜리 짧은 강조 문구(10자 이내)를 add_title로 넣어. position=top, style_id=${style.caption === 'variety' ? 'marker' : 'outline'}, animation_in=pop.${style.stickers ? ' 그중 1~3곳에는 어울리는 이모지 스티커도 add_sticker로 넣어.' : ''}`);
   }
-  if (hasCaptions && style.chapters) lines.push(`${n++}) 주제가 바뀌는 곳마다 add_markers로 챕터 마커를 찍어(이름은 짧게).`);
-  if (hasCaptions && opts.spelling) lines.push(`${n++}) 자막 맞춤법·띄어쓰기가 틀린 줄만 edit_text로 고쳐. 말투와 뜻은 바꾸지 마.`);
-  lines.push('화면 비율·필터·전환·자막 모양·배경음악은 편집기가 따로 처리하니 하지 마.');
+  if (known && style.chapters) lines.push(`${n++}) 주제나 장면이 바뀌는 곳마다 add_markers로 챕터 마커를 찍어(이름은 짧게).`);
+  if (hasCaptions && opts.spelling) lines.push(`${n++}) 자막 맞춤법·띄어쓰기가 틀린 줄만 edit_text로 고쳐. 말투와 뜻은 바꾸지 마.${hasScenes ? ' 화면에 보이는 이름·글자와 다르게 받아 적힌 말도 고쳐.' : ''}`);
+  lines.push('잘라 낸 뒤에는 timeline_after의 시간을 써. 화면 비율·필터·전환·자막 모양·배경음악은 편집기가 따로 처리하니 하지 마.');
   lines.push('끝나면 한 일을 짧게 요약하고, 마지막 줄에 "제목 후보: ..." 형식으로 영상 제목 후보 1개를 적어 줘.');
   if (opts.extra) lines.push(`[사용자의 추가 요청] ${opts.extra}`);
   return lines.join('\n');
@@ -171,10 +175,13 @@ export async function runAutoEdit(opts, { onStep = () => {}, signal } = {}) {
       const hasCaptions = !!captionTrackId(store.seq);
       if (geminiSettings.key) {
         const musicTracks = [...new Set(audioRoles(store.seq).music.map((c) => c.trackId))];
-        const res = await runAssistant(buildPrompt(style, opts, { hasCaptions }), {
+        const hasScenes = geminiSettings.scenes !== 'off';
+        const res = await runAssistant(buildPrompt(style, opts, { hasCaptions, hasScenes }), {
           signal,
           maxRounds: 12,
           keepTrackIds: musicTracks,
+          scenes: hasScenes,
+          onStatus: (text) => onStep('ai', 'run', text),
           onEvent: (ev) => onStep('ai', 'run', `${ev.error ? '✗' : '✓'} ${ev.label}${ev.summary ? ` — ${ev.summary}` : ''}`),
         });
         aiText = res.text;

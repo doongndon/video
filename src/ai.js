@@ -12,6 +12,7 @@ import {
   FILTERS, applyFilter, ANIMATIONS, applyAnimation, TEXT_STYLES, applyTextStyle, addSticker, ASPECTS, setAspect,
 } from './features.js';
 import { sequenceAudio16k, createCaptionTrack, ASR_LANGUAGES } from './captions.js';
+import { sampleFrames } from './export.js';
 
 const API = 'https://generativelanguage.googleapis.com/v1beta';
 const PREF = 'montage.gemini';
@@ -32,20 +33,31 @@ function readJSON(storage) {
 function loadSettings() {
   const saved = readJSON(globalThis.localStorage || { getItem: () => null });
   const session = readJSON(globalThis.sessionStorage || { getItem: () => null });
-  return { key: saved.key || session.key || '', model: saved.model || session.model || '', remember: !!saved.key, models: [] };
+  return {
+    key: saved.key || session.key || '',
+    model: saved.model || session.model || '',
+    remember: !!saved.key,
+    models: [],
+    // scene snapshots: 'off' | 'auto' (whole-video edit only) | 'always' (also the assistant chat)
+    scenes: ['off', 'auto', 'always'].includes(saved.scenes) ? saved.scenes : 'auto',
+    sceneEvery: Number(saved.sceneEvery) > 0 ? Number(saved.sceneEvery) : 2,
+  };
 }
 
 /** remember: keep the key in this browser (localStorage); otherwise only until the tab closes. */
-export function saveGeminiSettings({ key = geminiSettings.key, model = geminiSettings.model, remember = geminiSettings.remember } = {}) {
-  Object.assign(geminiSettings, { key: String(key || '').trim(), model: model || '', remember: !!remember });
+export function saveGeminiSettings({
+  key = geminiSettings.key, model = geminiSettings.model, remember = geminiSettings.remember,
+  scenes = geminiSettings.scenes, sceneEvery = geminiSettings.sceneEvery,
+} = {}) {
+  Object.assign(geminiSettings, { key: String(key || '').trim(), model: model || '', remember: !!remember, scenes, sceneEvery: Number(sceneEvery) || 2 });
   try {
-    const all = JSON.stringify({ key: geminiSettings.key, model: geminiSettings.model });
+    const prefs = { model: geminiSettings.model, scenes: geminiSettings.scenes, sceneEvery: geminiSettings.sceneEvery };
     if (geminiSettings.remember) {
-      localStorage.setItem(PREF, all);
+      localStorage.setItem(PREF, JSON.stringify({ ...prefs, key: geminiSettings.key }));
       sessionStorage.removeItem(PREF);
     } else {
-      sessionStorage.setItem(PREF, all);
-      localStorage.setItem(PREF, JSON.stringify({ model: geminiSettings.model }));
+      sessionStorage.setItem(PREF, JSON.stringify({ key: geminiSettings.key, model: geminiSettings.model }));
+      localStorage.setItem(PREF, JSON.stringify(prefs));
     }
   } catch {
     /* storage unavailable: settings last until the page closes */
@@ -230,6 +242,34 @@ export async function transcribeWithGemini({ seq, start, end, language = 'korean
   }
   onStatus('자막을 만드는 중…', 0.97);
   return cues;
+}
+
+// ---------------------------------------------------------------- scene snapshots (so Gemini can see the video)
+
+export const MAX_SCENES = 150;
+
+/** Times to photograph: every `every` seconds, spread out further so there are at most MAX_SCENES. */
+export function sceneTimes(seq, every = geminiSettings.sceneEvery) {
+  const dur = sequenceDuration(seq);
+  if (dur <= 0) return [];
+  const step = Math.max(every, dur / MAX_SCENES);
+  const out = [];
+  for (let t = Math.min(step / 2, dur / 2); t < dur && out.length < MAX_SCENES; t += step) out.push(Math.round(t * 100) / 100);
+  return out;
+}
+
+/** Gemini parts: a note, then "[12.0초]" + JPEG for each sampled moment of the current timeline. */
+async function sceneParts(onStatus, signal) {
+  const seq = store.seq;
+  const times = sceneTimes(seq);
+  if (!times.length) return [];
+  const shots = await sampleFrames(seq, times, { signal, onProgress: (i, n) => onStatus(`장면 사진 찍는 중… ${i}/${n}`) });
+  onStatus(`장면 사진 ${shots.length}장을 보내는 중…`);
+  const parts = [{ text: `[장면 사진] 아래는 지금 타임라인을 약 ${(times[1] - times[0] || geminiSettings.sceneEvery).toFixed(1)}초마다 찍은 화면 ${shots.length}장입니다(자막·제목 글자도 화면에 보이는 그대로). 각 사진 앞의 [시간]은 이 요청을 시작할 때의 시퀀스 시간입니다.` }];
+  for (const { t, blob } of shots) {
+    parts.push({ text: `[${t.toFixed(1)}초]` }, { inlineData: { mimeType: 'image/jpeg', data: await blobToBase64(blob) } });
+  }
+  return parts;
 }
 
 // ---------------------------------------------------------------- timeline summary for the assistant
@@ -571,7 +611,8 @@ const DECLARATIONS = [{ functionDeclarations: AI_TOOLS.map(({ name, description,
 
 const SYSTEM = [
   '당신은 브라우저 영상 편집기 "Montage" 안의 편집 도우미입니다. 사용자는 한국어로 요청합니다.',
-  '- 당신은 영상 화면과 소리를 직접 보거나 듣지 못합니다. 매 요청에 함께 오는 타임라인 정보(트랙, 클립 이름·시간, 자막·글자 내용, 마커)만 압니다. 장면 내용이 필요한 요청인데 자막이 없으면, 먼저 "자동 자막"을 만들라고 안내하세요.',
+  '- 소리는 직접 듣지 못합니다. 매 요청에 타임라인 정보(트랙, 클립 이름·시간, 자막·글자 내용, 마커)가 오고, 설정에 따라 "장면 사진"(몇 초마다 찍은 화면)이 함께 옵니다. 장면 사진이 없으면 화면 내용을 모릅니다. 말 내용이 필요한데 자막이 없으면 먼저 "자동 자막"을 만들라고 안내하세요.',
+  '- 장면 사진의 시간은 요청을 시작할 때의 타임라인 기준입니다. 자르면 뒤쪽 시간이 바뀌므로, 화면·자막 내용을 보고 자를 구간은 한 번의 cut_time_ranges 호출로 모아서 넘기고, 그 뒤의 편집은 timeline_after의 시간을 쓰세요.',
   '- 편집은 반드시 도구(함수)로 하세요. 시간은 모두 시퀀스 시간(초)입니다. 클립은 clips[].id로 가리킵니다.',
   '- 하이라이트·요약 편집은 자막 내용을 근거로 남길 부분을 정하고, 나머지를 cut_time_ranges로 잘라 내세요. 잘라 낼 구간은 서로 겹치지 않게, 말 중간을 끊지 않게 자막 경계에 맞추세요.',
   '- 여러 도구를 차례로 써도 됩니다. 이번 요청의 모든 편집은 실행 취소(Ctrl+Z) 한 번으로 되돌릴 수 있습니다.',
@@ -584,9 +625,11 @@ const SYSTEM = [
  * onEvent({type:'tool', name, label, args, result|error}) for each tool call.
  * Returns {text}. All edits made during the request are merged into one undo step.
  */
-export async function runAssistant(prompt, { history = [], onEvent = () => {}, signal, maxRounds = 10, keepTrackIds = [] } = {}) {
+export async function runAssistant(prompt, { history = [], onEvent = () => {}, onStatus = () => {}, signal, maxRounds = 10, keepTrackIds = [], scenes = false } = {}) {
   const contents = history.slice(-8).map((m) => ({ role: m.role, parts: [{ text: m.text }] }));
-  contents.push({ role: 'user', parts: [{ text: `[현재 타임라인 정보]\n${JSON.stringify(timelineContext())}\n\n[요청]\n${prompt}` }] });
+  const shots = scenes ? await sceneParts(onStatus, signal) : [];
+  contents.push({ role: 'user', parts: [{ text: `[현재 타임라인 정보]\n${JSON.stringify(timelineContext())}` }, ...shots, { text: `[요청]\n${prompt}` }] });
+  onStatus(shots.length ? 'Gemini가 장면과 자막을 보는 중…' : '생각하는 중…');
   const mark = store.undoMark();
   let edits = 0;
   keepTracks = new Set(keepTrackIds);
