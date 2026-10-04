@@ -102,7 +102,7 @@ export class Stroke {
     this.rest = 0;
     this.dirty = null;
     if (mode === 'clone') {
-      this.src = o.sampleAll ? doc.flatten() : E.layerAsDocCanvas(this.layer, this.base);
+      this.src = o.srcCanvas || (o.sampleAll ? doc.flatten() : E.layerAsDocCanvas(this.layer, this.base));
       this.srcOff = o.cloneOffset;
     }
   }
@@ -114,6 +114,13 @@ export class Stroke {
   }
 
   to(p, pressure = 1) {
+    // smoothing: the brush trails the pointer like a weight on a string
+    if (this.o.smoothing > 0 && this.sm) {
+      const k = 1 - Math.min(0.92, this.o.smoothing);
+      p = { x: this.sm.x + (p.x - this.sm.x) * k, y: this.sm.y + (p.y - this.sm.y) * k };
+    }
+    this.sm = p;
+    this.pressure = pressure;
     const size = Math.max(1, this.o.size * (this.o.pressureSize ? Math.max(0.1, pressure) : 1));
     if (!this.last) {
       this.stamp(p.x, p.y, size);
@@ -125,6 +132,7 @@ export class Stroke {
     let t = this.rest;
     const dx = (p.x - this.last.x) / (d || 1);
     const dy = (p.y - this.last.y) / (d || 1);
+    if (d > 0.5) this.dir = Math.atan2(dy, dx);
     while (t + step <= d) {
       t += step;
       this.stamp(this.last.x + dx * t, this.last.y + dy * t, size);
@@ -140,10 +148,14 @@ export class Stroke {
     const lx = x - this.ox;
     const ly = y - this.oy;
     const r = size / 2;
-    const rect = { x: Math.floor(lx - r) - 1, y: Math.floor(ly - r) - 1, w: Math.ceil(size) + 3, h: Math.ceil(size) + 3 };
+    let rect = { x: Math.floor(lx - r) - 1, y: Math.floor(ly - r) - 1, w: Math.ceil(size) + 3, h: Math.ceil(size) + 3 };
     const g = this.bg;
     g.globalAlpha = this.o.flow ?? 1;
-    if (this.mode === 'clone') {
+    if (this.o.engine) {
+      // brush tips and dynamics (brushes.js)
+      rect = this.o.engine(this, lx, ly, size, x, y);
+      if (!rect) return;
+    } else if (this.mode === 'clone') {
       const s = Math.ceil(size);
       const t = makeCanvas(s, s);
       const tg = t.getContext('2d');
@@ -214,7 +226,8 @@ export class Stroke {
 
   end() {
     this.flush();
-    if (this.mode === 'heal') heal(this);
+    if (this.mode === 'heal' && !this.E.healFill?.(this)) heal(this);
+    else if (this.o.afterStroke) this.o.afterStroke(this);
     this.E.commit(this.o.label || '브러시', this.before);
   }
 }
@@ -689,6 +702,7 @@ function strokeTool(id, name, key, icon, mode, extra = {}) {
         bo.cloneOffset = this.offset;
       }
       if (extra.hardness100) bo.hardness = 1;
+      if (E.brushEngine && mode !== 'heal') bo.engine = E.brushEngine(id, o, bo, mode);
       this.st = new Stroke(E, mode, bo);
       this.st.to(p, e.pressure || 1);
       this.st.flush();
