@@ -1,7 +1,7 @@
 // Photo editor tools. A tool gets pointer events in document coordinates plus the editor context
 // `E` (current doc, colours, tool options, view and helpers) and draws its own overlay.
 
-import { makeCanvas, cloneCanvas, newLayer, textBox, boxCorners, SHAPES } from './doc.js';
+import { makeCanvas, cloneCanvas, newLayer, boxCorners, SHAPES } from './doc.js';
 import * as SEL from './selection.js';
 import { FONT_CATEGORIES } from '../fonts.js';
 
@@ -1020,6 +1020,92 @@ export const TOOLS = [
       g.restore();
     },
   },
+  // ---- perspective crop
+  {
+    id: 'perspCrop', name: '원근 자르기', key: 'C', icon: 'perspCrop', group: 'crop', cursor: 'crosshair',
+    options: [],
+    activate() {
+      this.q = null;
+    },
+    down(E, p) {
+      const tol = 10 / E.view.zoom;
+      if (this.q) {
+        const i = this.q.findIndex(([x, y]) => Math.hypot(x - p.x, y - p.y) < tol);
+        if (i >= 0) {
+          this.d = { corner: i };
+          return;
+        }
+        if (pointInPoly(p, this.q)) {
+          this.d = { move: true, a: p, q: this.q.map((c) => [...c]) };
+          return;
+        }
+      }
+      this.d = { a: p };
+      this.q = null;
+    },
+    move(E, p) {
+      const d = this.d;
+      if (!d) return;
+      if (d.corner != null) this.q[d.corner] = [p.x, p.y];
+      else if (d.move) this.q = d.q.map(([x, y]) => [x + p.x - d.a.x, y + p.y - d.a.y]);
+      else {
+        const r = rectOf({ a: d.a, b: p });
+        this.q = [[r.x, r.y], [r.x + r.w, r.y], [r.x + r.w, r.y + r.h], [r.x, r.y + r.h]];
+      }
+      E.overlay();
+    },
+    up() {
+      this.d = null;
+    },
+    dblclick(E) {
+      this.apply(E);
+    },
+    onKey(E, e) {
+      if (e.key === 'Enter') this.apply(E);
+      else if (e.key === 'Escape') {
+        this.q = null;
+        E.overlay();
+      } else return false;
+      return true;
+    },
+    apply(E) {
+      const q = this.q;
+      if (!q) return;
+      this.q = null;
+      E.perspectiveCrop(q);
+    },
+    overlay(E, g) {
+      if (!this.q) return;
+      const s = this.q.map(([x, y]) => E.toScreen(x, y));
+      g.save();
+      g.fillStyle = 'rgba(0,0,0,0.45)';
+      g.beginPath();
+      g.rect(0, 0, g.canvas.width, g.canvas.height);
+      s.forEach(([x, y], i) => (i ? g.lineTo(x, y) : g.moveTo(x, y)));
+      g.closePath();
+      g.fill('evenodd');
+      g.strokeStyle = '#fff';
+      g.beginPath();
+      s.forEach(([x, y], i) => (i ? g.lineTo(x, y) : g.moveTo(x, y)));
+      g.closePath();
+      g.stroke();
+      // a 3×3 grid helps line up the perspective
+      g.strokeStyle = 'rgba(255,255,255,.45)';
+      const L = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+      for (const t of [1 / 3, 2 / 3]) {
+        g.beginPath();
+        g.moveTo(...L(s[0], s[3], t));
+        g.lineTo(...L(s[1], s[2], t));
+        g.moveTo(...L(s[0], s[1], t));
+        g.lineTo(...L(s[3], s[2], t));
+        g.stroke();
+      }
+      g.fillStyle = '#fff';
+      for (const [x, y] of s) g.fillRect(x - 5, y - 5, 10, 10);
+      g.fillText('모서리를 기울어진 면에 맞춘 뒤 Enter (두 번 눌러도 됨)', s[0][0], s[0][1] - 8);
+      g.restore();
+    },
+  },
   // ---- eyedropper
   {
     id: 'eyedropper', name: '스포이드', key: 'I', icon: 'eyedropper', group: 'crop', cursor: 'crosshair',
@@ -1268,247 +1354,11 @@ export const TOOL_BY_ID = Object.fromEntries(TOOLS.map((t) => [t.id, t]));
 
 /** Toolbar groups (like Photoshop's tool slots), in order. */
 export const TOOL_GROUPS = [
-  ['move'], ['rect', 'ellipse'], ['lasso'], ['wand'], ['crop'], ['eyedropper'], ['heal'], ['brush', 'pencil'], ['clone'], ['eraser'],
+  ['move'], ['rect', 'ellipse'], ['lasso'], ['wand'], ['crop', 'perspCrop'], ['eyedropper'], ['heal'], ['brush', 'pencil'], ['clone'], ['eraser'],
   ['gradient', 'bucket'], ['blur', 'sharpen', 'smudge', 'push'], ['dodge', 'burn'], ['text', 'verticalText', 'textMask', 'verticalTextMask'], ['shape'], ['hand'], ['zoom'],
 ];
 
 const inside = (p, r) => p.x >= r.x && p.y >= r.y && p.x <= r.x + r.w && p.y <= r.y + r.h;
-
-// ---------------------------------------------------------------- free transform
-
-/**
- * Free transform of the active layer (or the selected pixels): drag inside to move, corners/edges to
- * scale (Shift: free aspect), outside to rotate (Shift: 15° steps). Enter applies, Esc cancels.
- */
-export class FreeTransform {
-  constructor(E) {
-    this.E = E;
-    const doc = E.doc;
-    const l = doc.active;
-    this.layer = l;
-    this.before = doc.capture();
-    this.vector = l.kind === 'text' || l.kind === 'shape';
-    this.smart = l.kind === 'smart';
-    if (this.smart) {
-      // smart objects keep their source pixels: only the matrix changes (no quality loss)
-      const sm = l.smart;
-      const [a, b, c, d, e, f] = sm.m;
-      this.sm0 = { ...sm };
-      this.rot = (Math.atan2(b, a) * 180) / Math.PI;
-      const flip = a * d - b * c < 0 ? -1 : 1;
-      this.w = sm.w * Math.hypot(a, b);
-      this.h = sm.h * Math.hypot(c, d) * flip;
-      this.cx = a * (sm.w / 2) + c * (sm.h / 2) + e;
-      this.cy = b * (sm.w / 2) + d * (sm.h / 2) + f;
-      this.sx = 1;
-      this.sy = 1;
-      this.h = Math.abs(this.h);
-      this.flip = flip;
-      this.update();
-      return;
-    }
-    if (l.kind === 'group' || l.kind === 'fill') throw new Error(l.kind === 'group' ? '그룹은 이동 도구로 옮길 수 있습니다. 크기를 바꾸려면 고급 개체로 변환한 뒤 변형하세요.' : '칠 레이어는 문서 전체를 채워 변형할 수 없습니다 (마스크를 변형하려면 마스크를 고르세요)');
-    if (this.vector) {
-      const b = l.kind === 'text' ? textBox(l) : { w: l.shape.w, h: l.shape.h };
-      this.w = b.w;
-      this.h = b.h;
-      this.cx = l.x + b.w / 2;
-      this.cy = l.y + b.h / 2;
-      this.rot = l.rotation || 0;
-      this.orig = { text: l.text && { ...l.text }, shape: l.shape && { ...l.shape } };
-    } else {
-      let src;
-      if (doc.selection) src = liftSelection(E);
-      else {
-        const ob = doc.opaqueBounds(l);
-        if (!ob) throw new Error('레이어가 비어 있습니다');
-        const c = makeCanvas(ob.w, ob.h);
-        c.getContext('2d').drawImage(l.canvas, l.x - ob.x, l.y - ob.y);
-        doc.editPixels(l);
-        l.canvas.getContext('2d').clearRect(0, 0, l.canvas.width, l.canvas.height);
-        src = { canvas: c, x: ob.x, y: ob.y, layerId: l.id };
-      }
-      this.src = src;
-      this.w = src.canvas.width;
-      this.h = src.canvas.height;
-      this.cx = src.x + this.w / 2;
-      this.cy = src.y + this.h / 2;
-      this.rot = 0;
-    }
-    this.sx = 1;
-    this.sy = 1;
-    this.update();
-  }
-
-  corners() {
-    const a = (this.rot * Math.PI) / 180;
-    const hw = (this.w * this.sx) / 2;
-    const hh = (this.h * this.sy) / 2;
-    return [[-hw, -hh], [hw, -hh], [hw, hh], [-hw, hh]].map(([x, y]) => [this.cx + x * Math.cos(a) - y * Math.sin(a), this.cy + x * Math.sin(a) + y * Math.cos(a)]);
-  }
-
-  /** Show the current transform (vector props, or a transformed float for pixels). */
-  update() {
-    const E = this.E;
-    if (this.smart) {
-      const l = this.layer;
-      const sm = this.sm0;
-      const a = (this.rot * Math.PI) / 180;
-      const kx = (this.w * this.sx) / sm.w;
-      const ky = ((this.h * this.sy) / sm.h) * this.flip;
-      const cos = Math.cos(a);
-      const sin = Math.sin(a);
-      // m = translate(cx, cy) · rotate · scale(kx, ky) · translate(-w/2, -h/2)
-      const m = [cos * kx, sin * kx, -sin * ky, cos * ky, 0, 0];
-      m[4] = this.cx - (m[0] * sm.w) / 2 - (m[2] * sm.h) / 2;
-      m[5] = this.cy - (m[1] * sm.w) / 2 - (m[3] * sm.h) / 2;
-      l.smart = { ...sm, m, corners: null };
-      E.doc.touch(l);
-      E.redraw();
-      return;
-    }
-    if (this.vector) {
-      const l = this.layer;
-      if (l.kind === 'text') {
-        const ot = this.orig.text;
-        // paragraph boxes scale with the text
-        l.text = { ...l.text, size: Math.max(1, Math.round(ot.size * Math.abs(this.sy) * 10) / 10), box: ot.box ? { w: Math.max(4, Math.round(ot.box.w * Math.abs(this.sx))), h: Math.max(4, Math.round(ot.box.h * Math.abs(this.sy))) } : null };
-        const b = textBox(l);
-        l.x = Math.round(this.cx - b.w / 2);
-        l.y = Math.round(this.cy - b.h / 2);
-      } else {
-        l.shape = { ...l.shape, w: Math.max(1, Math.round(this.orig.shape.w * Math.abs(this.sx))), h: Math.max(1, Math.round(this.orig.shape.h * Math.abs(this.sy))) };
-        l.x = Math.round(this.cx - l.shape.w / 2);
-        l.y = Math.round(this.cy - l.shape.h / 2);
-      }
-      l.rotation = Math.round(this.rot * 10) / 10;
-      E.doc.touch(l);
-    } else {
-      const cs = this.corners();
-      const xs = cs.map((c) => c[0]);
-      const ys = cs.map((c) => c[1]);
-      const x0 = Math.floor(Math.min(...xs));
-      const y0 = Math.floor(Math.min(...ys));
-      const c = makeCanvas(Math.ceil(Math.max(...xs)) - x0 + 1, Math.ceil(Math.max(...ys)) - y0 + 1);
-      const g = c.getContext('2d');
-      g.imageSmoothingQuality = 'high';
-      g.translate(this.cx - x0, this.cy - y0);
-      g.rotate((this.rot * Math.PI) / 180);
-      g.scale(this.sx, this.sy);
-      g.drawImage(this.src.canvas, -this.w / 2, -this.h / 2);
-      E.float = { canvas: c, x: x0, y: y0, layerId: this.layer.id };
-    }
-    E.redraw();
-  }
-
-  hit(p) {
-    const E = this.E;
-    const tol = 9 / E.view.zoom;
-    const cs = this.corners();
-    const mids = cs.map((c, i) => [(c[0] + cs[(i + 1) % 4][0]) / 2, (c[1] + cs[(i + 1) % 4][1]) / 2]);
-    const names = ['tl', 'tr', 'br', 'bl'];
-    const midNames = ['t', 'r', 'b', 'l'];
-    for (let i = 0; i < 4; i++) if (Math.hypot(p.x - cs[i][0], p.y - cs[i][1]) < tol) return names[i];
-    for (let i = 0; i < 4; i++) if (Math.hypot(p.x - mids[i][0], p.y - mids[i][1]) < tol) return midNames[i];
-    if (pointInPoly(p, cs)) return 'move';
-    return 'rotate';
-  }
-
-  down(p) {
-    this.d = { h: this.hit(p), a: p, cx: this.cx, cy: this.cy, sx: this.sx, sy: this.sy, rot: this.rot };
-  }
-
-  move(p, e) {
-    const d = this.d;
-    if (!d) return;
-    if (d.h === 'move') {
-      this.cx = d.cx + p.x - d.a.x;
-      this.cy = d.cy + p.y - d.a.y;
-    } else if (d.h === 'rotate') {
-      const a0 = Math.atan2(d.a.y - d.cy, d.a.x - d.cx);
-      const a1 = Math.atan2(p.y - d.cy, p.x - d.cx);
-      let r = d.rot + ((a1 - a0) * 180) / Math.PI;
-      if (e.shiftKey) r = Math.round(r / 15) * 15;
-      this.rot = r;
-    } else {
-      // scale about the centre, measured in the box's own (rotated) axes
-      const a = (-d.rot * Math.PI) / 180;
-      const loc = (q) => [(q.x - d.cx) * Math.cos(a) - (q.y - d.cy) * Math.sin(a), (q.x - d.cx) * Math.sin(a) + (q.y - d.cy) * Math.cos(a)];
-      const [ax, ay] = loc(d.a);
-      const [bx, by] = loc(p);
-      let kx = d.h.includes('l') || d.h.includes('r') ? bx / (ax || 1) : 1;
-      let ky = d.h.includes('t') || d.h.includes('b') ? by / (ay || 1) : 1;
-      const corner = d.h.length === 2;
-      if (corner && !e.shiftKey) {
-        // corners keep the proportions (Shift frees them), like recent Photoshop
-        const k = Math.abs(kx) > Math.abs(ky) ? kx : ky;
-        kx = k;
-        ky = k;
-      }
-      if (this.vector && this.layer.kind === 'text') {
-        const k = corner ? (Math.abs(kx) > Math.abs(ky) ? kx : ky) : d.h === 't' || d.h === 'b' ? ky : kx;
-        kx = k;
-        ky = k;
-      }
-      this.sx = d.sx * kx;
-      this.sy = d.sy * ky;
-    }
-    this.update();
-  }
-
-  up() {
-    this.d = null;
-  }
-
-  apply() {
-    const E = this.E;
-    if (!this.vector && !this.smart && E.float) {
-      dropFloat(E, E.float);
-      E.float = null;
-      if (E.doc.selection) {
-        // the selection follows the pixels
-        const cs = this.corners();
-        E.doc.selection = { canvas: SEL.shapeMask(E.doc, SEL.polyPath(cs)) };
-      }
-    }
-    E.doc.touch(this.layer);
-    E.commit('자유 변형', this.before);
-  }
-
-  cancel() {
-    const E = this.E;
-    E.float = null;
-    E.doc.restore(this.before);
-    E.redraw();
-  }
-
-  overlay(g) {
-    const E = this.E;
-    const cs = this.corners().map(([x, y]) => E.toScreen(x, y));
-    g.save();
-    g.strokeStyle = '#4aa3ff';
-    g.lineWidth = 1;
-    g.beginPath();
-    cs.forEach(([x, y], i) => (i ? g.lineTo(x, y) : g.moveTo(x, y)));
-    g.closePath();
-    g.stroke();
-    g.fillStyle = '#fff';
-    g.strokeStyle = '#1d6fd1';
-    const pts = [...cs, ...cs.map((c, i) => [(c[0] + cs[(i + 1) % 4][0]) / 2, (c[1] + cs[(i + 1) % 4][1]) / 2])];
-    for (const [x, y] of pts) {
-      g.fillRect(x - 4, y - 4, 8, 8);
-      g.strokeRect(x - 4.5, y - 4.5, 9, 9);
-    }
-    const [cx, cy] = E.toScreen(this.cx, this.cy);
-    g.beginPath();
-    g.arc(cx, cy, 4, 0, Math.PI * 2);
-    g.stroke();
-    g.font = '12px sans-serif';
-    g.fillStyle = '#fff';
-    g.fillText(`${Math.round(this.w * Math.abs(this.sx))} × ${Math.round(this.h * Math.abs(this.sy))}  ${Math.round(this.rot)}°  · Enter 적용 · Esc 취소`, Math.min(...cs.map((c) => c[0])), Math.min(...cs.map((c) => c[1])) - 8);
-    g.restore();
-  }
-}
 
 function pointInPoly(p, pts) {
   let inside2 = false;

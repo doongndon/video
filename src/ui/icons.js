@@ -109,6 +109,7 @@ const P = {
   verticalText: '<path d="M4 3h8M8 3v10M11 9h3M12.5 9v4"/>',
   textMask: '<path d="M3 3.5h10M8 3.5v9M6 12.5h4" stroke-dasharray="2 1.5"/>',
   verticalTextMask: '<path d="M4 3h8M8 3v10" stroke-dasharray="2 1.5"/>',
+  perspCrop: '<path d="M4 2v9.5h10M2 4.5h9.5V14" /><path d="M6 6l4 1-1 3-3-1z" stroke-dasharray="1.5 1"/>',
   ease: '<path d="M2 13.5C7 13.5 9 2.5 14 2.5"/><circle cx="2" cy="13.5" r="1.2" fill="currentColor"/><circle cx="14" cy="2.5" r="1.2" fill="currentColor"/>',
 };
 

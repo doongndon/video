@@ -8,7 +8,7 @@ import { mobileApi } from '../ui/mobile.js';
 import { PhotoDoc, newLayer, makeCanvas, cloneCanvas, textBox, boxCorners } from './doc.js';
 import { History } from './history.js';
 import * as SEL from './selection.js';
-import { TOOL_BY_ID, FreeTransform } from './tools.js';
+import { TOOL_BY_ID } from './tools.js';
 import { ADJUSTMENTS, FILTERS } from './adjust.js';
 import * as IO from './io.js';
 import * as D from './pdialogs.js';
@@ -18,7 +18,7 @@ import { nearestOnPath } from './paths.js';
 import { installPathTools } from './pathtools.js';
 import { buildPathsPanel, buildCharacterPanel, installTypeCommands, warpTextDialog } from './panels2.js';
 import * as PT from './paths.js';
-import './transform.js';
+import { Transformer, TRANSFORM_MODES, WARP_STYLES, applyM, composeM, unprojectQuad } from './transform.js';
 import { FX_NAMES } from './styles.js';
 import { buildToolbar, buildToolStrip, buildOptionsBar, buildLayersPanel, buildColorPanel, buildPropertiesPanel, buildHistoryPanel } from './panels.js';
 
@@ -697,19 +697,25 @@ export function createPhotoEditor(root) {
   // ---------------------------------------------------------------- free transform
 
   P.cmd = {};
-  P.cmd.freeTransform = () => {
+  /** Ctrl+T and Edit ▸ Transform: mode free | skew | distort | perspective | warp; target 'selection' for Select ▸ Transform Selection. */
+  P.cmd.freeTransform = (mode = 'free', target = 'auto') => {
     const doc = P.doc;
-    const l = doc?.active;
-    if (!l || l.kind === 'adjust') return toast('변형할 레이어를 선택하세요');
-    if (l.locked) return toast('잠긴 레이어입니다');
+    if (!doc) return toast('먼저 문서를 여세요');
+    if (P.transform) {
+      P.transform.setMode(mode);
+      P.emit('transform');
+      return undefined;
+    }
     try {
-      P.transform = new FreeTransform(P);
+      finishText();
+      P.transform = new Transformer(P, { mode, target });
       P.emit('transform');
     } catch (err) {
       toast(String(err.message || err));
     }
     return undefined;
   };
+  P.cmd.transformSelection = () => P.cmd.freeTransform('free', 'selection');
   P.applyTransform = () => {
     const t = P.transform;
     if (!t) return;
@@ -724,6 +730,52 @@ export function createPhotoEditor(root) {
     t.cancel();
     P.emit('transform');
     P.afterHistory();
+  };
+  P.transformModes = TRANSFORM_MODES;
+  P.warpStyles = WARP_STYLES;
+  P.textBox = (l) => textBox(l);
+  P.pathBounds = (sps) => PT.pathBounds(sps);
+  /** Edit ▸ Transform ▸ Again: repeat the last (affine) transform on the active layer. */
+  P.cmd.transformAgain = () => {
+    const M = P.lastTransform;
+    const doc = P.doc;
+    const l = doc?.active;
+    if (!M) return toast('다시 할 변형이 없습니다');
+    if (!l || l.kind === 'adjust' || l.kind === 'fill') return undefined;
+    P.run('다시 변형', () => {
+      if (l.kind === 'raster' && l.canvas) {
+        const cs = [[l.x, l.y], [l.x + l.canvas.width, l.y], [l.x + l.canvas.width, l.y + l.canvas.height], [l.x, l.y + l.canvas.height]].map((q) => applyM(M, q));
+        const xs = cs.map((q) => q[0]);
+        const ys = cs.map((q) => q[1]);
+        const x0 = Math.floor(Math.min(...xs));
+        const y0 = Math.floor(Math.min(...ys));
+        const c = makeCanvas(Math.ceil(Math.max(...xs)) - x0 + 1, Math.ceil(Math.max(...ys)) - y0 + 1);
+        const g = c.getContext('2d');
+        g.imageSmoothingQuality = 'high';
+        const m = composeM(M, [1, 0, 0, 1, l.x, l.y]);
+        g.setTransform(m[0], m[1], m[2], m[3], m[4] - x0, m[5] - y0);
+        g.drawImage(l.canvas, 0, 0);
+        l.canvas = c;
+        l.x = x0;
+        l.y = y0;
+      } else if (l.kind === 'smart') {
+        l.smart = { ...l.smart, m: composeM(M, l.smart.m), corners: l.smart.corners?.map((q) => applyM(M, q)) || null };
+      } else if (l.kind === 'shape') {
+        P.setShapePathDoc(l, PT.mapPath(P.shapePathDoc(l), (q) => applyM(M, q)));
+      } else if (l.kind === 'text') {
+        const L = textBox(l);
+        const [cx, cy] = applyM(M, [l.x + L.w / 2, l.y + L.h / 2]);
+        const k = Math.hypot(M[0], M[1]);
+        l.text = { ...l.text, size: Math.max(1, Math.round(l.text.size * k * 10) / 10) };
+        l.rotation = ((l.rotation || 0) + (Math.atan2(M[1], M[0]) * 180) / Math.PI) % 360;
+        const L2 = textBox(l);
+        l.x = Math.round(cx - L2.w / 2);
+        l.y = Math.round(cy - L2.h / 2);
+      }
+      l._styled = null;
+      doc.touch(l);
+    });
+    return undefined;
   };
 
   // ---------------------------------------------------------------- pointer input
@@ -767,7 +819,7 @@ export function createPhotoEditor(root) {
     if (P.editingText && P.tool !== 'text') finishText();
     if (P.transform) {
       active = 'transform';
-      P.transform.down(p);
+      P.transform.down(p, e);
       return;
     }
     if (P.cloneSourceNext && P.tool === 'clone') {
@@ -823,7 +875,7 @@ export function createPhotoEditor(root) {
     TOOL_BY_ID[P.tool].hover?.(P, p, e);
     if (P.transform) {
       const hcur = P.transform.hit(p);
-      stage.style.cursor = hcur === 'move' ? 'move' : hcur === 'rotate' ? 'alias' : 'nwse-resize';
+      stage.style.cursor = hcur === 'move' ? 'move' : hcur === 'rotate' ? 'alias' : hcur === 'none' ? 'default' : hcur === 'pivot' ? 'crosshair' : 'nwse-resize';
     }
     P.redraw();
   });
@@ -926,7 +978,7 @@ export function createPhotoEditor(root) {
       KeyP: () => (mod ? null : cycle(['pen', 'freePen'], e.shiftKey)),
       KeyD: () => (mod ? (e.shiftKey ? P.cmd.reselect() : P.cmd.deselect()) : P.defaultColors()),
       KeyI: () => (mod ? (e.shiftKey ? P.cmd.inverse() : D.adjustDialog(P, 'invert')) : P.setTool('eyedropper')),
-      KeyT: () => (mod ? P.cmd.freeTransform() : cycle(['text', 'verticalText', 'textMask', 'verticalTextMask'], e.shiftKey)),
+      KeyT: () => (mod && e.shiftKey ? P.cmd.transformAgain() : mod ? P.cmd.freeTransform() : cycle(['text', 'verticalText', 'textMask', 'verticalTextMask'], e.shiftKey)),
       KeyJ: () => (mod && e.shiftKey ? P.cmd.layerVia(true) : mod ? P.cmd.duplicateLayer() : P.setTool('heal')),
       KeyE: () => (mod && e.shiftKey && e.altKey ? P.cmd.stampVisible() : mod ? (e.shiftKey ? P.cmd.mergeVisible() : P.cmd.mergeDown()) : P.setTool('eraser')),
       KeyN: () => (mod && e.shiftKey ? P.cmd.newLayer() : mod ? D.newDocDialog(P) : null),
@@ -1493,6 +1545,43 @@ function installCommands(P) {
     });
     P.fit();
   };
+  /** Perspective crop: straighten the quad q (TL, TR, BR, BL) into the new canvas. */
+  P.perspectiveCrop = (q) => {
+    const doc = P.doc;
+    const W = Math.max(1, Math.round(Math.max(Math.hypot(q[1][0] - q[0][0], q[1][1] - q[0][1]), Math.hypot(q[2][0] - q[3][0], q[2][1] - q[3][1]))));
+    const H = Math.max(1, Math.round(Math.max(Math.hypot(q[3][0] - q[0][0], q[3][1] - q[0][1]), Math.hypot(q[2][0] - q[1][0], q[2][1] - q[1][1]))));
+    if (W * H > 80e6) return toast('결과가 너무 큽니다');
+    P.run('원근 자르기', () => {
+      const flatLayer = (l) => {
+        const c = makeCanvas(doc.width, doc.height);
+        const ct = doc.content(l);
+        if (ct) c.getContext('2d').drawImage(ct.canvas, ct.x, ct.y);
+        return c;
+      };
+      for (const l of doc.layers) {
+        if (l.kind === 'group' || l.kind === 'adjust') {
+          if (l.mask) l.mask = { ...l.mask, canvas: unprojectQuad(maskDoc(l.mask), q, W, H), x: 0, y: 0 };
+          continue;
+        }
+        const src = flatLayer(l);
+        Object.assign(l, { kind: 'raster', canvas: unprojectQuad(src, q, W, H), x: 0, y: 0, text: null, shape: null, fill: null, smart: null, smartSrc: null, smartDoc: null, rotation: 0, _text: null, _shape: null, _styled: null });
+        if (l.mask) l.mask = { ...l.mask, canvas: unprojectQuad(maskDoc(l.mask), q, W, H), x: 0, y: 0 };
+        l.vmask = null;
+        doc.touch(l);
+      }
+      doc.width = W;
+      doc.height = H;
+      doc.selection = null;
+      doc.rev++;
+    });
+    P.fit();
+    return undefined;
+    function maskDoc(m) {
+      const c = makeCanvas(doc.width, doc.height);
+      c.getContext('2d').drawImage(m.canvas, m.x, m.y);
+      return c;
+    }
+  };
   C.cropToSelection = () => {
     if (!need()) return;
     const s = P.doc.selection;
@@ -1706,6 +1795,14 @@ function buildMenus(P) {
       '-',
       { label: '자유 변형', key: `${mod}T`, disabled: no(), action: () => C.freeTransform() },
       { label: '변형', disabled: no(), submenu: [
+        { label: '다시', key: `${mod}Shift+T`, disabled: !P.lastTransform, action: () => C.transformAgain() },
+        '-',
+        { label: '크기 조절 · 회전', action: () => C.freeTransform('free') },
+        { label: '기울이기', action: () => C.freeTransform('skew') },
+        { label: '왜곡', action: () => C.freeTransform('distort') },
+        { label: '원근', action: () => C.freeTransform('perspective') },
+        { label: '뒤틀기', action: () => C.freeTransform('warp') },
+        '-',
         { label: '90° 시계 방향 회전', action: () => C.transformLayer('cw') },
         { label: '90° 반시계 방향 회전', action: () => C.transformLayer('ccw') },
         { label: '180° 회전', action: () => C.transformLayer('180') },
@@ -1739,6 +1836,7 @@ function buildMenus(P) {
       { label: '다시 선택', key: `${mod}Shift+D`, disabled: !P.doc?.lastSelection, action: () => C.reselect() },
       { label: '반전', key: `${mod}Shift+I`, disabled: no(), action: () => C.inverse() },
       '-',
+      { label: '선택 영역 변형', disabled: !P.doc?.selection, action: () => C.transformSelection() },
       { label: '색상 범위 (전경색)…', disabled: no(), action: () => C.colorRange() },
       { label: '레이어 모양대로 선택', disabled: no(), action: () => C.selectFromLayer() },
       '-',

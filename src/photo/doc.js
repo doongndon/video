@@ -367,6 +367,18 @@ export class PhotoDoc {
     const only = upTo == null ? null : new Set(this.layers.slice(0, upTo).map((l) => l.id));
     const o = { skipId, float, only, sig: '', fg, bg };
     this.renderList(ctx, this.children(null), o);
+    // a float that belongs to no layer (a transformed group, mask or selection) goes on top
+    if (float && !float.layerId) {
+      if (float.tint) {
+        const t = makeCanvas(float.canvas.width, float.canvas.height);
+        const tg = t.getContext('2d');
+        tg.drawImage(float.canvas, 0, 0);
+        tg.globalCompositeOperation = 'source-in';
+        tg.fillStyle = float.tint === 'mask' ? 'rgba(255,60,60,.45)' : 'rgba(70,140,255,.4)';
+        tg.fillRect(0, 0, t.width, t.height);
+        ctx.drawImage(t, float.x, float.y);
+      } else ctx.drawImage(float.canvas, float.x, float.y);
+    }
     ctx.restore();
   }
 

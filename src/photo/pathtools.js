@@ -106,6 +106,8 @@ export function installPathTools(P) {
     }
   });
 
+  P.shapePathDoc = (l) => normaliseShape(P.doc, l);
+  P.setShapePathDoc = (l, sps) => writeShape(P.doc, l, sps);
   P.editVectorMask = (l) => {
     P.pathTarget = { kind: 'vmask', layerId: l.id };
     P.setTool('directSelect');

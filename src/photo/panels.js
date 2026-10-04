@@ -158,7 +158,41 @@ export function buildOptionsBar(P) {
     }
     // tool-specific actions
     if (P.transform) {
-      ctrls.unshift(h('span.ph-opt.ph-hint', '자유 변형 중'), h('button.primary.small', { onclick: () => P.applyTransform() }, '✓ 적용'), h('button.small', { onclick: () => P.cancelTransform() }, '✕ 취소'));
+      const T = P.transform;
+      const n = T.numbers();
+      const numIn2 = (key, label, unit, step = 1) => {
+        const inp = h('input.ph-num', { type: 'number', value: n[key], step, 'aria-label': label });
+        inp.addEventListener('change', () => {
+          const v = { [key]: +inp.value };
+          if (key === 'w' && link.checked) v.h = n.h * (+inp.value / (n.w || 1));
+          if (key === 'h' && link.checked) v.w = n.w * (+inp.value / (n.h || 1));
+          T.setNumbers(v);
+          render();
+        });
+        return h('label.ph-opt', h('span', label), inp, unit ? h('small', unit) : null);
+      };
+      const link = h('input', { type: 'checkbox', checked: true, 'aria-label': '비율 고정', title: '폭·높이 비율 고정' });
+      const modes = h('span.ph-opt', ...P.transformModes.map(([id, name]) => h(`button.small.ph-tog${T.mode === id ? '.on' : ''}`, { onclick: () => { T.setMode(id); render(); } }, name)));
+      ctrls.length = 0;
+      ctrls.push(h('span.ph-opt.ph-hint', '변형'), modes);
+      if (T.mode === 'warp') {
+        const st = h('select', { 'aria-label': '뒤틀기 스타일' }, [['custom', '사용자 정의 (점 끌기)'], ...P.warpStyles.filter((w) => w[0] !== 'none')].map(([v, t2]) => h('option', { value: v }, t2)));
+        st.value = T.warp?.style || 'custom';
+        st.addEventListener('change', () => { T.setWarpPreset(st.value, T.warp?.bend ?? 50, T.warp?.h ?? 0, T.warp?.v ?? 0); render(); });
+        ctrls.push(h('label.ph-opt', h('span', '뒤틀기'), st));
+        if (T.warp && T.warp.style !== 'custom') {
+          for (const [key, label] of [['bend', '구부리기'], ['h', '가로 왜곡'], ['v', '세로 왜곡']]) {
+            const inp = h('input.ph-num', { type: 'number', min: -100, max: 100, value: T.warp[key] ?? (key === 'bend' ? 50 : 0) });
+            inp.addEventListener('change', () => { T.setWarpPreset(T.warp.style, key === 'bend' ? +inp.value : T.warp.bend, key === 'h' ? +inp.value : T.warp.h, key === 'v' ? +inp.value : T.warp.v); });
+            ctrls.push(h('label.ph-opt', h('span', label), inp, h('small', '%')));
+          }
+        }
+      } else {
+        ctrls.push(numIn2('x', 'X', 'px'), numIn2('y', 'Y', 'px'), numIn2('w', '폭', '%', 0.1), h('label.ph-opt', link, h('span', '🔗')), numIn2('h', '높이', '%', 0.1), numIn2('angle', '회전', '°', 0.1), numIn2('skew', '기울기', '°', 0.1));
+      }
+      ctrls.push(h('button.primary.small', { onclick: () => P.applyTransform() }, '✓ 적용'), h('button.small', { onclick: () => P.cancelTransform() }, '✕ 취소'));
+      el.replaceChildren(h('span.ph-tname', icon('move', 16), '변형'), ...ctrls);
+      return;
     } else if (t.id === 'crop') {
       ctrls.push(h('button.primary.small', { onclick: () => t.apply(P) }, '✓ 자르기'), h('button.small', { onclick: () => { t.activate(P); } }, '되돌리기'));
     } else if (t.id === 'clone') {
