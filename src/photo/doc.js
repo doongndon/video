@@ -55,7 +55,7 @@ function snapshotLayer(l) {
   return o;
 }
 
-const DOC_ARRAYS = ['selectedIds', 'guides', 'channels', 'paths', 'notes', 'counts', 'samplers'];
+const DOC_ARRAYS = ['selectedIds', 'guides', 'channels', 'paths', 'notes', 'counts', 'samplers', 'comps'];
 
 export class PhotoDoc {
   constructor({ name = '제목 없음', width = 1920, height = 1080, background = '#ffffff' } = {}) {
@@ -75,6 +75,7 @@ export class PhotoDoc {
     this.notes = [];
     this.counts = [];
     this.samplers = [];
+    this.comps = []; // layer comps { id, name, state }
     this.mode = 'rgb';
     this.resolution = 72;
     this.sourceMediaId = null;

@@ -22,6 +22,7 @@ import { installBrushTools } from './brushes.js';
 import { installPaint2 } from './paint2.js';
 import { installActions, buildActionsPanel } from './actions.js';
 import { installEdit2 } from './edit2.js';
+import { installExtra3, buildCompsPanel } from './extra3.js';
 import { installViewExtras, buildNavigatorPanel, buildInfoPanel, buildHistogramPanel } from './view2.js';
 import { mixIntoMask } from './selectx.js';
 import { buildPathsPanel, buildCharacterPanel, installTypeCommands, warpTextDialog } from './panels2.js';
@@ -156,6 +157,7 @@ export function createPhotoEditor(root) {
     info: { title: '정보', el: buildInfoPanel(P) },
     histo: { title: '히스토그램', el: buildHistogramPanel(P) },
     actions: { title: '액션', el: buildActionsPanel(P) },
+    comps: { title: '레이어 구성요소', el: buildCompsPanel(P) },
   };
   const sideTabs = (ids) => {
     let cur = loadPref(`photo.side.${ids[0]}`, ids[0]);
@@ -176,7 +178,7 @@ export function createPhotoEditor(root) {
     return { el: h('div.ph-pgroup', bar, body), show, ids };
   };
   const groupsTop = sideTabs(['color', 'props', 'char', 'history', 'nav', 'info', 'histo']);
-  const groupLayers = sideTabs(['layers', 'channels', 'paths', 'actions']);
+  const groupLayers = sideTabs(['layers', 'channels', 'paths', 'actions', 'comps']);
   const side = h('div.ph-side', groupsTop.el, groupLayers.el);
   // phone: a sheet that shows one panel at a time
   const sheetBody = h('div.ph-sheet-body');
@@ -1025,9 +1027,9 @@ export function createPhotoEditor(root) {
       KeyX: () => (mod && e.shiftKey ? P.cmd.liquify() : mod ? P.cmd.cut() : P.swapColors()),
       KeyV: () => (mod ? P.cmd.paste() : P.setTool('move')),
       KeyM: () => (mod ? D.adjustDialog(P, 'curves') : P.setTool(e.shiftKey ? (P.tool === 'rect' ? 'ellipse' : 'rect') : P.tool === 'ellipse' ? 'ellipse' : 'rect')),
-      KeyL: () => (mod ? D.adjustDialog(P, 'levels') : cycle(['lasso', 'polyLasso', 'magLasso'], e.shiftKey)),
+      KeyL: () => (mod && e.shiftKey ? (e.altKey ? P.cmd.autoContrast() : P.cmd.autoTone()) : mod ? D.adjustDialog(P, 'levels') : cycle(['lasso', 'polyLasso', 'magLasso'], e.shiftKey)),
       KeyU: () => (mod ? (e.shiftKey ? D.adjustDialog(P, 'desaturate') : D.adjustDialog(P, 'hueSat')) : P.setTool('shape')),
-      KeyB: () => (mod ? D.adjustDialog(P, 'colorBalance') : cycle(['brush', 'pencil', 'colorReplace', 'mixer'], e.shiftKey)),
+      KeyB: () => (mod && e.shiftKey ? P.cmd.autoColor() : mod ? D.adjustDialog(P, 'colorBalance') : cycle(['brush', 'pencil', 'colorReplace', 'mixer'], e.shiftKey)),
       KeyG: () => (mod ? (e.altKey ? P.cmd.toggleClip() : e.shiftKey ? P.cmd.ungroup() : P.cmd.groupLayers()) : P.setTool(e.shiftKey ? (P.tool === 'gradient' ? 'bucket' : 'gradient') : P.tool === 'bucket' ? 'bucket' : 'gradient')),
       KeyF: () => (mod ? (e.shiftKey ? P.cmd.fade() : D.repeatFilter(P)) : null),
       KeyW: () => (mod ? null : cycle(['objSel', 'quickSel', 'wand'], e.shiftKey)),
@@ -1130,6 +1132,7 @@ export function createPhotoEditor(root) {
   installBrushTools(P);
   installPaint2(P);
   installEdit2(P);
+  installExtra3(P);
   installViewExtras(P, { stage });
   installTypeCommands(P, PT);
   installActions(P); // last: it wraps every command so it can record them
@@ -1850,6 +1853,9 @@ function buildMenus(P) {
       ] },
       { label: '내용 인식 비율…', key: `${mod}Alt+Shift+C`, disabled: no(), action: () => C.contentAwareScale() },
       { label: '퍼펫 뒤틀기…', disabled: no(), action: () => C.puppetWarp() },
+      { label: '하늘 대체…', disabled: no(), action: () => C.skyReplacement() },
+      '-',
+      { label: '텍스트 찾기 / 바꾸기…', disabled: no(), action: () => C.findReplace() },
       '-',
       { label: '브러시 사전 설정 정의… (선택 영역의 어두운 부분)', disabled: no(), action: () => C.defineBrush() },
       { label: '패턴 정의… (선택 영역 또는 전체)', disabled: no(), action: () => C.definePattern() },
@@ -1857,6 +1863,10 @@ function buildMenus(P) {
     '이미지': () => [
       { label: '조정', disabled: no(), submenu: adjustItems },
       { label: '자동 톤', key: `${mod}Shift+L`, disabled: no(), action: () => C.autoTone() },
+      { label: '자동 대비', key: `${mod}Alt+Shift+L`, disabled: no(), action: () => C.autoContrast() },
+      { label: '자동 색상', key: `${mod}Shift+B`, disabled: no(), action: () => C.autoColor() },
+      { label: '색상 일치… (다른 사진의 색감)', disabled: no(), action: () => C.matchColor() },
+      { label: '모드', disabled: no(), submenu: [{ label: 'RGB 색상', checked: P.doc?.mode !== 'gray', action: () => toast('RGB 색상 모드입니다 (회색 음영으로 바꾼 레이어는 다시 색이 생기지 않아요)') }, { label: '회색 음영으로 바꾸기', checked: P.doc?.mode === 'gray', action: () => C.grayscale() }] },
       '-',
       { label: '이미지 크기…', key: `${mod}Alt+I`, disabled: no(), action: () => D.imageSizeDialog(P) },
       { label: '캔버스 크기…', key: `${mod}Alt+C`, disabled: no(), action: () => D.canvasSizeDialog(P) },
@@ -1885,6 +1895,7 @@ function buildMenus(P) {
       '-',
       { label: '피사체 (색 분석, 단순 추정)', disabled: no(), action: () => C.selectSubject() },
       { label: '하늘 (단순 추정)', disabled: no(), action: () => C.selectSky() },
+      { label: '초점 영역…', disabled: no(), action: () => C.focusArea() },
       { label: '색상 범위…', disabled: no(), action: () => C.colorRange() },
       '-',
       { label: '선택 및 마스크…', key: `${mod}Alt+R`, disabled: no(), action: () => C.selectAndMask() },
@@ -1930,6 +1941,7 @@ function buildMenus(P) {
       { label: '정보', action: () => P.showPanel('info') },
       { label: '히스토그램', action: () => P.showPanel('histo') },
       { label: '액션', action: () => P.showPanel('actions') },
+      { label: '레이어 구성요소', action: () => P.showPanel('comps') },
     ],
     '도움말': () => [
       { label: '설명서 (모든 기능)', action: () => import('../docs/viewer.js').then((m) => m.openDocs('p-start')) },

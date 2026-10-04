@@ -9,7 +9,7 @@ import { FILTERS, ADJUSTMENTS, defaultFilterParams, defaultParams, applyFilter }
 import { applyToLayer, adjustCanvas } from './pdialogs.js';
 
 // commands that open a file picker, a dialog of their own, or only change the view
-const SKIP = new Set(['open', 'placeFiles', 'place', 'openFromVideo', 'savePsd', 'saveProject', 'exportLayers', 'defineBrush', 'definePattern', 'liquify', 'colorRange', 'selectAndMask', 'quickMaskOptions', 'layerStyle', 'renameLayer', 'renamePath', 'rename', 'toggleRulers', 'toggleGuides', 'toggleGrid', 'toggleSnap', 'toggleGuideLock', 'newGuide', 'guideLayout', 'gridSettings', 'editSmart', 'commitSmart', 'replaceSmart', 'exportSmart', 'placeEmbedded', 'view', 'toggle', 'contentAwareScale', 'puppetWarp', 'fade', 'duplicateDoc', 'batch']);
+const SKIP = new Set(['open', 'placeFiles', 'place', 'openFromVideo', 'savePsd', 'saveProject', 'exportLayers', 'defineBrush', 'definePattern', 'liquify', 'colorRange', 'selectAndMask', 'quickMaskOptions', 'layerStyle', 'renameLayer', 'renamePath', 'rename', 'toggleRulers', 'toggleGuides', 'toggleGrid', 'toggleSnap', 'toggleGuideLock', 'newGuide', 'guideLayout', 'gridSettings', 'editSmart', 'commitSmart', 'replaceSmart', 'exportSmart', 'placeEmbedded', 'view', 'toggle', 'contentAwareScale', 'puppetWarp', 'fade', 'duplicateDoc', 'batch', 'skyReplacement', 'matchColor', 'focusArea', 'findReplace', 'newComp']);
 
 const adj = (id, p = {}) => ({ type: 'adjust', id, params: { ...defaultParams(id), ...p } });
 const fil = (id, p = {}) => ({ type: 'filter', id, params: { ...defaultFilterParams(id), ...p } });
