@@ -207,6 +207,7 @@ export function createMenubar(el) {
       { label: '단축키 목록', key: 'F1', action: c.shortcuts },
       { label: '샘플 프로젝트 열기', action: c.loadSample },
       '-',
+      { label: 'Montage 웹사이트 (새 탭)', action: () => window.open('index.html', '_blank', 'noopener') },
       { label: 'Montage 정보', action: c.about },
     ],
   };

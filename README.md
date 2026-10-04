@@ -14,7 +14,24 @@ python3 -m http.server 8000
 npx serve .
 ```
 
-브라우저에서 `http://localhost:8000` 을 엽니다. 빌드 단계는 없습니다. 처음 열면 샘플 프로젝트와 **시작 가이드**가 나옵니다(`?blank`를 붙이면 빈 프로젝트로 시작, `?mode=photo`를 붙이면 사진 편집으로 시작). 마지막으로 쓴 편집기(영상/사진)는 기억했다가 다음에 그 화면으로 엽니다.
+브라우저에서 `http://localhost:8000` 을 엽니다. 빌드 단계는 없습니다.
+
+## 웹사이트와 편집기
+
+저장소 루트는 웹사이트이고, 편집기는 `app.html`에 있습니다.
+
+| 주소 | 내용 |
+| --- | --- |
+| `index.html` | 홈: 두 편집기 소개, AI 편집, 파일이 나가지 않는 방식, 휴대폰 화면, 설명서 검색, 알려진 제한 |
+| `video.html` | 영상 편집 기능: 설명서의 영상·AI 쪽마다 한 묶음씩 (설명서 내용에서 바로 만들어서 항상 같음) |
+| `photo.html` | 사진 편집 기능: 설명서의 사진 쪽마다 한 묶음씩 |
+| `docs.html` | 설명서 41쪽을 웹 페이지로: 목차, 검색, 이 쪽의 내용, 이전/다음. `docs.html#쪽-이름`, `docs.html?q=검색어` |
+| `app.html` | 편집기. 처음 열면 샘플 프로젝트와 **시작 가이드**가 나옵니다(`?blank` 빈 프로젝트, `?mode=photo` / `?mode=video` 시작 편집기) |
+
+- 모든 쪽 위의 메뉴: 홈 · 영상 편집 · 사진 편집 · 설명서, 밝게/어둡게, **편집기 열기**(영상 / 사진). 휴대폰에서는 ☰ 메뉴로 접힙니다.
+- 예전 주소는 그대로 이어집니다: 루트에 `?blank`나 `?mode=…`가 붙으면 `app.html`로, `#docs/쪽-이름`이 붙으면 `docs.html#쪽-이름`으로 넘어갑니다.
+- 편집기 안의 **설명서** 버튼은 지금처럼 편집기 위에 겹쳐 열리고, **도움말 ▸ Montage 웹사이트**는 새 탭으로 웹사이트를 엽니다. 마지막으로 쓴 편집기(영상/사진)는 기억했다가 `app.html`을 열면 그 화면으로 엽니다.
+- 웹사이트의 화면 사진(`site/img/`)은 이 편집기를 실제로 실행해 찍은 것입니다. 글꼴은 Google Fonts에서 불러옵니다.
 
 **권장 브라우저:** 최신 Chrome / Edge. WebCodecs, Canvas `filter`, WebGL/WebGL2, AudioWorklet을 사용합니다.
 - MP4(H.264/AAC) 디코딩·인코딩은 브라우저 코덱 지원에 따라 달라집니다. H.264를 지원하지 않는 브라우저(예: 일부 Linux 빌드의 Chromium)에서는 WebM으로 내보내면 됩니다. 개발 환경의 Chromium에는 H.264 인코더가 없어 **MP4 내보내기 경로는 직접 시험하지 못했습니다.**
@@ -187,7 +204,12 @@ npx serve .
 ## 구조
 
 ```
-index.html            레이아웃
+index.html            웹사이트 홈 (video.html, photo.html, docs.html 과 함께)
+styles/site.css       웹사이트 스타일 (밝게/어둡게)
+src/site/site.js      웹사이트 공통 메뉴·바닥글·테마, 홈의 타임라인
+src/site/features.js  기능 쪽을 설명서 내용으로 만들기
+site/img/             웹사이트 화면 사진, 파비콘
+app.html              편집기 화면 (레이아웃)
 styles/app.css        스타일 (--ui-scale 로 크기 조절)
 src/main.js           시작, 패널 배치, 상태 표시줄
 src/store.js          상태·선택·스냅숏 기반 실행 취소
@@ -218,7 +240,7 @@ src/ui/quick-panel.js 빠른 편집 패널
 src/ui/mobile.js      휴대폰 화면 배치(위 막대·도구 막대·시트)
 src/ui/*.js           패널 UI (아이콘, 작업 영역, 효과 프리셋, 글꼴 선택 창 포함)
 src/mode.js           영상 / 사진 편집기 바꾸기 (사진 편집기는 처음 쓸 때 불러옴)
-src/docs/*.js         앱 안 설명서 (본문 content-*.js, 간단한 마크다운 render.js, 화면 viewer.js) + styles/docs.css
+src/docs/*.js         설명서 (본문 content-*.js, 간단한 마크다운 render.js, 아이콘 icons.js, 화면 viewer.js: 편집기 안 겹침 창과 docs.html 둘 다) + styles/docs.css
 src/photo/doc.js      사진 문서·레이어(픽셀·글자·모양·조정)·마스크·혼합 모드·레이어 스타일 합성
 src/photo/tools.js    사진 도구(선택·브러시·도장·복구·리터치·문자·모양·자르기 등)와 자유 변형
 src/photo/brushes.js  브러시 모양·흩뿌리기·색 변화, 복구·패치·제거·혼합·작업 내역 브러시, 지우개, 눈금자·메모·카운트·샘플러

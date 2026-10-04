@@ -2,38 +2,224 @@
 <html lang="ko">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
-  <meta name="theme-color" content="#16181c" />
-  <title>Montage 영상 편집기</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <script>
+    // Old links went straight to the editor: ?blank / ?mode=… open it, #docs/<page> opens the manual.
+    (function () {
+      var m = location.hash.match(/^#docs(?:\/([\w-]+))?/);
+      if (m) location.replace('docs.html' + (m[1] ? '#' + m[1] : ''));
+      else if (/[?&](blank|mode=)/.test(location.search)) location.replace('app.html' + location.search + location.hash);
+      try { var t = localStorage.getItem('montage.docs.theme'); if (t) document.documentElement.dataset.theme = t; } catch (e) { /* storage blocked */ }
+    })();
+  </script>
+  <title>Montage — 브라우저 영상·사진 편집기</title>
+  <meta name="description" content="설치 없이 브라우저에서 쓰는 영상 편집기와 사진 편집기. 타임라인, 키프레임, 자막, 레이어, 선택, 내용 인식 채우기까지. 파일은 내 컴퓨터 밖으로 나가지 않아요." />
+  <meta name="theme-color" content="#15171b" />
+  <link rel="icon" href="site/img/favicon.svg" type="image/svg+xml" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;700&family=Noto+Serif+KR:wght@400;700&family=Black+Han+Sans&family=Do+Hyeon&family=Jua&family=Nanum+Pen+Script&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="styles/app.css" />
-  <link rel="stylesheet" href="styles/photo.css" />
-  <link rel="stylesheet" href="styles/docs.css" />
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700;900&family=Noto+Serif+KR:wght@700;900&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles/site.css" />
 </head>
-<body>
-  <div id="app">
-    <header id="menubar"></header>
-    <main id="workspace">
-      <div class="row" id="row-top">
-        <section class="panel-group" id="pg-top-left"></section>
-        <div class="splitter v" data-var="--tl-w" data-target="pg-top-left"></div>
-        <section class="panel-group" id="pg-top-right"></section>
+<body class="site">
+  <a class="skip" href="#main">본문으로 건너뛰기</a>
+  <header id="site-header" class="site-header"></header>
+
+  <main id="main">
+    <!-- hero: the editing room -->
+    <section class="hero stage" aria-labelledby="hero-title">
+      <div class="wrap hero-grid">
+        <div>
+          <p class="eyebrow"><span class="tc">00:00:00:00</span> 설치 없는 브라우저 편집기</p>
+          <h1 id="hero-title">영상도 사진도,<br /><em>브라우저 하나로</em> 편집해요.</h1>
+          <p class="lead">Premiere Pro의 타임라인 편집과 Photoshop의 레이어 편집을 따라 만든 두 편집기가 한 프로그램에 들어 있어요. 가입도 설치도 없고, 가져온 영상과 사진은 내 컴퓨터 밖으로 나가지 않아요.</p>
+          <div class="cta-row">
+            <a class="btn btn-video" href="app.html?mode=video"><i data-icon="timeline" data-size="18"></i>영상 편집 시작</a>
+            <a class="btn btn-photo" href="app.html?mode=photo"><i data-icon="image" data-size="18"></i>사진 편집 시작</a>
+            <a class="btn btn-ghost" href="docs.html"><i data-icon="book" data-size="18"></i>설명서</a>
+          </div>
+          <p class="hero-note"><span>최신 Chrome · Edge 권장</span><span>휴대폰 화면 지원</span><span>무료</span></p>
+        </div>
+        <div class="shots">
+          <figure class="frame" style="margin:0">
+            <div class="frame-bar"><i></i><i></i><i></i><b>영상 편집 — 샘플 시퀀스</b></div>
+            <img src="site/img/video-editor.jpg" width="1600" height="950" alt="영상 편집기 화면: 효과 컨트롤 패널, 프로그램 모니터, 여러 트랙의 타임라인" />
+          </figure>
+          <figure class="frame sub" style="margin:0">
+            <div class="frame-bar"><i></i><i></i><i></i><b>사진 편집 — 여름 포스터</b></div>
+            <img src="site/img/photo-editor.jpg" width="1600" height="950" alt="사진 편집기 화면: 그레이디언트 하늘, 해, 산, SUMMER 글자 레이어와 레이어 패널" loading="lazy" />
+          </figure>
+        </div>
       </div>
-      <div class="splitter h" data-var="--top-h" data-target="row-top"></div>
-      <div class="row" id="row-bottom">
-        <section class="panel-group" id="pg-bottom-left"></section>
-        <div class="splitter v" data-var="--bl-w" data-target="pg-bottom-left"></div>
-        <section id="tools" aria-label="도구"></section>
-        <section class="panel-group" id="pg-timeline"></section>
-        <section id="meters" aria-label="오디오 레벨"></section>
+      <!-- a timeline like the editor's -->
+      <div class="tl" aria-hidden="true">
+        <div class="wrap">
+          <div class="tl-body">
+            <div class="tl-ruler"><span></span><div class="tl-ticks"><span style="left:0%">00:00:00:00</span><span style="left:41.7%">00:00:05:00</span><span style="left:83.3%">00:00:10:00</span></div></div>
+            <div class="tl-track"><span class="tl-label">V2</span><div class="tl-lane"><span class="clip g" style="left:4%;width:30%">T 제목 — Montage</span><span class="clip g" style="left:52%;width:28%">T 자막</span></div></div>
+            <div class="tl-track"><span class="tl-label">V1</span><div class="tl-lane"><span class="clip v" style="left:0%;width:47%">밤하늘 파랑</span><span class="clip v" style="left:47%;width:46%;padding-left:5%">노을</span><span class="clip adj" style="left:43%;width:8%">교차</span></div></div>
+            <div class="tl-track"><span class="tl-label">A1</span><div class="tl-lane"><span class="clip a" style="left:0%;width:93%"><span class="wave"></span>샘플 음악.wav</span></div></div>
+            <div class="playhead"><span>00:00:01:15</span></div>
+          </div>
+        </div>
       </div>
-    </main>
-    <div id="photo" hidden></div>
-    <footer id="statusbar"></footer>
-  </div>
-  <div id="drop-overlay" hidden>여기에 놓으면 파일을 가져옵니다</div>
-  <script type="module" src="src/main.js"></script>
+    </section>
+
+    <!-- two editors -->
+    <section class="section" aria-labelledby="editors-title">
+      <div class="wrap">
+        <p class="kicker"><i data-icon="film"></i>편집기 두 개, 프로그램 하나</p>
+        <h2 id="editors-title">영상은 타임라인에서, 사진은 레이어에서</h2>
+        <p class="intro">위 막대의 <strong>영상 편집 / 사진 편집</strong> 버튼으로 오가요. 사진 편집기에서 만든 이미지는 영상 프로젝트로 바로 보낼 수 있고, 영상 프로젝트의 이미지는 사진 편집기로 열 수 있어요.</p>
+        <div class="editors">
+          <article class="ed video">
+            <div class="ed-shot"><img src="site/img/video-editor.jpg" width="1600" height="950" alt="" loading="lazy" /></div>
+            <div class="ed-body">
+              <span class="tag video"><i data-icon="timeline" data-size="14"></i>영상 편집 · Premiere Pro 방식</span>
+              <h3>여러 트랙 타임라인 편집</h3>
+              <p>클립을 놓고, 자르고, 잇고, 움직이고, 색을 고쳐 MP4로 내보내요.</p>
+              <ul class="checks">
+                <li><i data-icon="check"></i>시퀀스·트랙·편집 도구, 자르기와 잇기</li>
+                <li><i data-icon="check"></i>효과 컨트롤과 키프레임, 이징 32종, 화면에서 끌어 움직임 기록</li>
+                <li><i data-icon="check"></i>색상 휠·커브·LUT와 스코프, 마스크·크로마 키·트랙 매트</li>
+                <li><i data-icon="check"></i>글꼴 74종, 타이틀 템플릿, SRT, 자동 자막</li>
+                <li><i data-icon="check"></i>믹서, 자동 더킹, 무음 구간 자동 삭제, 비트 마커</li>
+                <li><i data-icon="check"></i>MP4 · WebM · GIF, 소리만, 현재 프레임 내보내기</li>
+              </ul>
+              <a class="more" href="video.html">영상 편집 기능 모두 보기 <i data-icon="arrow"></i></a>
+            </div>
+          </article>
+          <article class="ed photo">
+            <div class="ed-shot"><img src="site/img/photo-editor.jpg" width="1600" height="950" alt="" loading="lazy" /></div>
+            <div class="ed-body">
+              <span class="tag photo"><i data-icon="image" data-size="14"></i>사진 편집 · Photoshop 방식</span>
+              <h3>레이어로 겹쳐 만드는 사진 편집</h3>
+              <p>고르고, 가리고, 고치고, 꾸며서 PNG·JPG·PSD로 저장해요.</p>
+              <ul class="checks">
+                <li><i data-icon="check"></i>그룹·클리핑 마스크, 혼합 모드 27종, 레이어 스타일 10종</li>
+                <li><i data-icon="check"></i>피사체·하늘 선택, 색상 범위, 빠른 마스크, 선택 및 마스크</li>
+                <li><i data-icon="check"></i>내용 인식 채우기, 제거 도구, 복구 브러시, 패치</li>
+                <li><i data-icon="check"></i>펜과 패스, 모양, 세로 쓰기와 패스 위 문자</li>
+                <li><i data-icon="check"></i>조정 20종, 필터 44종, Camera Raw 필터, 픽셀 유동화</li>
+                <li><i data-icon="check"></i>고급 개체, 액션과 일괄 처리, PSD 열기·저장</li>
+              </ul>
+              <a class="more" href="photo.html">사진 편집 기능 모두 보기 <i data-icon="arrow"></i></a>
+            </div>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <!-- counts -->
+    <section class="section tight" aria-label="숫자로 보는 Montage">
+      <div class="wrap">
+        <div class="facts">
+          <div class="fact"><b>32</b><span>움직임 이징</span></div>
+          <div class="fact"><b>74</b><span>글꼴</span></div>
+          <div class="fact"><b>27</b><span>혼합 모드</span></div>
+          <div class="fact"><b>20</b><span>사진 조정</span></div>
+          <div class="fact"><b>44</b><span>사진 필터</span></div>
+          <div class="fact"><b>41</b><span>설명서 쪽 수</span></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- AI -->
+    <section class="section alt" aria-labelledby="ai-title">
+      <div class="wrap">
+        <p class="kicker ai"><i data-icon="ai"></i>AI 편집</p>
+        <h2 id="ai-title">말로 부탁하면 편집 도구를 골라 실행해요</h2>
+        <p class="intro">영상 편집기의 AI 탭은 Google의 Gemini를 써요. 내 API 키를 넣으면 켜지고, 자동 자막은 음성 인식 모델을 브라우저 안에서 돌려요.</p>
+        <div class="grid-2">
+          <div class="tile"><h3><span class="ico ai"><i data-icon="wand" data-size="18"></i></span>AI로 전체 편집</h3><p>스타일(브이로그, 쇼츠 등)과 길이만 고르면 말 없는 구간 자르기, 자막, 제목, 전환, 색 필터, 배경음악까지 순서대로 편집해요. 실행 취소 한 번으로 모두 되돌아가요.</p></div>
+          <div class="tile"><h3><span class="ico ai"><i data-icon="chat" data-size="18"></i></span>편집 도우미</h3><p>"앞 3초 잘라 줘", "자막 맞춤법 고쳐 줘"처럼 말하면 맞는 편집 도구를 골라 실행해요. 설정에서 켜면 장면 사진도 보고 골라요.</p></div>
+          <div class="tile"><h3><span class="ico ai"><i data-icon="script" data-size="18"></i></span>대본으로 편집</h3><p>자막을 글처럼 고치고, 줄을 지우면 그 부분의 영상도 함께 잘려요.</p></div>
+          <div class="tile"><h3><span class="ico ai"><i data-icon="text" data-size="18"></i></span>자동 자막</h3><p>말소리를 자막으로 바꿔요. 처음 한 번 음성 인식 모델(약 40~250MB)을 받고, 그 뒤로는 브라우저 안에서 처리해요.</p></div>
+        </div>
+        <div class="note"><i data-icon="info"></i><span>AI 편집(Gemini)을 쓰면 자막 글자와, 켰을 때만 장면 사진을 Google로 보내요. 내 API 키가 필요하고, claude.ai 아티팩트 화면에서는 외부 연결이 막혀 쓸 수 없어요. 자세한 내용은 <a href="docs.html#ai-start">AI 편집 시작하기</a>에 있어요.</span></div>
+      </div>
+    </section>
+
+    <!-- privacy -->
+    <section class="section" aria-labelledby="privacy-title">
+      <div class="wrap split">
+        <div>
+          <p class="kicker"><i data-icon="lock"></i>내 파일은 내 컴퓨터에</p>
+          <h2 id="privacy-title">올리지 않고, 내 브라우저에서 편집해요</h2>
+          <p class="intro" style="margin-bottom:0">영상과 사진은 서버로 보내지 않고 브라우저 안에서 읽고, 고치고, 내보내요. 작업은 이 브라우저에 자동 저장돼요. 다른 컴퓨터로 옮길 때는 프로젝트 파일로 저장하고, 영상 원본은 그 컴퓨터에서 다시 연결해요.</p>
+        </div>
+        <ul class="leave" aria-label="인터넷을 쓰는 경우">
+          <li><span class="ico accent"><i data-icon="audio" data-size="18"></i></span><div><b>자동 자막을 처음 쓸 때</b><span>음성 인식 모델을 인터넷에서 받아요. 영상과 소리는 보내지 않아요.</span></div></li>
+          <li><span class="ico ai"><i data-icon="ai" data-size="18"></i></span><div><b>AI 편집(Gemini)을 쓸 때</b><span>자막 글자와, 켰을 때만 장면 사진을 Google로 보내요.</span></div></li>
+          <li><span class="ico video"><i data-icon="save" data-size="18"></i></span><div><b>그 밖에는</b><span>글꼴을 불러오는 것 말고는 파일이 컴퓨터 밖으로 나가지 않아요.</span></div></li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- phone -->
+    <section class="section alt" aria-labelledby="phone-title">
+      <div class="wrap split flip">
+        <div>
+          <p class="kicker"><i data-icon="phone"></i>휴대폰에서도</p>
+          <h2 id="phone-title">좁은 화면에서는 손가락에 맞게 바뀌어요</h2>
+          <p class="intro" style="margin-bottom:20px">휴대폰에서 열면 미리 보기와 타임라인이 위아래로 놓이고, 아래쪽 도구 막대에서 미디어, AI, 텍스트, 스티커, 애니메이션, 필터 같은 기능을 골라요. 사진 편집은 아래쪽 도구 줄과 메뉴 줄로 바뀌고, 두 손가락으로 확대·이동해요.</p>
+          <ul class="chips"><li><a href="docs.html#mobile">휴대폰에서 쓰기</a></li><li><a href="docs.html#v-quick">빠른 편집 (쉬운 꾸미기)</a></li><li><a href="docs.html#screen">화면 보기 쉽게 쓰기</a></li></ul>
+        </div>
+        <div class="phone"><img src="site/img/phone-video.jpg" width="822" height="1512" alt="휴대폰 화면의 영상 편집기: 미리 보기, 타임라인, 아래쪽 도구 막대" loading="lazy" /></div>
+      </div>
+    </section>
+
+    <!-- manual -->
+    <section class="section" aria-labelledby="docs-title">
+      <div class="wrap split">
+        <div>
+          <p class="kicker"><i data-icon="book"></i>설명서</p>
+          <h2 id="docs-title">모든 기능을 41쪽 설명서에 정리했어요</h2>
+          <p class="intro" style="margin-bottom:22px">메뉴와 도구 이름 그대로 찾을 수 있어요. 편집기 안에서도 <strong>설명서</strong> 버튼으로 같은 내용을 열어요.</p>
+          <form class="searchbox" role="search" data-docs-search>
+            <i data-icon="search" data-size="18"></i>
+            <input type="search" name="q" placeholder="기능 이름으로 찾기 (예: 누끼, 자막, 키프레임)" aria-label="설명서 검색" />
+            <button class="btn btn-ink small" type="submit">찾기</button>
+          </form>
+          <ul class="chips">
+            <li><a href="docs.html#intro">Montage 소개</a></li>
+            <li><a href="docs.html#p-cutout">누끼 따기</a></li>
+            <li><a href="docs.html#v-text">글자와 자막</a></li>
+            <li><a href="docs.html#v-motion">움직임 만들기</a></li>
+            <li><a href="docs.html#shortcuts">단축키 모음</a></li>
+            <li><a href="docs.html#faq">문제 해결</a></li>
+          </ul>
+        </div>
+        <figure class="frame" style="margin:0">
+          <div class="frame-bar"><i></i><i></i><i></i><b>설명서 — 고치기 (복구·제거)</b></div>
+          <img src="site/img/docs.jpg" width="1400" height="860" alt="설명서 화면: 왼쪽 목차, 가운데 본문, 오른쪽 이 쪽의 내용" loading="lazy" style="aspect-ratio:1400/860" />
+        </figure>
+      </div>
+    </section>
+
+    <!-- honest limits -->
+    <section class="section tight alt" aria-labelledby="limits-title">
+      <div class="wrap">
+        <h2 id="limits-title" style="font-size:clamp(1.35rem,2.4vw,1.7rem)">없는 기능과 확인하지 못한 것도 적어 두었어요</h2>
+        <p class="intro" style="margin-bottom:16px">Premiere Pro나 Photoshop과 똑같지는 않아요. 방식이 달라 결과가 다른 기능(예: 피사체 선택은 색 분석으로 추정), 실제 Photoshop으로 열어 보지 못한 PSD 저장처럼 시험하지 못한 부분이 있어요.</p>
+        <a class="more" style="color:var(--accent)" href="docs.html#limits">알려진 제한 읽기 <i data-icon="arrow"></i></a>
+      </div>
+    </section>
+
+    <!-- closing -->
+    <section class="closing stage" aria-labelledby="go-title">
+      <div class="wrap">
+        <h2 id="go-title">지금 바로 열어 보세요</h2>
+        <p>처음 열면 샘플 프로젝트와 시작 가이드가 나와요. 주소에 <code>?blank</code>를 붙이면 빈 프로젝트로 시작해요.</p>
+        <div class="cta-row">
+          <a class="btn btn-video" href="app.html?mode=video"><i data-icon="timeline" data-size="18"></i>영상 편집기 열기</a>
+          <a class="btn btn-photo" href="app.html?mode=photo"><i data-icon="image" data-size="18"></i>사진 편집기 열기</a>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer id="site-footer" class="site-footer"></footer>
+  <script type="module" src="src/site/site.js"></script>
 </body>
 </html>

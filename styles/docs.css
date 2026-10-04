@@ -116,3 +116,25 @@ body.mobile .docs-root input.docs-search { font-size: 16px; }
   .docs-table td:first-child { white-space: normal; }
 }
 .docs-open-btn { display: inline-flex; align-items: center; gap: 6px; }
+
+/* the manual as the website's docs page (docs.html) */
+a.docs-brand { text-decoration: none; }
+.docs-sitelinks { display: flex; gap: 2px; }
+.docs-sitelinks a { padding: 7px 10px; border-radius: 8px; color: var(--d-dim); text-decoration: none; font-size: 14px; white-space: nowrap; }
+.docs-sitelinks a:hover { background: var(--d-side); color: var(--d-text); }
+.docs-applink { flex: none; display: inline-flex; align-items: center; gap: 6px; height: 38px; padding: 0 14px; border-radius: 10px; background: var(--d-text); color: var(--d-bg); font-size: 14px; font-weight: 700; text-decoration: none; white-space: nowrap; }
+.docs-side-site { display: none; }
+.docs-root.standalone .docs-top { padding-top: env(safe-area-inset-top, 0px); height: calc(58px + env(safe-area-inset-top, 0px)); }
+@media (max-width: 1100px) {
+  .docs-sitelinks { display: none; }
+}
+@media (max-width: 760px) {
+  .docs-applink span { display: none; }
+  .docs-applink { width: 38px; padding: 0; justify-content: center; }
+  .docs-root.standalone .docs-side-site { display: grid; gap: 2px; margin: 0 0 14px; padding: 0 0 12px; border-bottom: 1px solid var(--d-border); }
+  .docs-side-site a { padding: 9px 10px; border-radius: 8px; color: var(--d-text); text-decoration: none; font-size: 15px; font-weight: 500; }
+  .docs-side-site a.on { color: var(--d-accent); font-weight: 700; }
+  .docs-side-site .docs-side-app { margin-top: 6px; background: var(--d-text); color: var(--d-bg); text-align: center; font-weight: 700; }
+}
+.docs-searchwrap { min-width: 0; }
+@media (max-width: 1100px) { .docs-root.standalone .docs-sitelinks { display: none; } }

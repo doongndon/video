@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>설명서 — Montage</title>
+  <meta name="description" content="Montage 영상 편집기와 사진 편집기의 모든 기능을 다룬 41쪽 설명서. 시작하기, 영상 편집, AI 편집, 사진 편집, 단축키, 알려진 제한, 문제 해결." />
+  <meta name="theme-color" content="#faf9f5" />
+  <link rel="icon" href="site/img/favicon.svg" type="image/svg+xml" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700;900&family=Noto+Serif+KR:wght@700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles/docs.css" />
+  <style>
+    html, body { margin: 0; height: 100%; background: #faf9f5; }
+    html[data-theme="dark"], html[data-theme="dark"] body { background: #1f1e1d; }
+    @media (prefers-color-scheme: dark) { html:not([data-theme="light"]), html:not([data-theme="light"]) body { background: #1f1e1d; } }
+  </style>
+</head>
+<body>
+  <noscript><p style="padding:24px;font-family:sans-serif">설명서를 보려면 JavaScript를 켜 주세요.</p></noscript>
+  <script type="module">
+    import { mountDocs } from './src/docs/viewer.js';
+    mountDocs();
+  </script>
+</body>
+</html>

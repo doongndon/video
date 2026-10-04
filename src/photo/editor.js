@@ -1946,6 +1946,8 @@ function buildMenus(P) {
     '도움말': () => [
       { label: '설명서 (모든 기능)', action: () => import('../docs/viewer.js').then((m) => m.openDocs('p-start')) },
       { label: '사진 편집 단축키', action: () => photoShortcuts() },
+      '-',
+      { label: 'Montage 웹사이트 (새 탭)', action: () => window.open('index.html', '_blank', 'noopener') },
     ],
   };
 }

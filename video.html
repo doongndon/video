@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <script>try { var t = localStorage.getItem('montage.docs.theme'); if (t) document.documentElement.dataset.theme = t; } catch (e) { /* storage blocked */ }</script>
+  <title>영상 편집 기능 — Montage</title>
+  <meta name="description" content="타임라인 편집, 키프레임, 색 보정, 마스크, 오디오, 자막, 멀티캠, 내보내기와 AI 편집까지 Montage 영상 편집기의 모든 기능." />
+  <meta name="theme-color" content="#15171b" />
+  <link rel="icon" href="site/img/favicon.svg" type="image/svg+xml" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700;900&family=Noto+Serif+KR:wght@700;900&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles/site.css" />
+</head>
+<body class="site">
+  <a class="skip" href="#main">본문으로 건너뛰기</a>
+  <header id="site-header" class="site-header"></header>
+  <main id="main">
+    <section class="page-hero stage" aria-labelledby="page-title">
+      <div class="wrap hero-grid">
+        <div>
+          <p class="eyebrow"><span class="tc">00:00:01:15</span> Premiere Pro 방식</p>
+          <h1 id="page-title">영상 편집</h1>
+          <p class="lead">Premiere Pro처럼 시퀀스와 트랙으로 편집해요. 클립을 놓고 자르고, 효과 컨트롤과 키프레임으로 움직이고, 색과 소리를 고쳐 MP4로 내보내요. 아래의 기능 묶음은 설명서의 각 쪽과 이어져 있어요.</p>
+          <div class="cta-row"><a class="btn btn-video" href="app.html?mode=video"><i data-icon="timeline" data-size="18"></i>영상 편집기 열기</a><a class="btn btn-ghost" href="docs.html#v-timeline"><i data-icon="book" data-size="18"></i>설명서로 배우기</a></div>
+        </div>
+        <figure class="frame" style="margin:0">
+          <div class="frame-bar"><i></i><i></i><i></i><b>영상 편집 — 샘플 시퀀스</b></div>
+          <img src="site/img/video-editor.jpg" width="1600" height="950" alt="영상 편집기 화면: 효과 컨트롤 패널, 프로그램 모니터, 여러 트랙의 타임라인" />
+        </figure>
+      </div>
+    </section>
+    <nav class="subnav" aria-label="기능 바로 가기"><div class="wrap subnav-row" id="subnav"></div></nav>
+    <div class="wrap" id="features"></div>
+    <section class="related alt section" aria-labelledby="related-title">
+      <div class="wrap" id="related">
+        <h2 id="related-title" style="font-size:clamp(1.35rem,2.4vw,1.7rem)">함께 읽으면 좋은 쪽</h2>
+        <p class="intro" style="margin-bottom:18px">저장, 휴대폰 화면, 단축키, 알려진 제한처럼 두 편집기에 공통인 내용이에요.</p>
+      </div>
+    </section>
+  </main>
+  <footer id="site-footer" class="site-footer"></footer>
+  <script type="module">
+    import './src/site/site.js';
+    import { renderFeatures } from './src/site/features.js';
+    renderFeatures('video');
+  </script>
+</body>
+</html>
