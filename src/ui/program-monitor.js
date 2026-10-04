@@ -335,19 +335,21 @@ export function createProgramMonitor() {
     return inside;
   }
 
-  /** Topmost visible clip whose bounds contain the point. */
-  function clipAtPoint(px, py) {
+  /** Visible clips whose bounds contain the point, topmost first. */
+  function clipsAtPoint(px, py) {
     const s = store.seq;
     const t = store.ui.playhead;
-    const tracks = videoTracks(s).filter((tr) => !tr.hidden).reverse();
-    for (const tr of tracks) {
+    const out = [];
+    for (const tr of videoTracks(s).filter((x) => !x.hidden).reverse()) {
       const c = clipsOnTrack(s, tr.id).find((x) => t >= x.start && t < clipEnd(x) && x.enabled !== false && x.kind !== 'adjustment');
       if (!c) continue;
       const q = quadFor(c);
-      if (q && pointInQuad(px, py, q.map(seqToScreen))) return c;
+      if (q && pointInQuad(px, py, q.map(seqToScreen))) out.push(c);
     }
-    return null;
+    return out;
   }
+
+  const clipAtPoint = (px, py) => clipsAtPoint(px, py)[0] || null;
 
   /** Ctrl+click on a polygon mask: insert a point on the nearest edge. */
   function insertPolygonPoint(g, px, py) {
@@ -414,18 +416,30 @@ export function createProgramMonitor() {
     let c = activeClip();
     let pts = c && quadFor(c)?.map(seqToScreen);
     let mode = null;
+    // the selected clip's corner / rotation handles win, even where other clips lie on top
     if (pts) {
       const rot = rotationHandle(pts);
       if (Math.hypot(px - rot[0], py - rot[1]) < 8) mode = 'rotate';
       else if (pts.some(([x, y]) => Math.abs(px - x) < 7 && Math.abs(py - y) < 7)) mode = 'scale';
-      else if (pointInQuad(px, py, pts)) mode = 'move';
     }
     if (!mode) {
-      const hit = clipAtPoint(px, py);
+      // otherwise the topmost visible clip under the pointer is picked (a full-frame video that was
+      // just added and selected must not swallow clicks on titles above it); Alt+click cycles to
+      // the clips underneath
+      const stack = clipsAtPoint(px, py);
+      let hit = stack[0] || null;
+      if (e.altKey && stack.length > 1) {
+        const i = c ? stack.findIndex((x) => x.id === c.id) : -1;
+        hit = stack[(i + 1) % stack.length];
+      }
       if (hit) {
-        store.selectClips([...edit.withLinked([hit.id])]);
-        c = hit;
-        pts = quadFor(c)?.map(seqToScreen);
+        if (!c || hit.id !== c.id) {
+          store.selectClips([...edit.withLinked([hit.id])]);
+          c = hit;
+          pts = quadFor(c)?.map(seqToScreen);
+        }
+        mode = 'move';
+      } else if (pts && pointInQuad(px, py, pts)) {
         mode = 'move';
       } else {
         store.clearSelection();
@@ -558,8 +572,8 @@ export function createProgramMonitor() {
       const rot = rotationHandle(pts);
       if (Math.hypot(px - rot[0], py - rot[1]) < 8) cur = 'grab';
       else if (pts.some(([x, y]) => Math.abs(px - x) < 7 && Math.abs(py - y) < 7)) cur = 'nwse-resize';
-      else if (pointInQuad(px, py, pts)) cur = 'move';
     }
+    if (cur === 'default' && !playback.playing && (clipAtPoint(px, py) || (pts && pointInQuad(px, py, pts)))) cur = 'move';
     view.style.cursor = cur;
   }
 
