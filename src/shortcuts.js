@@ -101,13 +101,11 @@ export function installShortcuts() {
         if (mod) run = shift ? c.redo : c.undo;
         break;
       case 'KeyY': if (mod) run = c.redo; break;
-      case 'KeyT': if (mod) run = c.newText; break;
       case 'KeyS':
         if (mod) run = c.saveProject;
         else run = c.toggleSnap;
         break;
       case 'KeyF': if (!mod) run = c.matchFrame; break;
-      case 'KeyN': if (mod) run = c.newSequence; break;
       case 'Equal':
       case 'NumpadAdd':
         run = c.zoomIn;

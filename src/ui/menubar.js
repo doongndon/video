@@ -109,7 +109,7 @@ export function createMenubar(el) {
       { label: 'Clear All Markers', action: c.clearMarkers },
     ],
     Graphics: () => [
-      { label: 'New Text Layer', key: `${mod}T`, action: c.newText },
+      { label: 'New Text Layer', action: c.newText },
       { label: 'Type Tool', key: 'T', action: () => store.setTool('type') },
       { label: 'New Rectangle', action: c.newRectangle },
       { label: 'New Ellipse', action: c.newEllipse },

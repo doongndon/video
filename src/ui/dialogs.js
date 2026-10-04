@@ -399,6 +399,7 @@ export const SHORTCUTS = [
     ['Cut / Copy / Paste', 'Ctrl+X / C / V'], ['Paste Insert', 'Ctrl+Shift+V'], ['Duplicate (drag)', 'Alt+drag'], ['Insert-move (drag)', 'Ctrl+drag'],
     ['Apply default video / audio transition', 'Ctrl+D / Ctrl+Shift+D'], ['Apply default transitions to selection', 'Shift+D'],
     ['Enable / disable clip', 'Shift+E'], ['Link / unlink', 'Ctrl+L'], ['Speed/Duration', 'Ctrl+R'], ['Nudge clip 1 frame', 'Alt+← / →'],
+    ['Match Frame (open source at playhead)', 'F'], ['Volume keyframe on rubber band', 'Ctrl+click'],
     ['Select all / deselect', 'Ctrl+A / Ctrl+Shift+A'], ['Undo / Redo', 'Ctrl+Z / Ctrl+Shift+Z'],
   ]],
   ['Tools', [
@@ -407,7 +408,8 @@ export const SHORTCUTS = [
   ]],
   ['View', [
     ['Zoom in / out timeline', '= / -'], ['Zoom to sequence', '\\'], ['Toggle snapping', 'S'], ['Maximize panel', '`'],
-    ['Import', 'Ctrl+I'], ['Export Media', 'Ctrl+M'], ['Save project file', 'Ctrl+S'], ['Keyboard shortcuts', 'F1 / ?'],
+    ['Import', 'Ctrl+I'], ['Open project file', 'Ctrl+O'], ['Export Media', 'Ctrl+M'], ['Export Frame', 'Ctrl+Shift+E'], ['Save project file', 'Ctrl+S'],
+    ['Timeline: scroll time / tracks / zoom', 'Wheel / Shift+wheel / Alt or Ctrl+wheel'], ['Keyboard shortcuts', 'F1 / ?'],
   ]],
 ];
 
