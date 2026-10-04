@@ -16,6 +16,8 @@ import { installLayerCommands, layerMenuItems } from './layercmds.js';
 import { newText } from './type.js';
 import { nearestOnPath } from './paths.js';
 import { installPathTools } from './pathtools.js';
+import { installSelectionTools, buildChannelsPanel } from './seltools.js';
+import { mixIntoMask } from './selectx.js';
 import { buildPathsPanel, buildCharacterPanel, installTypeCommands, warpTextDialog } from './panels2.js';
 import * as PT from './paths.js';
 import { Transformer, TRANSFORM_MODES, WARP_STYLES, applyM, composeM, unprojectQuad } from './transform.js';
@@ -137,6 +139,7 @@ export function createPhotoEditor(root) {
     history: { title: '작업 내역', el: buildHistoryPanel(P) },
     char: { title: '문자', el: buildCharacterPanel(P) },
     paths: { title: '패스', el: buildPathsPanel(P) },
+    channels: { title: '채널', el: buildChannelsPanel(P) },
   };
   const sideTabs = (ids) => {
     let cur = loadPref(`photo.side.${ids[0]}`, ids[0]);
@@ -157,7 +160,7 @@ export function createPhotoEditor(root) {
     return { el: h('div.ph-pgroup', bar, body), show, ids };
   };
   const groupsTop = sideTabs(['color', 'props', 'char', 'history']);
-  const groupLayers = sideTabs(['layers', 'paths']);
+  const groupLayers = sideTabs(['layers', 'channels', 'paths']);
   const side = h('div.ph-side', groupsTop.el, groupLayers.el);
   // phone: a sheet that shows one panel at a time
   const sheetBody = h('div.ph-sheet-body');
@@ -423,7 +426,7 @@ export function createPhotoEditor(root) {
     g.restore();
     g.imageSmoothingEnabled = v.zoom < 2;
     g.imageSmoothingQuality = 'high';
-    g.drawImage(P.composite(), x, y, w, hh);
+    g.drawImage(P.displayCanvas ? P.displayCanvas(P.composite()) : P.composite(), x, y, w, hh);
     g.strokeStyle = 'rgba(0,0,0,0.5)';
     g.strokeRect(x - 0.5, y - 0.5, w + 1, hh + 1);
     // overlay: selection ants, tool overlay, transform handles, brush cursor
@@ -523,7 +526,7 @@ export function createPhotoEditor(root) {
       return;
     }
     const t = TOOL_BY_ID[P.tool];
-    status.textContent = `${Math.round(doc.view.zoom * 1000) / 10}% · ${doc.width} × ${doc.height} px · ${hover ? `${Math.floor(hover.x)}, ${Math.floor(hover.y)}` : ''} · ${t.name}${doc.selection ? ' · 선택 영역 있음' : ''}${P.editMask ? ' · 마스크 편집 중' : ''}`;
+    status.textContent = `${Math.round(doc.view.zoom * 1000) / 10}% · ${doc.width} × ${doc.height} px · ${hover ? `${Math.floor(hover.x)}, ${Math.floor(hover.y)}` : ''} · ${t.name}${doc.selection ? ' · 선택 영역 있음' : ''}${P.editMask ? ' · 마스크 편집 중' : ''}${doc.quickMask ? ' · 빠른 마스크' : ''}${P.chState?.().active ? ' · 알파 채널 편집 중' : ''}`;
   }
 
   // ---------------------------------------------------------------- helpers for tools
@@ -988,14 +991,16 @@ export function createPhotoEditor(root) {
       KeyX: () => (mod ? P.cmd.cut() : P.swapColors()),
       KeyV: () => (mod ? P.cmd.paste() : P.setTool('move')),
       KeyM: () => (mod ? D.adjustDialog(P, 'curves') : P.setTool(e.shiftKey ? (P.tool === 'rect' ? 'ellipse' : 'rect') : P.tool === 'ellipse' ? 'ellipse' : 'rect')),
-      KeyL: () => (mod ? D.adjustDialog(P, 'levels') : P.setTool('lasso')),
+      KeyL: () => (mod ? D.adjustDialog(P, 'levels') : cycle(['lasso', 'polyLasso', 'magLasso'], e.shiftKey)),
       KeyU: () => (mod ? (e.shiftKey ? D.adjustDialog(P, 'desaturate') : D.adjustDialog(P, 'hueSat')) : P.setTool('shape')),
       KeyB: () => (mod ? D.adjustDialog(P, 'colorBalance') : P.setTool(e.shiftKey ? (P.tool === 'brush' ? 'pencil' : 'brush') : P.tool === 'pencil' ? 'pencil' : 'brush')),
       KeyG: () => (mod ? (e.altKey ? P.cmd.toggleClip() : e.shiftKey ? P.cmd.ungroup() : P.cmd.groupLayers()) : P.setTool(e.shiftKey ? (P.tool === 'gradient' ? 'bucket' : 'gradient') : P.tool === 'bucket' ? 'bucket' : 'gradient')),
       KeyF: () => (mod ? D.repeatFilter(P) : null),
-      KeyW: () => (mod ? null : P.setTool('wand')),
+      KeyW: () => (mod ? null : cycle(['objSel', 'quickSel', 'wand'], e.shiftKey)),
+      KeyQ: () => (mod ? null : P.cmd.quickMask()),
+      F6: () => (e.shiftKey && !mod ? P.cmd.feather() : null),
       KeyH: () => (mod ? null : P.setTool('hand')),
-      KeyR: () => (mod ? null : P.setTool('blur')),
+      KeyR: () => (mod && e.altKey ? P.cmd.selectAndMask() : mod ? null : P.setTool('blur')),
       Digit0: () => (mod ? P.fit() : P.setOpt(P.tool, 'opacity', 100)),
       Digit1: () => (mod ? P.setZoom(1) : null),
       Equal: () => (mod ? P.zoomStep(1) : null),
@@ -1087,7 +1092,10 @@ export function createPhotoEditor(root) {
   installCommands(P);
   installLayerCommands(P);
   installPathTools(P);
+  installSelectionTools(P);
   installTypeCommands(P, PT);
+  P.emit('tool', P.tool);
+  P.emit('channels');
   P.warpText = () => warpTextDialog(P);
   P.menus = buildMenus(P);
   P.layerMenu = () => P.menus['레이어']();
@@ -1325,11 +1333,12 @@ function installCommands(P) {
       toast('지울 선택 영역이 없습니다 (레이어를 지우려면 레이어 ▸ 삭제)');
       return undefined;
     }
-    if (P.editMask && l.mask) {
-      P.run('마스크 지우기', () => {
-        const g = doc.editMask(l);
+    const mt = P.maskTarget?.();
+    if (mt) {
+      P.run(mt.kind === 'layer' ? '마스크 지우기' : '지우기', () => {
+        const g = mt.edit();
         g.globalCompositeOperation = 'destination-out';
-        g.drawImage(doc.selection.canvas, -l.mask.x, -l.mask.y);
+        g.drawImage(doc.selection.canvas, -mt.x, -mt.y);
       });
       return undefined;
     }
@@ -1359,12 +1368,17 @@ function installCommands(P) {
       if (lockAlpha) g.globalCompositeOperation = 'source-atop';
       g.drawImage(t, -ox, -oy);
     };
-    if (P.editMask && l.mask) {
-      P.run('마스크 칠하기', () => {
-        const g = doc.editMask(l);
-        const lum = parseInt(color.slice(1, 3), 16) * 0.299 + parseInt(color.slice(3, 5), 16) * 0.587 + parseInt(color.slice(5, 7), 16) * 0.114;
-        if (lum < 128) g.globalCompositeOperation = 'destination-out';
-        fillTo(g, l.mask.x, l.mask.y, false);
+    const mt = P.maskTarget?.();
+    if (mt) {
+      P.run(mt.kind === 'layer' ? '마스크 칠하기' : '칠', () => {
+        const g = mt.edit();
+        const lum = (parseInt(color.slice(1, 3), 16) * 0.299 + parseInt(color.slice(3, 5), 16) * 0.587 + parseInt(color.slice(5, 7), 16) * 0.114) / 255;
+        const area = doc.selection ? doc.selection.canvas : (() => {
+          const t = makeCanvas(doc.width, doc.height);
+          t.getContext('2d').fillRect(0, 0, t.width, t.height);
+          return t;
+        })();
+        mixIntoMask(g, area, mt.invert ? 1 - lum : lum, opacity, -mt.x, -mt.y);
       });
       return;
     }
@@ -1698,8 +1712,6 @@ function installCommands(P) {
     return undefined;
   };
   C.feather = () => selModify('페더', (n) => SEL.feather(P.doc, n), 10);
-  C.expand = () => selModify('확대 (선택 영역 넓히기)', (n) => SEL.grow(P.doc, n), 5);
-  C.contract = () => selModify('축소 (선택 영역 좁히기)', (n) => SEL.grow(P.doc, -n), 5);
   C.selectFromLayer = (l = P.doc?.active, mode = 'new') => l && P.run('레이어 모양대로 선택', () => {
     const m = SEL.fromLayer(P.doc, l);
     P.doc.selection = mode === 'new' ? m : SEL.combine(P.doc, m.canvas, mode);
@@ -1731,23 +1743,6 @@ function installCommands(P) {
         toast(`${f.name}: 가져오지 못했습니다 (${err.message || err})`);
       }
     }
-  };
-  C.colorRange = async () => {
-    if (!need()) return;
-    const v = await promptDialog('색상 범위 (전경색과 비슷한 곳 모두 선택)', '허용치 (0~255)', '40');
-    const tol = parseFloat(v);
-    if (!Number.isFinite(tol)) return;
-    const doc = P.doc;
-    const c = P.composite();
-    // a single-colour canvas with the foreground colour, then a global wand on the composite
-    const d = c.getContext('2d').getImageData(0, 0, doc.width, doc.height).data;
-    const n = parseInt(P.fg.slice(1), 16);
-    const fr = (n >> 16) & 255;
-    const fgc = (n >> 8) & 255;
-    const fb = n & 255;
-    const mask = new Uint8Array(doc.width * doc.height);
-    for (let i = 0; i < mask.length; i++) if (Math.max(Math.abs(d[i * 4] - fr), Math.abs(d[i * 4 + 1] - fgc), Math.abs(d[i * 4 + 2] - fb)) <= tol) mask[i] = 1;
-    P.run('색상 범위', () => { doc.selection = SEL.combine(doc, SEL.maskToCanvas(mask, doc.width, doc.height), 'new'); });
   };
 }
 
@@ -1830,21 +1825,35 @@ function buildMenus(P) {
     '레이어': () => layerMenuItems(P, mod),
     '선택': () => [
       { label: '모두', key: `${mod}A`, disabled: no(), action: () => C.selectAll() },
-      { label: '모든 레이어', key: `${mod}Alt+A`, disabled: no(), action: () => C.selectAllLayers() },
-      { label: '레이어 선택 해제', disabled: no(), action: () => C.deselectLayers() },
       { label: '선택 해제', key: `${mod}D`, disabled: !P.doc?.selection, action: () => C.deselect() },
       { label: '다시 선택', key: `${mod}Shift+D`, disabled: !P.doc?.lastSelection, action: () => C.reselect() },
       { label: '반전', key: `${mod}Shift+I`, disabled: no(), action: () => C.inverse() },
       '-',
-      { label: '선택 영역 변형', disabled: !P.doc?.selection, action: () => C.transformSelection() },
-      { label: '색상 범위 (전경색)…', disabled: no(), action: () => C.colorRange() },
-      { label: '레이어 모양대로 선택', disabled: no(), action: () => C.selectFromLayer() },
+      { label: '모든 레이어', key: `${mod}Alt+A`, disabled: no(), action: () => C.selectAllLayers() },
+      { label: '레이어 선택 해제', disabled: no(), action: () => C.deselectLayers() },
       '-',
+      { label: '피사체 (색 분석, 단순 추정)', disabled: no(), action: () => C.selectSubject() },
+      { label: '하늘 (단순 추정)', disabled: no(), action: () => C.selectSky() },
+      { label: '색상 범위…', disabled: no(), action: () => C.colorRange() },
+      '-',
+      { label: '선택 및 마스크…', key: `${mod}Alt+R`, disabled: no(), action: () => C.selectAndMask() },
       { label: '수정', disabled: !P.doc?.selection, submenu: [
-        { label: '페더…', key: 'Shift+F6', action: () => C.feather() },
+        { label: '테두리…', action: () => C.border() },
+        { label: '매끄럽게…', action: () => C.smooth() },
         { label: '확대…', action: () => C.expand() },
         { label: '축소…', action: () => C.contract() },
+        { label: '페더…', key: 'Shift+F6', action: () => C.feather() },
       ] },
+      { label: '선택 영역 확장 (마술봉 허용치)', disabled: !P.doc?.selection, action: () => C.grow() },
+      { label: '유사 영역 선택', disabled: !P.doc?.selection, action: () => C.similar() },
+      '-',
+      { label: '선택 영역 변형', disabled: !P.doc?.selection, action: () => C.transformSelection() },
+      '-',
+      { label: '빠른 마스크 모드로 편집', key: 'Q', checked: !!P.doc?.quickMask, disabled: no(), action: () => C.quickMask() },
+      '-',
+      { label: '선택 영역 불러오기…', disabled: no(), action: () => C.loadSelection() },
+      { label: '선택 영역 저장…', disabled: !P.doc?.selection, action: () => C.saveSelection() },
+      { label: '레이어 모양대로 선택', disabled: no(), action: () => C.selectFromLayer() },
     ],
     '필터': () => [
       { label: '마지막 필터 다시', key: `${mod}F`, disabled: no(), action: () => D.repeatFilter(P) },
@@ -1862,6 +1871,8 @@ function buildMenus(P) {
       { label: '속성', action: () => P.showPanel('props') },
       { label: '작업 내역', action: () => P.showPanel('history') },
       { label: '레이어', action: () => P.showPanel('layers') },
+      { label: '채널', action: () => P.showPanel('channels') },
+      { label: '패스', action: () => P.showPanel('paths') },
     ],
     '도움말': () => [
       { label: '사진 편집 단축키', action: () => photoShortcuts() },

@@ -67,6 +67,7 @@ export class PhotoDoc {
     this.activeId = null;
     this.selectedIds = [];
     this.selection = null; // { canvas } — doc-size alpha mask
+    this.quickMask = null; // { canvas } while editing in quick mask mode (alpha = selected)
     this.guides = []; // { axis: 'x'|'y', pos }
     this.channels = []; // saved selections { id, name, canvas }
     this.paths = []; // { id, name, subpaths }
@@ -288,7 +289,7 @@ export class PhotoDoc {
 
   capture() {
     const st = {
-      name: this.name, width: this.width, height: this.height, activeId: this.activeId, selection: this.selection,
+      name: this.name, width: this.width, height: this.height, activeId: this.activeId, selection: this.selection, quickMask: this.quickMask || null,
       workPath: this.workPath && structuredClone(this.workPath), mode: this.mode, resolution: this.resolution,
       layers: this.layers.map(snapshotLayer),
     };
@@ -302,6 +303,7 @@ export class PhotoDoc {
     this.height = st.height;
     this.activeId = st.activeId;
     this.selection = st.selection;
+    this.quickMask = st.quickMask || null;
     this.workPath = st.workPath ? structuredClone(st.workPath) : null;
     this.mode = st.mode || 'rgb';
     this.resolution = st.resolution || 72;

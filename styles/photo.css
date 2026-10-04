@@ -259,3 +259,27 @@ body.mobile .ph-fxpane { max-height: 50dvh; }
 .ph-tog.on { background: var(--accent-soft); border-color: var(--accent); color: var(--value); }
 .ph-panel.char .ph-prow > span:first-child { min-width: calc(110px * var(--ui-scale)); }
 .ph-panel.paths .ph-layer { min-height: 46px; }
+
+/* ---- selections: quick mask button, colour range, select and mask, channels */
+.ph-qm { margin-top: 6px; }
+.ph-lkey { margin-left: auto; color: var(--text-faint); font-size: var(--fs-xs); padding-right: 6px; }
+.ph-crdlg { display: grid; gap: 8px; }
+.ph-crdlg .inline { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.ph-crwrap { display: flex; justify-content: center; background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: 6px; }
+.ph-crprev { max-width: 100%; max-height: 300px; cursor: crosshair; image-rendering: auto; }
+.ph-sam { display: flex; gap: 12px; min-height: 0; max-height: calc(100vh - 160px); }
+.ph-samleft { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.ph-samtools { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.ph-samtools .inline { display: flex; gap: 6px; align-items: center; }
+.ph-samwrap { flex: 1; min-height: 200px; display: flex; align-items: center; justify-content: center; background: var(--bg); border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
+.ph-samview { max-width: 100%; max-height: calc(100vh - 260px); cursor: crosshair; touch-action: none; }
+.ph-samside { width: 290px; flex-shrink: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; padding-right: 4px; }
+.ph-samside h4 { margin: 8px 0 2px; font-size: var(--fs-s); color: var(--text-dim); text-transform: none; border-bottom: 1px solid var(--line); padding-bottom: 3px; }
+.ph-samside .inline { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.ph-samrow { display: grid; grid-template-columns: 92px 1fr; align-items: center; gap: 6px; }
+.ph-samrow .inline input[type=range] { flex: 1; min-width: 60px; }
+.ph-samchk { display: inline-flex; align-items: center; gap: 4px; font-size: var(--fs-s); }
+body.mobile .ph-sam { flex-direction: column; max-height: none; }
+body.mobile .ph-samside { width: auto; }
+body.mobile .ph-samview { max-height: 50vh; }
+.ph-samrow select { width: 100%; min-width: 0; }

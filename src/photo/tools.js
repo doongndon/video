@@ -3,6 +3,7 @@
 
 import { makeCanvas, cloneCanvas, newLayer, boxCorners, SHAPES } from './doc.js';
 import * as SEL from './selection.js';
+import { mixIntoMask } from './selectx.js';
 import { FONT_CATEGORIES } from '../fonts.js';
 
 const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
@@ -76,12 +77,16 @@ export class Stroke {
     this.o = o;
     this.layer = doc.active;
     this.before = doc.capture();
-    this.onMask = !!(E.editMask && this.layer.mask);
-    if (this.onMask) {
-      this.base = this.layer.mask.canvas;
-      this.g = doc.editMask(this.layer);
-      this.ox = this.layer.mask.x;
-      this.oy = this.layer.mask.y;
+    // painting on a mask: the layer's mask, the quick mask or an alpha channel
+    const mt = E.maskTarget?.() || (E.editMask && this.layer?.mask ? { kind: 'layer', canvas: this.layer.mask.canvas, x: this.layer.mask.x, y: this.layer.mask.y, edit: () => doc.editMask(this.layer) } : null);
+    this.onMask = !!mt;
+    if (mt) {
+      this.maskKind = mt.kind;
+      this.maskInvert = !!mt.invert;
+      this.base = mt.canvas;
+      this.g = mt.edit();
+      this.ox = mt.x;
+      this.oy = mt.y;
     } else {
       this.g = doc.editPixels(this.layer, { x: 0, y: 0, w: doc.width, h: doc.height });
       // pre-stroke pixels at the (possibly grown) canvas size
@@ -103,7 +108,8 @@ export class Stroke {
   }
 
   color() {
-    if (this.onMask) return this.mode === 'erase' ? '#ffffff' : (E_lum(this.o.color) >= 128 ? '#ffffff' : '#000000');
+    // on a mask only the dab's alpha counts (see flush)
+    if (this.onMask) return '#000000';
     return this.o.color;
   }
 
@@ -188,16 +194,21 @@ export class Stroke {
       g.globalCompositeOperation = 'source-atop';
       g.drawImage(this.buf, 0, 0);
     } else if (this.onMask) {
-      const reveal = this.mode === 'erase' || E_lum(this.o.color) >= 128;
-      g.globalCompositeOperation = reveal ? 'source-over' : 'destination-out';
-      g.drawImage(this.buf, 0, 0);
+      // grey paints part-way: new = old·(1−a) + grey·a (the eraser paints the background colour)
+      let v = (this.mode === 'erase' ? E_lum(this.E.bg) : E_lum(this.o.color)) / 255;
+      if (this.maskInvert) v = 1 - v;
+      g.globalAlpha = 1;
+      mixIntoMask(g, this.buf, v, this.o.opacity ?? 1);
     } else {
       g.globalCompositeOperation = this.mode === 'erase' ? 'destination-out' : this.layer.lockAlpha ? 'source-atop' : 'source-over';
       g.drawImage(this.buf, 0, 0);
     }
     g.restore();
-    this.layer._styled = null;
-    this.E.doc.touch(this.layer);
+    if (this.maskKind === 'quick' || this.maskKind === 'channel') this.E.doc.rev++;
+    else {
+      this.layer._styled = null;
+      this.E.doc.touch(this.layer);
+    }
     this.E.redraw();
   }
 
@@ -426,6 +437,8 @@ export function brushOpts(o, E, extra = {}) {
 }
 
 function needRaster(E, what = '이 도구') {
+  const mt = E.maskTarget?.();
+  if (mt && mt.kind !== 'layer') return true;
   const l = E.doc.active;
   if (!l) return false;
   if (l.locked || (l.lockPixels && !(E.editMask && l.mask))) {
@@ -466,14 +479,14 @@ function pickColor(E, p, toBg) {
 }
 
 /** Selection mode from options + modifier keys. */
-function selMode(E, e, toolId) {
+export function selMode(E, e, toolId) {
   if (e.shiftKey && e.altKey) return 'inter';
   if (e.shiftKey) return 'add';
   if (e.altKey) return 'sub';
   return E.opts(toolId).mode || 'new';
 }
 
-const SEL_MODE_OPT = ['mode', '선택 방식', 'select', null, null, 'new', [['new', '새 선택'], ['add', '더하기 (Shift)'], ['sub', '빼기 (Alt)'], ['inter', '교차']]];
+export const SEL_MODE_OPT = ['mode', '선택 방식', 'select', null, null, 'new', [['new', '새 선택'], ['add', '더하기 (Shift)'], ['sub', '빼기 (Alt)'], ['inter', '교차']]];
 
 function marquee(id, name, key, icon, shape) {
   return {
@@ -564,6 +577,81 @@ function marquee(id, name, key, icon, shape) {
   };
 }
 
+/** Freehand lasso, or the polygonal lasso (click points; double-click, Enter or the first point closes). */
+function lassoTool(id, name, icon, forcePoly) {
+  return {
+    id, name, key: 'L', icon, group: 'select', cursor: 'crosshair',
+    options: [SEL_MODE_OPT, ['feather', '페더 (px)', 'range', 0, 200, 0]],
+    down(E, p, e) {
+      const poly = forcePoly;
+      if (poly && this.d) {
+        // close when clicking near the first point
+        if (dist(p, this.d.pts[0]) * E.view.zoom < 10 && this.d.pts.length > 2) {
+          this.finish(E);
+          return;
+        }
+        this.d.pts.push(p);
+        E.overlay();
+        return;
+      }
+      this.d = { pts: [p], mode: selMode(E, e, id), poly };
+    },
+    move(E, p) {
+      if (!this.d) return;
+      if (this.d.poly) this.d.hover = p;
+      else this.d.pts.push(p);
+      E.overlay();
+    },
+    hover(E, p) {
+      if (this.d?.poly) {
+        this.d.hover = p;
+        E.overlay();
+      }
+    },
+    up(E) {
+      if (this.d && !this.d.poly) this.finish(E);
+    },
+    dblclick(E) {
+      if (this.d?.poly) this.finish(E);
+    },
+    onKey(E, e) {
+      if (!this.d?.poly) return false;
+      if (e.key === 'Enter') this.finish(E);
+      else if (e.key === 'Escape') {
+        this.d = null;
+        E.overlay();
+      } else return false;
+      return true;
+    },
+    finish(E) {
+      const d = this.d;
+      this.d = null;
+      if (!d || d.pts.length < 3) {
+        E.overlay();
+        return;
+      }
+      const before = E.doc.capture();
+      E.doc.selection = SEL.combine(E.doc, SEL.shapeMask(E.doc, SEL.polyPath(d.pts.map((q) => [q.x, q.y])), E.opts(id).feather || 0), d.mode);
+      E.commit(name, before);
+    },
+    overlay(E, g) {
+      const d = this.d;
+      if (!d) return;
+      g.save();
+      g.strokeStyle = '#fff';
+      g.setLineDash([4, 4]);
+      g.beginPath();
+      [...d.pts, ...(d.hover ? [d.hover] : [])].forEach((q, i) => {
+        const [x, y] = E.toScreen(q.x, q.y);
+        if (i) g.lineTo(x, y);
+        else g.moveTo(x, y);
+      });
+      g.stroke();
+      g.restore();
+    },
+  };
+}
+
 function rectOf(d) {
   if (d.b.fromCenter) {
     const w = Math.abs(d.b.x - d.a.x);
@@ -641,6 +729,11 @@ function retouchTool(id, name, key, icon, kind) {
     id, name, key, icon, group: 'retouch', cursor: 'brush',
     options: [['size', '크기', 'range', 1, 500, 60], ['strength', '강도', 'range', 1, 100, 50, '%'], ['hardness', '경도', 'range', 0, 100, 40, '%']],
     down(E, p) {
+      const mk = E.maskTarget?.()?.kind;
+      if (mk === 'quick' || mk === 'channel') {
+        E.toast('빠른 마스크·알파 채널에는 브러시, 연필, 지우개, 그레이디언트, 페인트 통으로 칠하세요');
+        return;
+      }
       if (!needRaster(E, name)) return;
       if (E.editMask) {
         E.toast('마스크가 아니라 레이어 내용을 고칩니다 (레이어 축소판을 누르세요)');
@@ -822,77 +915,8 @@ export const TOOLS = [
   // ---- selections
   marquee('rect', '사각형 선택 윤곽', 'M', 'selRect', SEL.rectPath),
   marquee('ellipse', '원형 선택 윤곽', 'M', 'selEllipse', SEL.ellipsePath),
-  {
-    id: 'lasso', name: '올가미', key: 'L', icon: 'lasso', group: 'select', cursor: 'crosshair',
-    options: [SEL_MODE_OPT, ['polygon', '다각형 (클릭으로 점 찍기)', 'bool', null, null, false], ['feather', '페더 (px)', 'range', 0, 200, 0]],
-    down(E, p, e) {
-      const poly = E.opts('lasso').polygon;
-      if (poly && this.d) {
-        // close when clicking near the first point
-        if (dist(p, this.d.pts[0]) * E.view.zoom < 10 && this.d.pts.length > 2) {
-          this.finish(E);
-          return;
-        }
-        this.d.pts.push(p);
-        E.overlay();
-        return;
-      }
-      this.d = { pts: [p], mode: selMode(E, e, 'lasso'), poly };
-    },
-    move(E, p) {
-      if (!this.d) return;
-      if (this.d.poly) this.d.hover = p;
-      else this.d.pts.push(p);
-      E.overlay();
-    },
-    hover(E, p) {
-      if (this.d?.poly) {
-        this.d.hover = p;
-        E.overlay();
-      }
-    },
-    up(E) {
-      if (this.d && !this.d.poly) this.finish(E);
-    },
-    dblclick(E) {
-      if (this.d?.poly) this.finish(E);
-    },
-    onKey(E, e) {
-      if (!this.d?.poly) return false;
-      if (e.key === 'Enter') this.finish(E);
-      else if (e.key === 'Escape') {
-        this.d = null;
-        E.overlay();
-      } else return false;
-      return true;
-    },
-    finish(E) {
-      const d = this.d;
-      this.d = null;
-      if (!d || d.pts.length < 3) {
-        E.overlay();
-        return;
-      }
-      const before = E.doc.capture();
-      E.doc.selection = SEL.combine(E.doc, SEL.shapeMask(E.doc, SEL.polyPath(d.pts.map((q) => [q.x, q.y])), E.opts('lasso').feather || 0), d.mode);
-      E.commit('올가미', before);
-    },
-    overlay(E, g) {
-      const d = this.d;
-      if (!d) return;
-      g.save();
-      g.strokeStyle = '#fff';
-      g.setLineDash([4, 4]);
-      g.beginPath();
-      [...d.pts, ...(d.hover ? [d.hover] : [])].forEach((q, i) => {
-        const [x, y] = E.toScreen(q.x, q.y);
-        if (i) g.lineTo(x, y);
-        else g.moveTo(x, y);
-      });
-      g.stroke();
-      g.restore();
-    },
-  },
+  lassoTool('lasso', '올가미', 'lasso', false),
+  lassoTool('polyLasso', '다각형 올가미', 'polyLasso', true),
   {
     id: 'wand', name: '자동 선택 (마술봉)', key: 'W', icon: 'wand', group: 'select', cursor: 'crosshair',
     options: [SEL_MODE_OPT, ['tolerance', '허용치', 'range', 0, 255, 32], ['contiguous', '인접', 'bool', null, null, true], ['sampleAll', '모든 레이어 샘플링', 'bool', null, null, false]],
@@ -1140,10 +1164,28 @@ export const TOOLS = [
       const o = E.opts('bucket');
       const doc = E.doc;
       const l = doc.active;
-      const src = o.sampleAll ? E.composite() : E.layerAsDocCanvas(l);
+      const mt = E.maskTarget?.();
+      let src;
+      if (mt) {
+        // on a mask the bucket looks at the mask itself
+        src = makeCanvas(doc.width, doc.height);
+        src.getContext('2d').drawImage(mt.canvas, mt.x, mt.y);
+      } else src = o.sampleAll ? E.composite() : E.layerAsDocCanvas(l);
       const m = SEL.magicWand(doc, src, p.x, p.y, { tolerance: o.tolerance, contiguous: o.contiguous });
       if (!m) return;
       const before = doc.capture();
+      if (mt) {
+        if (doc.selection) {
+          const mg = m.getContext('2d');
+          mg.globalCompositeOperation = 'destination-in';
+          mg.drawImage(doc.selection.canvas, 0, 0);
+        }
+        const v = E_lum(E.fg) / 255;
+        mixIntoMask(mt.edit(), m, mt.invert ? 1 - v : v, (o.opacity ?? 100) / 100, -mt.x, -mt.y);
+        if (mt.kind === 'layer') doc.touch(l);
+        E.commit('페인트 통', before);
+        return;
+      }
       const mg = m.getContext('2d');
       mg.globalCompositeOperation = 'source-in';
       mg.fillStyle = E.fg;
@@ -1169,6 +1211,13 @@ export const TOOLS = [
       if (!needRaster(E, '그레이디언트')) return;
       const l = E.doc.active;
       this.d = { a: p, b: p, before: E.doc.capture() };
+      const mt = E.maskTarget?.();
+      if (mt) {
+        this.d.mt = mt;
+        this.d.base = mt.canvas;
+        this.d.mg = mt.edit();
+        return;
+      }
       E.doc.editPixels(l);
       this.d.base = cloneCanvas(l.canvas);
     },
@@ -1211,6 +1260,38 @@ export const TOOLS = [
       if (doc.selection) {
         gg.globalCompositeOperation = 'destination-in';
         gg.drawImage(doc.selection.canvas, 0, 0);
+      }
+      if (this.d.mt) {
+        // on a mask: the gradient's grey levels (and transparency) become mask amounts
+        const mt = this.d.mt;
+        const img = gg.getImageData(0, 0, gc.width, gc.height);
+        const d = img.data;
+        const va = new ImageData(gc.width, gc.height);
+        for (let i = 0; i < d.length; i += 4) {
+          let v = (0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]) / 255;
+          if (mt.invert) v = 1 - v;
+          va.data[i + 3] = d[i + 3] * v;
+          d[i] = d[i + 1] = d[i + 2] = 0;
+        }
+        const A = makeCanvas(gc.width, gc.height);
+        A.getContext('2d').putImageData(img, 0, 0);
+        const VA = makeCanvas(gc.width, gc.height);
+        VA.getContext('2d').putImageData(va, 0, 0);
+        const g = this.d.mg;
+        const op = (o.opacity ?? 100) / 100;
+        g.save();
+        g.globalCompositeOperation = 'copy';
+        g.drawImage(base, 0, 0);
+        g.globalAlpha = op;
+        g.globalCompositeOperation = 'destination-out';
+        g.drawImage(A, -mt.x, -mt.y);
+        g.globalCompositeOperation = 'lighter';
+        g.drawImage(VA, -mt.x, -mt.y);
+        g.restore();
+        if (mt.kind === 'layer') doc.touch(l);
+        else doc.rev++;
+        E.redraw();
+        return;
       }
       const g = l.canvas.getContext('2d');
       g.save();

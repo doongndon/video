@@ -27,6 +27,8 @@ export function buildToolbar(P) {
   const swBg = h('button.ph-sw.bg', { title: '배경색', 'aria-label': '배경색', onclick: () => P.showPanel('color', 'bg') });
   const swap = h('button.ph-swap', { title: '전경/배경색 바꾸기 (X)', 'aria-label': '색 바꾸기', onclick: () => P.swapColors() }, '⇄');
   const def = h('button.ph-def', { title: '기본 색 (D)', 'aria-label': '기본 색', onclick: () => P.defaultColors() }, '◩');
+  const qm = h('button.ph-tool.ph-qm', { title: '빠른 마스크 모드로 편집 (Q) · 두 번 눌러 옵션', 'aria-label': '빠른 마스크', onclick: () => P.cmd.quickMask?.(), ondblclick: () => P.cmd.quickMaskOptions?.() }, icon('quickMask', 18));
+  const syncQm = () => qm.classList.toggle('on', !!P.doc?.quickMask);
   const btns = [];
   const render = () => {
     el.replaceChildren();
@@ -53,7 +55,8 @@ export function buildToolbar(P) {
       btns.push(b);
       el.append(b);
     }
-    el.append(h('div.ph-colors', swBg, swFg, swap, def));
+    el.append(h('div.ph-colors', swBg, swFg, swap, def), qm);
+    syncQm();
     swFg.style.background = P.fg;
     swBg.style.background = P.bg;
   };
@@ -65,6 +68,9 @@ export function buildToolbar(P) {
     swFg.style.background = P.fg;
     swBg.style.background = P.bg;
   });
+  P.on('quickmask', syncQm);
+  P.on('history', syncQm);
+  P.on('layers', syncQm);
   render();
   return el;
 }
@@ -205,8 +211,8 @@ export function buildOptionsBar(P) {
         P.doc?.workPath ? h('button.small', { onclick: () => P.cmd.savePath() }, '패스 저장') : null);
     } else if (TOOL_BY_ID[t.id]?.optionsFrom === 'text') {
       ctrls.push(h('button.small', { onclick: () => (P.doc?.active?.kind === 'text' ? P.warpText() : toast('글자 레이어를 고르세요')) }, '⌒ 뒤틀기'), h('button.small', { onclick: () => P.showPanel('char') }, '문자 패널'));
-    } else if (t.id === 'lasso' && P.opts('lasso').polygon) {
-      ctrls.push(h('button.small', { onclick: () => t.finish?.(P) }, '다각형 닫기'));
+    } else if (t.optionButtons) {
+      ctrls.push(...t.optionButtons(P).filter(Boolean));
     }
     if (P.doc?.active?.mask && ['brush', 'pencil', 'eraser', 'bucket', 'gradient'].includes(t.id)) {
       ctrls.push(h('span.ph-opt.ph-hint', P.editMask ? '◐ 마스크에 칠하는 중 (검정=숨김, 흰색=보임)' : ''));

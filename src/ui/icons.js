@@ -110,6 +110,14 @@ const P = {
   textMask: '<path d="M3 3.5h10M8 3.5v9M6 12.5h4" stroke-dasharray="2 1.5"/>',
   verticalTextMask: '<path d="M4 3h8M8 3v10" stroke-dasharray="2 1.5"/>',
   perspCrop: '<path d="M4 2v9.5h10M2 4.5h9.5V14" /><path d="M6 6l4 1-1 3-3-1z" stroke-dasharray="1.5 1"/>',
+  selRow: '<path d="M1.5 8h13" stroke-dasharray="2 1.6"/><path d="M1.5 6.5v3M14.5 6.5v3"/>',
+  selCol: '<path d="M8 1.5v13" stroke-dasharray="2 1.6"/><path d="M6.5 1.5h3M6.5 14.5h3"/>',
+  polyLasso: '<path d="M3 11 4.5 3.5 12.5 4.5 13 10 7 12z"/><path d="M7 12c-.6 1.2-.2 2.2.8 2.5"/>',
+  magLasso: '<path d="M4 10.5C1.5 9 2 4 7.5 3.5S14 6 13 8.5 7 11 5.5 10.5"/><path d="M10 11.5v2.5M13 11.5v2.5M10 11.5a1.5 1.5 0 0 1 3 0"/>',
+  quickSel: '<path d="M9.5 2.5l4 4-6.5 6.5-4-4z"/><path d="M3 9.5l-1.5 4 4-1.5" stroke-dasharray="1.5 1"/><path d="M12 2l2 2"/>',
+  objSel: '<rect x="2" y="2" width="12" height="12" rx="1" stroke-dasharray="2 1.6"/><path d="M6 11c0-3 1-5 3-5s2 2 1 3-2 2-4 2z"/>',
+  quickMask: '<rect x="2" y="3" width="12" height="10" rx="1.5"/><circle cx="8" cy="8" r="3" stroke-dasharray="1.5 1.2"/>',
+  channels: '<circle cx="6" cy="6.5" r="3.5"/><circle cx="10" cy="6.5" r="3.5"/><circle cx="8" cy="10" r="3.5"/>',
   ease: '<path d="M2 13.5C7 13.5 9 2.5 14 2.5"/><circle cx="2" cy="13.5" r="1.2" fill="currentColor"/><circle cx="14" cy="2.5" r="1.2" fill="currentColor"/>',
 };
 

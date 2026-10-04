@@ -96,7 +96,7 @@ function edt(f, w, h) {
 }
 
 /** Distance (px) from each pixel to the nearest pixel where inside() is true. */
-function distanceTo(a, w, h, inside) {
+export function distanceTo(a, w, h, inside) {
   const f = new Float64Array(w * h);
   for (let i = 0; i < f.length; i++) f[i] = inside(a[i]) ? 0 : 1e20;
   edt(f, w, h);
