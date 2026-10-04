@@ -19,6 +19,7 @@ import { nearestOnPath } from './paths.js';
 import { installPathTools } from './pathtools.js';
 import { installSelectionTools, buildChannelsPanel } from './seltools.js';
 import { installBrushTools } from './brushes.js';
+import { installViewExtras, buildNavigatorPanel, buildInfoPanel, buildHistogramPanel } from './view2.js';
 import { mixIntoMask } from './selectx.js';
 import { buildPathsPanel, buildCharacterPanel, installTypeCommands, warpTextDialog } from './panels2.js';
 import * as PT from './paths.js';
@@ -113,6 +114,12 @@ export function createPhotoEditor(root) {
     P.emit('color');
   };
   P.toast = toast;
+  // selection bounds, remembered per selection canvas (selections are replaced, never changed)
+  const boundsCache = new WeakMap();
+  P.selBounds = (c) => {
+    if (!boundsCache.has(c)) boundsCache.set(c, SEL.alphaBounds(c));
+    return boundsCache.get(c);
+  };
   P.newText = (o, color, extra) => newText(o, color, extra);
   P.nearestOnPath = (sps, x, y) => nearestOnPath(sps, x, y);
   P.exportDialog = () => (P.doc ? D.exportDialog(P) : toast('내보낼 문서가 없습니다. 먼저 사진을 열거나 새 문서를 만드세요.'));
@@ -142,6 +149,9 @@ export function createPhotoEditor(root) {
     char: { title: '문자', el: buildCharacterPanel(P) },
     paths: { title: '패스', el: buildPathsPanel(P) },
     channels: { title: '채널', el: buildChannelsPanel(P) },
+    nav: { title: '내비게이터', el: buildNavigatorPanel(P, stage) },
+    info: { title: '정보', el: buildInfoPanel(P) },
+    histo: { title: '히스토그램', el: buildHistogramPanel(P) },
   };
   const sideTabs = (ids) => {
     let cur = loadPref(`photo.side.${ids[0]}`, ids[0]);
@@ -161,7 +171,7 @@ export function createPhotoEditor(root) {
     show(ids.includes(cur) ? cur : ids[0]);
     return { el: h('div.ph-pgroup', bar, body), show, ids };
   };
-  const groupsTop = sideTabs(['color', 'props', 'char', 'history']);
+  const groupsTop = sideTabs(['color', 'props', 'char', 'history', 'nav', 'info', 'histo']);
   const groupLayers = sideTabs(['layers', 'channels', 'paths']);
   const side = h('div.ph-side', groupsTop.el, groupLayers.el);
   // phone: a sheet that shows one panel at a time
@@ -469,7 +479,9 @@ export function createPhotoEditor(root) {
       og.arc(cx, cy, Math.max(1.5, r - 1), 0, Math.PI * 2);
       og.stroke();
     }
+    P.drawViewExtras?.(og);
     updateStatus();
+    P.emit('redraw');
   }
 
   let antsPhase = 0;
@@ -790,6 +802,8 @@ export function createPhotoEditor(root) {
   let panStart = null;
   const touches = new Map();
   let spaceDown = false;
+  // selection, crop and shape tools snap to guides, the grid and the canvas edges (view2.js)
+  const snap = (p) => (P.snapPoint ? P.snapPoint(p, P.tool) : p);
 
   function updateCursor() {
     const t = TOOL_BY_ID[P.tool];
@@ -815,6 +829,10 @@ export function createPhotoEditor(root) {
     }
     const p = P.toDoc(e.clientX, e.clientY);
     P.lastPoint = p;
+    if (!spaceDown && e.button === 0 && !P.transform && P.viewExtrasDown?.(e, p)) {
+      active = 'extras';
+      return;
+    }
     if (e.button === 1 || spaceDown || (P.tool === 'hand' && !P.transform)) {
       active = 'pan';
       panStart = { x: e.clientX, y: e.clientY, vx: P.view.x, vy: P.view.y };
@@ -835,14 +853,20 @@ export function createPhotoEditor(root) {
       return;
     }
     active = 'tool';
-    TOOL_BY_ID[P.tool].down?.(P, p, e);
+    TOOL_BY_ID[P.tool].down?.(P, snap(p), e);
   });
   stage.addEventListener('pointermove', (e) => {
     if (!P.doc) return;
     if (e.pointerType === 'touch' && touches.has(e.pointerId)) touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
     const p = P.toDoc(e.clientX, e.clientY);
     hover = e.pointerType === 'touch' && !active ? null : p;
+    P.hoverPoint = hover;
+    P.emit('pointer');
     P.lastPoint = p;
+    if (active === 'extras') {
+      P.viewExtrasMove(e, p);
+      return;
+    }
     if (active === 'pinch') {
       const [a, b] = [...touches.values()];
       if (!a || !b) return;
@@ -873,11 +897,12 @@ export function createPhotoEditor(root) {
       const t = TOOL_BY_ID[P.tool];
       // coalesced events give smoother brush strokes
       const evs = e.getCoalescedEvents?.() || [e];
-      for (const ce of evs.length ? evs : [e]) t.move?.(P, P.toDoc(ce.clientX, ce.clientY), ce);
+      for (const ce of evs.length ? evs : [e]) t.move?.(P, snap(P.toDoc(ce.clientX, ce.clientY)), ce);
       P.redraw();
       return;
     }
     TOOL_BY_ID[P.tool].hover?.(P, p, e);
+    if (!P.transform && !P.viewExtrasHover?.(e)) updateCursor();
     if (P.transform) {
       const hcur = P.transform.hit(p);
       stage.style.cursor = hcur === 'move' ? 'move' : hcur === 'rotate' ? 'alias' : hcur === 'none' ? 'default' : hcur === 'pivot' ? 'crosshair' : 'nwse-resize';
@@ -894,8 +919,10 @@ export function createPhotoEditor(root) {
     }
     if (!active) return;
     const p = P.toDoc(e.clientX, e.clientY);
-    if (active === 'tool') TOOL_BY_ID[P.tool].up?.(P, p, e);
+    if (active === 'tool') TOOL_BY_ID[P.tool].up?.(P, snap(p), e);
     else if (active === 'transform') P.transform?.up();
+    else if (active === 'extras') P.viewExtrasUp(e, p);
+    P.clearSnapMark?.();
     active = null;
     updateCursor();
     P.redraw();
@@ -965,6 +992,7 @@ export function createPhotoEditor(root) {
       e.preventDefault();
       e.stopPropagation();
     };
+    if (P.viewKeys?.(e, mod)) return done();
     if (k === 'Space' && !mod) {
       spaceDown = true;
       updateCursor();
@@ -1096,6 +1124,7 @@ export function createPhotoEditor(root) {
   installPathTools(P);
   installSelectionTools(P);
   installBrushTools(P);
+  installViewExtras(P, { stage });
   installTypeCommands(P, PT);
   P.emit('tool', P.tool);
   P.emit('channels');
@@ -1873,6 +1902,7 @@ function buildMenus(P) {
       { label: '축소', key: `${mod}-`, disabled: no(), action: () => P.zoomStep(-1) },
       { label: '화면에 맞추기', key: `${mod}0`, disabled: no(), action: () => P.fit() },
       { label: '100% (실제 픽셀)', key: `${mod}1`, disabled: no(), action: () => P.setZoom(1) },
+      ...(P.viewMenuItems ? P.viewMenuItems(mod, no) : []),
     ],
     '창': () => [
       { label: '색상', action: () => P.showPanel('color') },
@@ -1881,6 +1911,9 @@ function buildMenus(P) {
       { label: '레이어', action: () => P.showPanel('layers') },
       { label: '채널', action: () => P.showPanel('channels') },
       { label: '패스', action: () => P.showPanel('paths') },
+      { label: '내비게이터', action: () => P.showPanel('nav') },
+      { label: '정보', action: () => P.showPanel('info') },
+      { label: '히스토그램', action: () => P.showPanel('histo') },
     ],
     '도움말': () => [
       { label: '설명서 (모든 기능)', action: () => import('../docs/viewer.js').then((m) => m.openDocs('p-start')) },

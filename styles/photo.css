@@ -309,3 +309,21 @@ body.mobile .ph-samview { max-height: 50vh; }
   .lq-tools { flex-direction: row; flex-wrap: wrap; }
   .lq-view { max-height: 52vh; }
 }
+/* panel tabs scroll when there are many */
+.ph-ptabs { overflow-x: auto; scrollbar-width: thin; }
+.ph-ptabs button { flex: none; }
+/* Navigator, Info, Histogram */
+.ph-navp, .ph-histop { padding: 8px; display: flex; flex-direction: column; gap: 6px; }
+.ph-nav { width: 100%; height: auto; background: #18191c; border-radius: 4px; cursor: pointer; touch-action: none; }
+.ph-nav-zoom { display: flex; align-items: center; gap: 8px; }
+.ph-nav-zoom input { flex: 1; }
+.ph-nav-pct { min-width: 52px; text-align: right; font-size: var(--fs-s); color: var(--text-dim); }
+.ph-info { padding: 8px 10px; position: relative; }
+.ph-info-grid { display: grid; gap: 2px; font-size: var(--fs-s); }
+.ph-info-row { display: flex; justify-content: space-between; gap: 8px; }
+.ph-info-row span { color: var(--text-faint); }
+.ph-info-row b { font-weight: 600; font-variant-numeric: tabular-nums; }
+.ph-info-swatch { display: inline-block; width: 12px; height: 12px; margin-right: 6px; vertical-align: -1px; border-radius: 3px; border: 1px solid var(--line-2); }
+.ph-histo { width: 100%; height: auto; background: #18191c; border-radius: 4px; }
+.ph-histo-mode { display: flex; align-items: center; gap: 8px; font-size: var(--fs-s); }
+.ph-histo-stats { font-size: var(--fs-s); color: var(--text-dim); }
