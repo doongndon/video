@@ -336,3 +336,20 @@ body.mobile .ph-samview { max-height: 50vh; }
 .ph-fly-item kbd { font: 600 11px ui-monospace, monospace; color: var(--text-faint); }
 /* the corner mark of a slot with more tools, easier to see */
 .ph-tool .ph-more { border-width: 0 0 6px 6px !important; }
+/* Actions */
+.ph-actions { padding: 8px; display: flex; flex-direction: column; gap: 8px; font-size: var(--fs-s); }
+.ph-act-bar { display: flex; gap: 6px; flex-wrap: wrap; }
+.ph-act-bar button { display: inline-flex; align-items: center; gap: 4px; }
+.ph-rec-dot { width: 10px; height: 10px; border-radius: 50%; background: #e5484d; display: inline-block; }
+.ph-rec-on { background: #e5484d; color: #fff; border-color: #e5484d; }
+.ph-act-list { display: flex; flex-direction: column; gap: 2px; }
+.ph-act-row { display: flex; align-items: center; gap: 6px; padding: 4px 6px; border-radius: 5px; cursor: pointer; }
+.ph-act-row:hover { background: var(--bg-4); }
+.ph-act-row.on { background: var(--accent-soft); }
+.ph-act-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+.ph-act-row small { color: var(--text-faint); }
+.ph-act-tw, .ph-act-x { min-height: 0; height: 22px; width: 22px; padding: 0; border: 0; background: none; color: var(--text-dim); display: grid; place-items: center; }
+.ph-act-steps { padding: 2px 0 6px 28px; display: flex; flex-direction: column; gap: 2px; }
+.ph-act-step { display: flex; align-items: center; gap: 6px; color: var(--text-dim); }
+.ph-act-step span { flex: 1; min-width: 0; }
+.ph-act-more { align-self: flex-start; margin-top: 4px; }

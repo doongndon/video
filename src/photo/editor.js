@@ -20,6 +20,7 @@ import { installPathTools } from './pathtools.js';
 import { installSelectionTools, buildChannelsPanel } from './seltools.js';
 import { installBrushTools } from './brushes.js';
 import { installPaint2 } from './paint2.js';
+import { installActions, buildActionsPanel } from './actions.js';
 import { installViewExtras, buildNavigatorPanel, buildInfoPanel, buildHistogramPanel } from './view2.js';
 import { mixIntoMask } from './selectx.js';
 import { buildPathsPanel, buildCharacterPanel, installTypeCommands, warpTextDialog } from './panels2.js';
@@ -153,6 +154,7 @@ export function createPhotoEditor(root) {
     nav: { title: '내비게이터', el: buildNavigatorPanel(P, stage) },
     info: { title: '정보', el: buildInfoPanel(P) },
     histo: { title: '히스토그램', el: buildHistogramPanel(P) },
+    actions: { title: '액션', el: buildActionsPanel(P) },
   };
   const sideTabs = (ids) => {
     let cur = loadPref(`photo.side.${ids[0]}`, ids[0]);
@@ -173,7 +175,7 @@ export function createPhotoEditor(root) {
     return { el: h('div.ph-pgroup', bar, body), show, ids };
   };
   const groupsTop = sideTabs(['color', 'props', 'char', 'history', 'nav', 'info', 'histo']);
-  const groupLayers = sideTabs(['layers', 'channels', 'paths']);
+  const groupLayers = sideTabs(['layers', 'channels', 'paths', 'actions']);
   const side = h('div.ph-side', groupsTop.el, groupLayers.el);
   // phone: a sheet that shows one panel at a time
   const sheetBody = h('div.ph-sheet-body');
@@ -1128,6 +1130,7 @@ export function createPhotoEditor(root) {
   installPaint2(P);
   installViewExtras(P, { stage });
   installTypeCommands(P, PT);
+  installActions(P); // last: it wraps every command so it can record them
   P.emit('tool', P.tool);
   P.emit('channels');
   P.warpText = () => warpTextDialog(P);
@@ -1807,6 +1810,7 @@ function buildMenus(P) {
       { label: 'PSD로 저장 (글자·모양을 포토샵에서 고칠 수 있게, 실험적)', disabled: no(), action: () => C.savePsd({ editableText: true }) },
       { label: '레이어를 파일로 내보내기 (PNG)…', disabled: no(), action: () => C.exportLayers() },
       { label: '내보내기 (PNG · JPG · WebP)…', key: `${mod}Shift+Alt+W`, disabled: no(), action: () => D.exportDialog(P) },
+      { label: '자동화', submenu: [{ label: '일괄 처리… (여러 사진에 액션)', action: () => C.batch() }, { label: '액션 패널 열기', action: () => P.showPanel('actions') }] },
       '-',
       { label: '영상 편집으로 보내기…', disabled: no(), action: () => D.sendToVideoDialog(P) },
     ],
@@ -1917,6 +1921,7 @@ function buildMenus(P) {
       { label: '내비게이터', action: () => P.showPanel('nav') },
       { label: '정보', action: () => P.showPanel('info') },
       { label: '히스토그램', action: () => P.showPanel('histo') },
+      { label: '액션', action: () => P.showPanel('actions') },
     ],
     '도움말': () => [
       { label: '설명서 (모든 기능)', action: () => import('../docs/viewer.js').then((m) => m.openDocs('p-start')) },

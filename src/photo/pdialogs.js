@@ -281,7 +281,7 @@ export function curveEditor(points, onChange) {
 // ---------------------------------------------------------------- destructive adjustment / filter with live preview
 
 /** Run `compute(baseCanvas, params)` live on the active layer (inside the selection), OK keeps it. */
-function liveLayerDialog(P, { title, defs, params, compute, label, slow = false }) {
+function liveLayerDialog(P, { title, defs, params, compute, label, slow = false, record = null }) {
   const doc = P.doc;
   const l = doc.active;
   if (!l || l.kind !== 'raster' || !l.canvas) {
@@ -345,6 +345,7 @@ function liveLayerDialog(P, { title, defs, params, compute, label, slow = false 
         preview();
         applied = true;
         P.commit(label, before);
+        if (record) P.recordStep?.({ ...record, params: structuredClone(params) });
       },
     }],
     onClose: () => {
@@ -368,9 +369,10 @@ export function adjustDialog(P, type) {
     const l = doc.active;
     if (!l || l.kind !== 'raster') return toast('이미지(일반) 레이어를 선택하세요');
     P.run(def.name, () => applyToLayer(P, (c) => adjustCanvas(c, type, params)));
+    P.recordStep?.({ type: 'adjust', id: type, params });
     return undefined;
   }
-  liveLayerDialog(P, { title: def.name, defs: def.params, params, label: def.name, compute: (c, p) => adjustCanvas(c, type, p), slow: P.doc.width * P.doc.height > 6e6 });
+  liveLayerDialog(P, { title: def.name, defs: def.params, params, label: def.name, compute: (c, p) => adjustCanvas(c, type, p), slow: P.doc.width * P.doc.height > 6e6, record: { type: 'adjust', id: type } });
   return undefined;
 }
 
@@ -416,10 +418,11 @@ export function filterDialog(P, id) {
     if (!P.doc.active || P.doc.active.kind !== 'raster') return toast('이미지(일반) 레이어를 선택하세요');
     P.run(f.name, () => applyToLayer(P, (c) => run(c, params)));
     remember();
+    P.recordStep?.({ type: 'filter', id, params });
     return undefined;
   }
   const big = P.doc.width * P.doc.height;
-  liveLayerDialog(P, { title: f.name, defs: f.params.map((d) => [...d.slice(0, 5), d[5]]), params, label: f.name, compute: (c, p) => { remember(); return run(c, p); }, slow: big > 2e6 || !!f.slow || ['median', 'oil', 'motion', 'twirl', 'spherize', 'pinch', 'wave', 'clouds', 'edges'].includes(id) });
+  liveLayerDialog(P, { title: f.name, defs: f.params.map((d) => [...d.slice(0, 5), d[5]]), params, label: f.name, record: { type: 'filter', id }, compute: (c, p) => { remember(); return run(c, p); }, slow: big > 2e6 || !!f.slow || ['median', 'oil', 'motion', 'twirl', 'spherize', 'pinch', 'wave', 'clouds', 'edges'].includes(id) });
   return undefined;
 }
 
@@ -433,6 +436,7 @@ export function repeatFilter(P) {
   }
   if (!P.doc.active || P.doc.active.kind !== 'raster') return toast('이미지(일반) 레이어를 선택하세요');
   P.run(FILTERS[id].name, () => applyToLayer(P, (c) => applyFilter(c, id, params, { fg: P.fg, bg: P.bg })));
+  P.recordStep?.({ type: 'filter', id, params: { ...params } });
   return undefined;
 }
 
