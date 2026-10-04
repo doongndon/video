@@ -1404,6 +1404,7 @@ export function installBrushTools(P) {
   TOOL_GROUPS.splice(TOOL_GROUPS.indexOf(group('clone')) + 1, 0, ['historyBrush']);
 
   // ---- commands
+  C.liquify = () => import('./liquify.js').then((m) => m.liquifyDialog(P));
   C.contentAwareFill = () => {
     const doc = P.doc;
     const l = doc?.active;

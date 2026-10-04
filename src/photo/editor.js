@@ -990,7 +990,7 @@ export function createPhotoEditor(root) {
       KeyO: () => (mod ? P.cmd.open() : P.setTool(P.tool === 'dodge' ? 'burn' : 'dodge')),
       KeyS: () => (mod ? P.cmd.saveProject() : P.setTool('clone')),
       KeyC: () => (mod ? P.cmd.copy(e.shiftKey) : P.setTool('crop')),
-      KeyX: () => (mod ? P.cmd.cut() : P.swapColors()),
+      KeyX: () => (mod && e.shiftKey ? P.cmd.liquify() : mod ? P.cmd.cut() : P.swapColors()),
       KeyV: () => (mod ? P.cmd.paste() : P.setTool('move')),
       KeyM: () => (mod ? D.adjustDialog(P, 'curves') : P.setTool(e.shiftKey ? (P.tool === 'rect' ? 'ellipse' : 'rect') : P.tool === 'ellipse' ? 'ellipse' : 'rect')),
       KeyL: () => (mod ? D.adjustDialog(P, 'levels') : cycle(['lasso', 'polyLasso', 'magLasso'], e.shiftKey)),
@@ -1865,6 +1865,7 @@ function buildMenus(P) {
     '필터': () => [
       { label: '마지막 필터 다시', key: `${mod}F`, disabled: no(), action: () => D.repeatFilter(P) },
       '-',
+      { label: '픽셀 유동화…', key: `${mod}Shift+X`, disabled: no(), action: () => C.liquify() },
       ...filterGroups(),
     ],
     '보기': () => [
