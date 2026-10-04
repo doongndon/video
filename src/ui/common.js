@@ -126,6 +126,13 @@ export function closeMenus() {
  * items: [{label, key, action, disabled, checked, submenu}] or '-' for separators.
  * Items may also be functions returning such arrays (evaluated lazily).
  */
+/** Small inline SVG showing a curve (path in a 30×20 box) — used for easing previews. */
+function curveIcon(d) {
+  const span = h('span.curve');
+  span.innerHTML = `<svg viewBox="0 0 30 20" aria-hidden="true"><path d="M3 17H27M3 3H27" class="guide"/><path d="${d}"/></svg>`;
+  return span;
+}
+
 export function showMenu(items, x, y, { level = 0 } = {}) {
   if (level === 0) closeMenus();
   else openMenus.slice(level).forEach((m) => m.remove()), (openMenus = openMenus.slice(0, level));
@@ -143,7 +150,8 @@ export function showMenu(items, x, y, { level = 0 } = {}) {
     }
     const row = h(`div.item${it.disabled ? '.disabled' : ''}${it.checked ? '.checked' : ''}${it.submenu ? '.sub' : ''}`, { role: 'menuitem' },
       it.swatch ? h('span.swatch', { style: { background: it.swatch } }) : null,
-      h('span.label', it.label), it.key ? h('span.key', it.key) : null);
+      it.curve ? curveIcon(it.curve) : null,
+      h('span.label', it.label), it.hint ? h('span.hint', it.hint) : null, it.key ? h('span.key', it.key) : null);
     if (it.submenu && !it.disabled) {
       row.addEventListener('pointerenter', () => {
         const r = row.getBoundingClientRect();

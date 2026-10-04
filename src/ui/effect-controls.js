@@ -5,9 +5,10 @@
 import { store } from '../store.js';
 import * as edit from '../edit.js';
 import { EFFECTS, TRANSITIONS, TRANSITION_DIRECTIONS, DYNAMIC_OPTIONS, effectFitsClip } from '../effects.js';
-import { evalParam, isAnimated, toggleAnimation, toggleKeyframeAt, clipEnd, sourceOut, EFFECT_FIXED_TYPES } from '../model.js';
+import { evalParam, isAnimated, toggleAnimation, toggleKeyframeAt, clipEnd, sourceOut, EFFECT_FIXED_TYPES, keyframeDefaults } from '../model.js';
+import { EASE_FAMILIES, EASE_VARIANTS, easeName, easePath, isEaseId } from '../easing.js';
 import { h, clamp, formatTimecode, parseTimecode } from '../util.js';
-import { scrubNumber, showMenu, showPanel, fitCanvasToBox, promptDialog, toast } from './common.js';
+import { scrubNumber, showMenu, showPanel, fitCanvasToBox, promptDialog, toast, loadPref, savePref } from './common.js';
 import { icon, iconButton } from './icons.js';
 import { curveTable } from '../compositor.js';
 import { analyzeMotion, mediaStatus } from '../media.js';
@@ -36,6 +37,8 @@ function paramVisible(type, key, v) {
 }
 
 export function createEffectControls() {
+  const savedEase = loadPref('kfDefaultEase', 'linear');
+  if (isEaseId(savedEase)) keyframeDefaults.ease = savedEase;
   const body = h('div');
   const scroller = h('div.ec');
   body.append(scroller);
@@ -252,10 +255,20 @@ export function createEffectControls() {
             const prev = h('button', { title: '이전 키프레임으로' }, icon('kfPrev'));
             const add = h('button', { title: '키프레임 추가/삭제' }, icon('diamond'));
             const next = h('button', { title: '다음 키프레임으로' }, icon('kfNext'));
+            const easeBtn = h('button.ease-btn', { title: '이징: 재생헤드가 있는 구간의 움직임 곡선 고르기' }, icon('ease'));
             prev.addEventListener('click', () => gotoKf(c.id, fx.id, key, -1));
             next.addEventListener('click', () => gotoKf(c.id, fx.id, key, 1));
+            easeBtn.addEventListener('click', (e) => {
+              const kf = findFx(c.id, fx.id)?.params[key].kf || [];
+              const t = tLocal(c.id);
+              let i = kf.findIndex((k) => Math.abs(k.t - t) < fd() / 2);
+              if (i < 0) i = Math.max(0, kf.filter((k) => k.t < t).length - 1);
+              if (i === kf.length - 1 && i > 0 && Math.abs(kf[i].t - t) >= fd() / 2) i -= 1;
+              const r = e.currentTarget.getBoundingClientRect();
+              keyframeMenu(c, fx, key, i, r.left, r.bottom + 2);
+            });
             add.addEventListener('click', () => mutate('키프레임', c, fx, (f) => toggleKeyframeAt(f.params[key], tLocal(c.id), fd())));
-            kfnav = h('span.kfnav', prev, add, next);
+            kfnav = h('span.kfnav', prev, add, next, easeBtn);
             updaters.push(() => {
               const f = findFx(c.id, fx.id);
               const t = tLocal(c.id);
@@ -729,10 +742,112 @@ export function createEffectControls() {
     if (target != null) store.setPlayhead(c.start + target);
   }
 
+  /** Menu items to pick an easing; `current` marks the active one (null = mixed). */
+  function easeMenu(current, apply) {
+    return [
+      { group: '기본' },
+      { label: '직선', hint: '일정한 속도', curve: easePath('linear'), checked: current === 'linear', action: () => apply('linear') },
+      { label: '부드럽게', hint: '천천히 출발·멈춤', curve: easePath('ease'), checked: current === 'ease', action: () => apply('ease') },
+      { label: '정지', hint: '다음 키프레임에서 뚝 바뀜', curve: easePath('hold'), checked: current === 'hold', action: () => apply('hold') },
+      { group: '이징 곡선 (마우스를 올리면 In / Out 선택)' },
+      ...EASE_FAMILIES.map((f) => ({
+        label: f.name,
+        hint: f.desc,
+        curve: easePath(`out${f.id}`),
+        checked: !!current && current.endsWith(f.id) && current !== 'linear',
+        submenu: EASE_VARIANTS.map(([v, lab, desc]) => ({
+          label: lab, hint: desc, curve: easePath(`${v}${f.id}`), checked: current === `${v}${f.id}`, action: () => apply(`${v}${f.id}`),
+        })),
+      })),
+    ];
+  }
+
+  /** Set the easing of keyframes: which = index, 'param' (every keyframe of this value) or 'clip'. */
+  function applyEase(c, fx, key, which, ease) {
+    const label = `이징: ${easeName(ease)}`;
+    if (which === 'clip') {
+      store.transact(label, () => {
+        const clip = store.seq.clips[c.id];
+        if (!clip) return;
+        for (const f of clip.effects) {
+          for (const p of Object.values(f.params)) {
+            if (p.kf?.length && typeof p.kf[0].v === 'number') for (const k of p.kf) k.ease = ease;
+          }
+        }
+        edit.rawSyncLinkedRemap(c.id);
+      });
+      return;
+    }
+    mutate(label, c, fx, (f) => {
+      const kf = f.params[key].kf;
+      if (!kf) return;
+      if (which === 'param') for (const k of kf) k.ease = ease;
+      else if (kf[which]) kf[which].ease = ease;
+    });
+  }
+
+  function setDefaultEase(ease) {
+    keyframeDefaults.ease = ease;
+    savePref('kfDefaultEase', ease);
+    toast(`새로 만드는 키프레임은 "${easeName(ease)}" 이징으로 시작합니다`);
+  }
+
+  function keyframeMenu(c, fx, key, i, x, y) {
+    const f = findFx(c.id, fx.id);
+    const kf = f?.params[key].kf;
+    const k = kf?.[i];
+    if (!k) return;
+    const last = i === kf.length - 1;
+    showMenu([
+      { group: last ? '마지막 키프레임 — 다음 키프레임이 없어 이징이 쓰이지 않습니다' : `이 키프레임 → 다음 키프레임: ${easeName(k.ease)}` },
+      ...easeMenu(k.ease || 'linear', (e) => applyEase(c, fx, key, i, e)).slice(1),
+      '-',
+      { label: '이 값의 모든 키프레임에 적용', submenu: () => easeMenu(null, (e) => applyEase(c, fx, key, 'param', e)) },
+      { label: '이 클립의 모든 키프레임에 적용', submenu: () => easeMenu(null, (e) => applyEase(c, fx, key, 'clip', e)) },
+      { label: `새 키프레임 기본 이징 (지금: ${easeName(keyframeDefaults.ease)})`, submenu: () => easeMenu(keyframeDefaults.ease, setDefaultEase) },
+      '-',
+      { label: '키프레임 삭제', action: () => mutate('키프레임 삭제', c, fx, (f2) => {
+        const p = f2.params[key];
+        if (!p?.kf) return;
+        const removed = p.kf.splice(i, 1)[0];
+        if (!p.kf.length) {
+          p.kf = null;
+          if (removed) p.value = removed.v;
+        }
+      }) },
+    ], x, y);
+  }
+
   function buildLane(c, fx, key) {
-    const lane = h('div.ec-kf-lane', { title: '키프레임 — 클릭: 이동, 마름모 끌기: 시간 변경, 오른쪽 클릭: 보간 방식' });
+    const lane = h('div.ec-kf-lane', { title: '키프레임 — 클릭: 재생헤드 이동 · 마름모 끌기: 시간 변경 · 마름모 오른쪽 클릭: 이징 선택' });
+    const graph = h('canvas.kf-graph');
     const ph = h('div.ph');
-    lane.append(ph);
+    lane.append(graph, ph);
+    const drawGraph = (clip, p) => {
+      if (!graph.isConnected) return;
+      const { ctx, w, h: hh } = fitCanvasToBox(graph);
+      ctx.clearRect(0, 0, w, hh);
+      if (!p.kf?.length || typeof p.kf[0].v !== 'number' || w < 4) return;
+      const N = Math.min(400, Math.max(40, Math.round(w)));
+      const vals = [];
+      for (let n = 0; n <= N; n++) vals.push(evalParam(p, (n / N) * clip.duration));
+      let lo = Math.min(...vals);
+      let hi = Math.max(...vals);
+      if (hi - lo < 1e-9) {
+        lo -= 1;
+        hi += 1;
+      }
+      ctx.strokeStyle = 'rgba(108,182,255,0.75)';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      vals.forEach((v, n) => {
+        const x = (n / N) * w;
+        const y = hh - 3 - ((v - lo) / (hi - lo)) * (hh - 6);
+        if (n) ctx.lineTo(x, y);
+        else ctx.moveTo(x, y);
+      });
+      ctx.stroke();
+    };
     const draw = () => {
       const clip = store.seq.clips[c.id];
       const f = findFx(c.id, fx.id);
@@ -740,9 +855,11 @@ export function createEffectControls() {
       lane.querySelectorAll('.kf').forEach((x) => x.remove());
       const kfs = f.params[key].kf || [];
       kfs.forEach((k, i) => {
-        const d = h(`div.kf${Math.abs(k.t - (store.ui.playhead - clip.start)) < fd() / 2 ? '.sel' : ''}`, {
-          title: { linear: '직선', ease: '부드럽게 (가속/감속)', hold: '정지 (계단)' }[k.ease || 'linear'],
-          style: { left: `${(clamp(k.t, 0, clip.duration) / clip.duration) * 100}%`, borderRadius: k.ease === 'ease' ? '50%' : '0', transform: k.ease === 'hold' ? 'none' : '' },
+        const ease = k.ease || 'linear';
+        const shape = ease === 'linear' ? '.linear' : ease === 'hold' ? '.hold' : '.eased';
+        const d = h(`div.kf${shape}${Math.abs(k.t - (store.ui.playhead - clip.start)) < fd() / 2 ? '.sel' : ''}`, {
+          title: `${easeName(ease)} — 오른쪽 클릭: 이징 바꾸기`,
+          style: { left: `${(clamp(k.t, 0, clip.duration) / clip.duration) * 100}%` },
         });
         d.addEventListener('pointerdown', (e) => {
           e.stopPropagation();
@@ -776,28 +893,11 @@ export function createEffectControls() {
         d.addEventListener('contextmenu', (e) => {
           e.preventDefault();
           e.stopPropagation();
-          const setEase = (ease) => mutate('키프레임 보간', c, fx, (f2) => {
-            const kk = f2.params[key].kf?.[i];
-            if (kk) kk.ease = ease;
-          });
-          showMenu([
-            { label: '직선 (일정하게 변화)', checked: (k.ease || 'linear') === 'linear', action: () => setEase('linear') },
-            { label: '부드럽게 (가속/감속)', checked: k.ease === 'ease', action: () => setEase('ease') },
-            { label: '정지 (다음 키프레임까지 유지)', checked: k.ease === 'hold', action: () => setEase('hold') },
-            '-',
-            { label: '키프레임 삭제', action: () => mutate('키프레임 삭제', c, fx, (f2) => {
-              const p = f2.params[key];
-              if (!p?.kf) return;
-              const removed = p.kf.splice(i, 1)[0];
-              if (!p.kf.length) {
-                p.kf = null;
-                if (removed) p.value = removed.v;
-              }
-            }) },
-          ], e.clientX, e.clientY);
+          keyframeMenu(c, fx, key, i, e.clientX, e.clientY);
         });
         lane.append(d);
       });
+      drawGraph(clip, f.params[key]);
       const tl = (store.ui.playhead - clip.start) / clip.duration;
       ph.style.display = tl >= 0 && tl <= 1 ? 'block' : 'none';
       ph.style.left = `${tl * 100}%`;
@@ -810,8 +910,10 @@ export function createEffectControls() {
     });
     updaters.push(draw);
     draw();
+    requestAnimationFrame(draw);
     return lane;
   }
+
 
   function buildTransition(tr) {
     const c = store.seq.clips[tr.clipId];

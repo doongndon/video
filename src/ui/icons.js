@@ -64,6 +64,7 @@ const P = {
   zoom: '<circle cx="7" cy="7" r="4"/><path d="M10 10l4 4M5 7h4M7 5v4"/>',
   type: '<path d="M3 3h10M8 3v10M6 13h4"/>',
   pen: '<path d="M3 13l2-5 6-6 3 3-6 6zM5 8l3 3"/>',
+  ease: '<path d="M2 13.5C7 13.5 9 2.5 14 2.5"/><circle cx="2" cy="13.5" r="1.2" fill="currentColor"/><circle cx="14" cy="2.5" r="1.2" fill="currentColor"/>',
 };
 
 export function icon(name, size = 16) {

@@ -3,6 +3,7 @@
 
 import { uid, EPS, clamp, lerp, deepClone } from './util.js';
 import { EFFECTS, fixedEffectsFor } from './effects.js';
+import { easeFn, easeIsWiggly } from './easing.js';
 
 export const DEFAULT_STILL_DURATION = 5;
 
@@ -179,9 +180,8 @@ export function evalParam(param, tLocal) {
     const b = kf[i + 1];
     if (tLocal >= a.t && tLocal <= b.t) {
       if (typeof a.v !== 'number' || a.ease === 'hold') return a.v;
-      let u = (tLocal - a.t) / Math.max(EPS, b.t - a.t);
-      if (a.ease === 'ease') u = u * u * (3 - 2 * u);
-      return lerp(a.v, b.v, u);
+      const u = (tLocal - a.t) / Math.max(EPS, b.t - a.t);
+      return lerp(a.v, b.v, easeFn(a.ease)(u));
     }
   }
   return last.v;
@@ -196,6 +196,9 @@ export function evalEffect(effect, tLocal) {
 
 export const isAnimated = (param) => !!(param?.kf && param.kf.length);
 
+/** Easing given to newly created keyframes (효과 컨트롤 ▸ 키프레임 오른쪽 클릭 ▸ 새 키프레임 기본 이징). */
+export const keyframeDefaults = { ease: 'linear' };
+
 /** Set a param value; if animated, writes/updates a keyframe at tLocal. */
 export function setParamValue(param, value, tLocal, frameDur) {
   if (!isAnimated(param)) {
@@ -206,7 +209,7 @@ export function setParamValue(param, value, tLocal, frameDur) {
   const existing = param.kf.find((k) => Math.abs(k.t - tLocal) < tol);
   if (existing) existing.v = value;
   else {
-    param.kf.push({ t: tLocal, v: value, ease: 'linear' });
+    param.kf.push({ t: tLocal, v: value, ease: keyframeDefaults.ease });
     param.kf.sort((a, b) => a.t - b.t);
   }
   param.value = value;
@@ -217,7 +220,7 @@ export function toggleAnimation(param, tLocal) {
     param.value = evalParam(param, tLocal);
     param.kf = null;
   } else {
-    param.kf = [{ t: tLocal, v: param.value, ease: 'linear' }];
+    param.kf = [{ t: tLocal, v: param.value, ease: keyframeDefaults.ease }];
   }
 }
 
@@ -229,7 +232,7 @@ export function toggleKeyframeAt(param, tLocal, frameDur) {
     param.kf.splice(idx, 1);
     if (!param.kf.length) param.kf = null;
   } else {
-    param.kf.push({ t: tLocal, v: evalParam(param, tLocal), ease: 'linear' });
+    param.kf.push({ t: tLocal, v: evalParam(param, tLocal), ease: keyframeDefaults.ease });
     param.kf.sort((a, b) => a.t - b.t);
   }
 }
@@ -279,7 +282,7 @@ export const clipEnd = (c) => c.start + c.duration;
 
 /**
  * Content seconds elapsed after tl seconds of a clip with a time-remap speed param (percent).
- * Integrates the keyframed speed curve exactly for linear/hold segments and numerically for eased ones.
+ * Integrates the keyframed speed curve exactly for linear/hold segments and numerically (Simpson) for eased ones.
  */
 export function remapIntegral(param, tl) {
   if (!param) return tl;
@@ -304,14 +307,11 @@ export function remapIntegral(param, tl) {
       continue;
     }
     const span = Math.max(EPS, b.t - a.t);
-    const speedAt = (x) => {
-      if (a.ease === 'hold') return a.v;
-      let u = (x - a.t) / span;
-      if (a.ease === 'ease') u = u * u * (3 - 2 * u);
-      return lerp(a.v, b.v, u);
-    };
-    if (a.ease === 'ease') {
-      const n = 12; // Simpson's rule
+    const ease = easeFn(a.ease);
+    // overshooting curves (back / elastic) may dip below zero: content never runs backwards
+    const speedAt = (x) => (a.ease === 'hold' ? a.v : Math.max(0, lerp(a.v, b.v, ease((x - a.t) / span))));
+    if (a.ease && a.ease !== 'linear' && a.ease !== 'hold') {
+      const n = easeIsWiggly(a.ease) ? 64 : 12; // Simpson's rule (even n)
       const hdt = (s1 - s0) / n;
       let sum = 0;
       for (let k = 0; k <= n; k++) sum += speedAt(s0 + k * hdt) * (k === 0 || k === n ? 1 : k % 2 ? 4 : 2);
@@ -332,7 +332,7 @@ export function remapIntegral(param, tl) {
 export function remapSpeedAt(clip, tl) {
   const fx = clip.effects?.find((e) => e.type === 'timeRemap' && e.enabled);
   if (!fx) return 1;
-  return evalParam(fx.params.speed, tl) / 100;
+  return Math.max(0, evalParam(fx.params.speed, tl) / 100);
 }
 
 /** Source seconds consumed after tl seconds into the clip (speed, time remapping). */

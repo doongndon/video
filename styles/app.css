@@ -79,6 +79,12 @@ kbd { font: var(--fs-xs) ui-monospace, Menlo, Consolas, monospace; background: v
 .menu .item:hover .key { color: #e6f0ff; }
 .menu .item.checked::before { content: "✓"; position: absolute; left: 10px; }
 .menu .item .swatch { width: 12px; height: 12px; border-radius: 3px; margin-right: -8px; }
+.menu .item .curve { display: inline-flex; margin-right: -8px; flex-shrink: 0; }
+.menu .item .curve svg { width: calc(30px * var(--ui-scale)); height: calc(20px * var(--ui-scale)); fill: none; stroke: var(--value); stroke-width: 1.6; stroke-linejoin: round; overflow: visible; }
+.menu .item .curve svg .guide { stroke: var(--line-2); stroke-width: 0.8; stroke-dasharray: 2 2; }
+.menu .item:hover .curve svg { stroke: #fff; }
+.menu .item .hint { color: var(--text-faint); font-size: var(--fs-xs); }
+.menu .item:hover .hint { color: #dbe8ff; }
 .menu .sep { height: 1px; background: var(--line-2); margin: 5px 0; }
 .menu .group { padding: 6px 16px 2px; color: var(--text-faint); font-size: var(--fs-xs); }
 .menu .item.sub::after { content: "▸"; color: var(--text-faint); }
@@ -225,7 +231,7 @@ kbd { font: var(--fs-xs) ui-monospace, Menlo, Consolas, monospace; background: v
 .ec-sec-head .fx-toggle.on { color: var(--warn); border-color: #7a6020; }
 .ec-sec-head .ibtn { min-height: 0; height: calc(24px * var(--ui-scale)); min-width: calc(24px * var(--ui-scale)); }
 .ec-section.collapsed .ec-params { display: none; }
-.ec-param { display: grid; grid-template-columns: calc(24px * var(--ui-scale)) minmax(100px, 1fr) minmax(120px, 1.4fr) calc(76px * var(--ui-scale)); align-items: center; gap: 6px; padding: 3px 8px; min-height: calc(30px * var(--ui-scale)); }
+.ec-param { display: grid; grid-template-columns: calc(24px * var(--ui-scale)) minmax(100px, 1fr) minmax(120px, 1.4fr) calc(100px * var(--ui-scale)); align-items: center; gap: 6px; padding: 3px 8px; min-height: calc(30px * var(--ui-scale)); }
 .ec-param:hover { background: var(--bg-4); }
 .ec-param .label { color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ec-param .stopwatch { min-width: 0; width: calc(22px * var(--ui-scale)); height: calc(22px * var(--ui-scale)); min-height: 0; padding: 0; background: none; border: none; color: var(--text-faint); }
@@ -241,9 +247,13 @@ kbd { font: var(--fs-xs) ui-monospace, Menlo, Consolas, monospace; background: v
 .scrub:hover { border-bottom-color: var(--value); }
 .scrub-input { width: 90px; }
 .unit { color: var(--text-faint); margin-left: 4px; font-size: var(--fs-s); }
-.ec-kf-lane { position: relative; height: 18px; margin: 0 8px 2px calc(32px * var(--ui-scale)); background: var(--bg-2); border-radius: 4px; cursor: pointer; }
-.ec-kf-lane .kf { position: absolute; top: 4px; width: 10px; height: 10px; margin-left: -5px; background: var(--text-dim); transform: rotate(45deg); cursor: ew-resize; }
+.ec-kf-lane { position: relative; height: calc(30px * var(--ui-scale)); margin: 0 8px 4px calc(32px * var(--ui-scale)); background: var(--bg-2); border-radius: 4px; cursor: pointer; }
+.ec-kf-lane .kf-graph { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.ec-kf-lane .kf { position: absolute; top: calc(50% - 5px); width: 10px; height: 10px; margin-left: -5px; background: var(--text-dim); transform: rotate(45deg); cursor: ew-resize; z-index: 1; border: 1px solid #0008; }
+.ec-kf-lane .kf.hold { transform: none; }
+.ec-kf-lane .kf.eased { border-radius: 50%; transform: none; }
 .ec-kf-lane .kf.sel { background: var(--value); }
+.ec-param .kfnav .ease-btn { color: var(--value); }
 .ec-kf-lane .ph { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--accent); pointer-events: none; }
 .curve-editor { display: grid; gap: 6px; }
 .curve-editor .curve-tabs { display: flex; gap: 4px; }
