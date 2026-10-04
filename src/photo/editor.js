@@ -9,9 +9,11 @@ import { PhotoDoc, newLayer, makeCanvas, cloneCanvas, textBox, boxCorners } from
 import { History } from './history.js';
 import * as SEL from './selection.js';
 import { TOOL_BY_ID, FreeTransform } from './tools.js';
-import { ADJUSTMENTS, defaultParams, FILTERS } from './adjust.js';
+import { ADJUSTMENTS, FILTERS } from './adjust.js';
 import * as IO from './io.js';
 import * as D from './pdialogs.js';
+import { installLayerCommands, layerMenuItems } from './layercmds.js';
+import { FX_NAMES } from './styles.js';
 import { buildToolbar, buildToolStrip, buildOptionsBar, buildLayersPanel, buildColorPanel, buildPropertiesPanel, buildHistoryPanel } from './panels.js';
 
 const isMobile = () => document.body.classList.contains('mobile');
@@ -258,6 +260,7 @@ export function createPhotoEditor(root) {
     P.redraw();
   }
 
+  P.renderTabs = () => renderTabs();
   function renderTabs() {
     tabs.replaceChildren(...P.docs.map((d, i) => h(`div.ph-tab${i === P.index ? '.on' : ''}`, { onclick: () => P.switchDoc(i), title: `${d.name} (${d.width}×${d.height})` },
       h('span', `${d.name}${d.saved ? '' : ' •'}`),
@@ -310,6 +313,7 @@ export function createPhotoEditor(root) {
   const comp = makeCanvas(1, 1);
   let compRev = -1;
   let compFloat = null;
+  let compMask = null;
   let frame = 0;
   let checker = null;
   P.composite = () => {
@@ -319,8 +323,25 @@ export function createPhotoEditor(root) {
       comp.height = doc.height;
       compRev = -1;
     }
-    if (compRev !== doc.rev || compFloat !== P.float) {
-      doc.render(comp.getContext('2d'), { float: P.float });
+    if (compRev !== doc.rev || compFloat !== P.float || compMask !== P.showMaskOnly) {
+      compMask = P.showMaskOnly;
+      doc.render(comp.getContext('2d'), { float: P.float, fg: P.fg, bg: P.bg });
+      // Alt+click on a mask thumbnail: look at the mask itself
+      const ml = P.showMaskOnly && doc.layer(P.showMaskOnly);
+      if (ml?.mask) {
+        const g = comp.getContext('2d');
+        g.save();
+        g.fillStyle = '#000';
+        g.fillRect(0, 0, comp.width, comp.height);
+        const t = makeCanvas(comp.width, comp.height);
+        const tg = t.getContext('2d');
+        tg.drawImage(ml.mask.canvas, ml.mask.x, ml.mask.y);
+        tg.globalCompositeOperation = 'source-in';
+        tg.fillStyle = '#fff';
+        tg.fillRect(0, 0, t.width, t.height);
+        g.drawImage(t, 0, 0);
+        g.restore();
+      }
       compRev = doc.rev;
       compFloat = P.float;
     }
@@ -489,28 +510,48 @@ export function createPhotoEditor(root) {
 
   // ---------------------------------------------------------------- helpers for tools
 
-  P.selectLayer = (id) => {
-    if (!P.doc?.layer(id)) return;
+  /** Make a layer active; mode 'add' toggles it in the selection (Ctrl), 'range' extends (Shift). */
+  P.selectLayer = (id, mode = 'single') => {
+    const doc = P.doc;
+    if (!doc?.layer(id)) return;
     if (P.transform) P.applyTransform();
+    if (mode === 'add') {
+      const set = new Set([...(doc.selectedIds || []), doc.activeId]);
+      if (set.has(id) && set.size > 1) {
+        set.delete(id);
+        doc.selectedIds = [...set];
+        if (doc.activeId === id) doc.activeId = doc.selectedIds[doc.selectedIds.length - 1];
+        P.emit('layers');
+        return;
+      }
+      set.add(id);
+      doc.selectedIds = [...set];
+    } else if (mode === 'range') {
+      const a = doc.index(doc.activeId);
+      const b = doc.index(id);
+      const [lo, hi] = a < b ? [a, b] : [b, a];
+      const target = doc.layer(id);
+      doc.selectedIds = doc.layers.slice(lo, hi + 1).filter((l) => (l.parent || null) === (target.parent || null)).map((l) => l.id);
+    } else doc.selectedIds = [id];
     P.doc.activeId = id;
     if (!P.doc.active.mask) P.editMask = false;
     P.emit('layers');
     P.redraw();
   };
-  P.addLayer = (l, { at = null } = {}) => {
+  /** Add a layer above the active one (inside it when it is an open group). */
+  P.addLayer = (l, { above = undefined } = {}) => {
     const doc = P.doc;
-    const i = at ?? doc.index(doc.activeId) + 1;
-    doc.layers.splice(i <= 0 ? doc.layers.length : i, 0, l);
+    doc.insertAbove(l, above === undefined ? doc.activeId : above);
     doc.activeId = l.id;
+    doc.selectedIds = [l.id];
     P.editMask = false;
-    doc.touch(l);
     P.emit('layers');
   };
   /** Topmost visible layer with a pixel (or box) at p. */
   P.layerAt = (p, filter = () => true) => {
     const doc = P.doc;
     for (const l of [...doc.layers].reverse()) {
-      if (!l.visible || l.kind === 'adjust' || !filter(l)) continue;
+      if (!doc.shown(l) || l.kind === 'adjust' || l.kind === 'group' || !filter(l)) continue;
       if (l.kind === 'text' || l.kind === 'shape') {
         const b = l.kind === 'text' ? textBox(l) : { w: l.shape.w, h: l.shape.h };
         const cs = boxCorners(l, b.w, b.h);
@@ -852,12 +893,12 @@ export function createPhotoEditor(root) {
     const map = {
       KeyZ: () => (mod ? (e.shiftKey ? P.redo() : P.undo()) : P.setTool('zoom')),
       KeyY: () => mod && P.redo(),
-      KeyA: () => (mod ? P.cmd.selectAll() : null),
+      KeyA: () => (mod && e.altKey ? P.cmd.selectAllLayers() : mod ? P.cmd.selectAll() : null),
       KeyD: () => (mod ? (e.shiftKey ? P.cmd.reselect() : P.cmd.deselect()) : P.defaultColors()),
       KeyI: () => (mod ? (e.shiftKey ? P.cmd.inverse() : D.adjustDialog(P, 'invert')) : P.setTool('eyedropper')),
       KeyT: () => (mod ? P.cmd.freeTransform() : P.setTool('text')),
-      KeyJ: () => (mod ? P.cmd.duplicateLayer() : P.setTool('heal')),
-      KeyE: () => (mod ? (e.shiftKey ? P.cmd.mergeVisible() : P.cmd.mergeDown()) : P.setTool('eraser')),
+      KeyJ: () => (mod && e.shiftKey ? P.cmd.layerVia(true) : mod ? P.cmd.duplicateLayer() : P.setTool('heal')),
+      KeyE: () => (mod && e.shiftKey && e.altKey ? P.cmd.stampVisible() : mod ? (e.shiftKey ? P.cmd.mergeVisible() : P.cmd.mergeDown()) : P.setTool('eraser')),
       KeyN: () => (mod && e.shiftKey ? P.cmd.newLayer() : mod ? D.newDocDialog(P) : null),
       KeyO: () => (mod ? P.cmd.open() : P.setTool(P.tool === 'dodge' ? 'burn' : 'dodge')),
       KeyS: () => (mod ? P.cmd.saveProject() : P.setTool('clone')),
@@ -868,7 +909,7 @@ export function createPhotoEditor(root) {
       KeyL: () => (mod ? D.adjustDialog(P, 'levels') : P.setTool('lasso')),
       KeyU: () => (mod ? (e.shiftKey ? D.adjustDialog(P, 'desaturate') : D.adjustDialog(P, 'hueSat')) : P.setTool('shape')),
       KeyB: () => (mod ? D.adjustDialog(P, 'colorBalance') : P.setTool(e.shiftKey ? (P.tool === 'brush' ? 'pencil' : 'brush') : P.tool === 'pencil' ? 'pencil' : 'brush')),
-      KeyG: () => (mod ? null : P.setTool(e.shiftKey ? (P.tool === 'gradient' ? 'bucket' : 'gradient') : P.tool === 'bucket' ? 'bucket' : 'gradient')),
+      KeyG: () => (mod ? (e.altKey ? P.cmd.toggleClip() : e.shiftKey ? P.cmd.ungroup() : P.cmd.groupLayers()) : P.setTool(e.shiftKey ? (P.tool === 'gradient' ? 'bucket' : 'gradient') : P.tool === 'bucket' ? 'bucket' : 'gradient')),
       KeyF: () => (mod ? D.repeatFilter(P) : null),
       KeyW: () => (mod ? null : P.setTool('wand')),
       KeyH: () => (mod ? null : P.setTool('hand')),
@@ -940,7 +981,22 @@ export function createPhotoEditor(root) {
 
   // ---------------------------------------------------------------- commands
 
+  P.dialogs = D;
+  P.fxNames = FX_NAMES;
+  P.filterName = D.filterName;
+  P.editSmartFilter = (l, i) => {
+    const f = l.smart.filters[i];
+    if (f) D.smartFilterDialog(P, f.id, f.params, i);
+  };
+  P.newFillOrAdjustMenu = () => [
+    { label: '단색…', action: () => D.fillLayerDialog(P, 'solid') },
+    { label: '그레이디언트…', action: () => D.fillLayerDialog(P, 'gradient') },
+    { label: '패턴…', action: () => D.fillLayerDialog(P, 'pattern') },
+    '-',
+    ...Object.entries(ADJUSTMENTS).filter(([k]) => k !== 'desaturate').map(([k, a]) => ({ label: `${a.name}…`, action: () => P.cmd.newAdjustLayer(k) })),
+  ];
   installCommands(P);
+  installLayerCommands(P);
   P.menus = buildMenus(P);
   P.layerMenu = () => P.menus['레이어']();
   P.contextMenu = () => [
@@ -1058,14 +1114,20 @@ function installCommands(P) {
     showMenu(items, r.left, r.bottom + 4);
     return undefined;
   };
-  C.savePsd = () => {
+  C.savePsd = (opts = {}) => {
     if (!need()) return;
+    const doc = P.doc;
     try {
-      const { blob, skipped } = IO.docToPsd(P.doc);
-      downloadBlob(blob, `${P.doc.name}.psd`).then((ok) => {
+      const { blob, skipped, flat } = IO.docToPsd(doc, { ...opts, fg: P.fg, bg: P.bg });
+      const notes = [];
+      if (skipped) notes.push(`PSD로 옮길 수 없는 조정 레이어 ${skipped}개는 빠짐`);
+      const px = [flat.fill && `칠 레이어 ${flat.fill}개`, flat.smart && `고급 개체 ${flat.smart}개`, flat.shape && `모양 ${flat.shape}개`, !opts.editableText && doc.layers.some((l) => l.kind === 'text') && '글자'].filter(Boolean);
+      if (px.length) notes.push(`${px.join('·')}는 픽셀로 저장`);
+      downloadBlob(blob, `${doc.name}.psd`).then((ok) => {
         if (ok) {
-          P.doc.saved = true;
-          toast(`${P.doc.name}.psd 저장${skipped ? ` (PSD로 옮길 수 없는 조정 레이어 ${skipped}개는 빠짐)` : ''}`);
+          doc.saved = true;
+          P.renderTabs();
+          toast(`${doc.name}.psd 저장${notes.length ? ` (${notes.join(', ')})` : ''}`);
         }
       });
     } catch (err) {
@@ -1073,15 +1135,25 @@ function installCommands(P) {
       toast(`PSD로 저장하지 못했습니다: ${err.message || err}`);
     }
   };
-  C.saveProject = () => {
+  C.saveProject = async () => {
     if (!need()) return;
-    const blob = new Blob([JSON.stringify(IO.docToProject(P.doc))], { type: 'application/json' });
-    downloadBlob(blob, `${P.doc.name}.mphoto`).then((ok) => {
-      if (ok) {
-        P.doc.saved = true;
-        toast(`${P.doc.name}.mphoto 저장 (모든 레이어를 그대로 다시 열 수 있는 Montage 사진 파일)`);
-      }
-    });
+    if (P.doc.smartParent && C.commitSmart(P.doc)) return;
+    const doc = P.doc;
+    const blob = new Blob([JSON.stringify(await IO.docToProject(doc))], { type: 'application/json' });
+    if (await downloadBlob(blob, `${doc.name}.mphoto`)) {
+      doc.saved = true;
+      P.renderTabs();
+      toast(`${doc.name}.mphoto 저장 (모든 레이어를 그대로 다시 열 수 있는 Montage 사진 파일)`);
+    }
+  };
+  C.exportLayers = async () => {
+    if (!need()) return;
+    const doc = P.doc;
+    toast('레이어를 파일로 만드는 중…');
+    const files = await IO.exportLayers(doc);
+    if (!files.length) return toast('내보낼 보이는 레이어가 없습니다');
+    const zip = await IO.zipFiles(files.map((f, i) => ({ name: `${String(i + 1).padStart(2, '0')} ${f.name}.png`, blob: f.blob })));
+    if (await downloadBlob(zip, `${doc.name} 레이어.zip`)) toast(`레이어 ${files.length}개를 ${doc.name} 레이어.zip으로 저장했습니다`);
   };
   P.exportImage = async (name, type, quality, scale) => {
     const blob = await IO.exportBlob(P.doc, type, quality, scale);
@@ -1428,157 +1500,7 @@ function installCommands(P) {
     });
   };
 
-  // ---- layers
-  C.newLayer = () => need() && P.run('새 레이어', () => P.addLayer(newLayer('raster', { name: `레이어 ${P.doc.layers.length + 1}`, canvas: makeCanvas(P.doc.width, P.doc.height) })));
-  C.newAdjustLayer = (type) => {
-    if (!need()) return;
-    P.run(`새 조정 레이어: ${ADJUSTMENTS[type].name}`, () => {
-      const l = newLayer('adjust', { name: ADJUSTMENTS[type].name, adjust: { type, params: defaultParams(type) } });
-      if (P.doc.selection) P.doc.addMask(l, 'white', true);
-      P.addLayer(l);
-    });
-    P.showPanel('props');
-  };
-  C.duplicateLayer = () => {
-    if (!need()) return;
-    const l = P.doc.active;
-    if (!l) return;
-    if (P.doc.selection && l.kind === 'raster') return C.layerVia(false);
-    P.run('레이어 복제', () => {
-      const c = { ...l, id: newLayer('raster').id, name: `${l.name} 복사`, text: l.text && { ...l.text }, shape: l.shape && { ...l.shape }, adjust: l.adjust && structuredClone(l.adjust), fx: structuredClone(l.fx || {}), mask: l.mask && { ...l.mask }, _styled: null, _cache: null, _text: null, _shape: null, rev: 0 };
-      P.addLayer(c);
-    });
-    return undefined;
-  };
-  C.layerVia = (cut) => {
-    if (!need()) return;
-    const doc = P.doc;
-    const l = activeRaster('복사한 레이어');
-    if (!l) return;
-    if (!doc.selection) return C.duplicateLayer();
-    P.run(cut ? '잘라낸 레이어' : '복사한 레이어', () => {
-      const c = makeCanvas(doc.width, doc.height);
-      const g = c.getContext('2d');
-      g.drawImage(l.canvas, l.x, l.y);
-      g.globalCompositeOperation = 'destination-in';
-      g.drawImage(doc.selection.canvas, 0, 0);
-      if (cut) {
-        const lg = doc.editPixels(l);
-        lg.globalCompositeOperation = 'destination-out';
-        lg.drawImage(doc.selection.canvas, -l.x, -l.y);
-      }
-      doc.selection = null;
-      P.addLayer(newLayer('raster', { name: `${l.name} ${cut ? '잘라냄' : '복사'}`, canvas: c }));
-    });
-    return undefined;
-  };
-  C.deleteLayer = () => {
-    if (!need()) return;
-    const doc = P.doc;
-    if (doc.layers.length <= 1) return toast('마지막 레이어는 지울 수 없습니다');
-    const i = doc.index(doc.activeId);
-    P.run('레이어 삭제', () => {
-      doc.layers.splice(i, 1);
-      doc.activeId = doc.layers[Math.max(0, i - 1)].id;
-    });
-    return undefined;
-  };
-  C.renameLayer = async (l = P.doc?.active) => {
-    if (!l) return;
-    const name = await promptDialog('레이어 이름', '새 이름', l.name);
-    if (name && name !== l.name) P.run('이름 바꾸기', () => { l.name = name; P.doc.touch(l); });
-  };
-  C.moveLayerTo = (id, index) => {
-    const doc = P.doc;
-    const from = doc.index(id);
-    if (from < 0) return;
-    P.run('레이어 순서', () => {
-      const [l] = doc.layers.splice(from, 1);
-      doc.layers.splice(clamp(index, 0, doc.layers.length), 0, l);
-      doc.rev++;
-    });
-  };
-  C.arrange = (dir) => {
-    if (!need()) return;
-    const doc = P.doc;
-    const i = doc.index(doc.activeId);
-    const j = dir === 'top' ? doc.layers.length - 1 : dir === 'bottom' ? 0 : i + dir;
-    if (j < 0 || j >= doc.layers.length || j === i) return;
-    C.moveLayerTo(doc.activeId, j);
-  };
-  C.mergeDown = () => {
-    if (!need()) return;
-    const doc = P.doc;
-    const i = doc.index(doc.activeId);
-    if (i <= 0) return toast('아래에 합칠 레이어가 없습니다');
-    const top = doc.layers[i];
-    const below = doc.layers[i - 1];
-    if (below.kind !== 'raster') return toast('아래 레이어가 이미지 레이어가 아닙니다 (래스터화 후 합치세요)');
-    P.run('아래로 병합', () => {
-      const g = doc.editPixels(below);
-      const c = top.kind === 'adjust' ? null : doc.content(top);
-      if (top.kind === 'adjust') {
-        // bake the adjustment into the layer below
-        const tmp = makeCanvas(doc.width, doc.height);
-        tmp.getContext('2d').drawImage(below.canvas, below.x, below.y);
-        const fake = { ...top, _cache: null };
-        const t2 = makeCanvas(doc.width, doc.height);
-        const tg = t2.getContext('2d');
-        tg.drawImage(tmp, 0, 0);
-        doc.drawAdjustment(tg, fake, Math.random());
-        g.clearRect(0, 0, g.canvas.width, g.canvas.height);
-        g.drawImage(t2, -below.x, -below.y);
-      } else if (c && top.visible) {
-        const s = doc.styled(top, c);
-        g.globalAlpha = top.opacity;
-        g.globalCompositeOperation = { normal: 'source-over' }[top.blend] || (top.blend === 'linear dodge' ? 'lighter' : top.blend.replace(' ', '-'));
-        g.drawImage(s.canvas, s.x - below.x, s.y - below.y);
-      }
-      doc.layers.splice(i, 1);
-      doc.activeId = below.id;
-      below._styled = null;
-    });
-    return undefined;
-  };
-  C.mergeVisible = () => {
-    if (!need()) return;
-    const doc = P.doc;
-    P.run('보이는 레이어 병합', () => {
-      const flat = doc.flatten();
-      const keep = doc.layers.filter((l) => !l.visible);
-      const l = newLayer('raster', { name: '병합됨', canvas: flat });
-      doc.layers = [...keep, l];
-      doc.activeId = l.id;
-    });
-  };
-  C.flatten = () => {
-    if (!need()) return;
-    const doc = P.doc;
-    P.run('이미지 병합', () => {
-      const c = makeCanvas(doc.width, doc.height);
-      const g = c.getContext('2d');
-      g.fillStyle = '#ffffff';
-      g.fillRect(0, 0, c.width, c.height);
-      g.drawImage(doc.flatten(), 0, 0);
-      const l = newLayer('raster', { name: '배경', canvas: c });
-      doc.layers = [l];
-      doc.activeId = l.id;
-    });
-  };
-  C.rasterize = () => {
-    if (!need()) return;
-    const doc = P.doc;
-    const l = doc.active;
-    if (!l || l.kind === 'raster' || l.kind === 'adjust') return toast('글자·모양 레이어를 선택하세요');
-    P.run('래스터화', () => {
-      const c = doc.content(l);
-      const nl = { ...l, kind: 'raster', canvas: cloneCanvas(c.canvas), x: c.x, y: c.y, text: null, shape: null, rotation: 0, _text: null, _shape: null, _styled: null };
-      doc.layers[doc.index(l.id)] = nl;
-      doc.touch(nl);
-    });
-    return undefined;
-  };
-  C.layerStyle = () => need() && D.layerStyleDialog(P);
+  // ---- layers (see layercmds.js)
   C.addMask = (hideAll = false) => {
     if (!need()) return;
     const doc = P.doc;
@@ -1649,7 +1571,38 @@ function installCommands(P) {
   C.feather = () => selModify('페더', (n) => SEL.feather(P.doc, n), 10);
   C.expand = () => selModify('확대 (선택 영역 넓히기)', (n) => SEL.grow(P.doc, n), 5);
   C.contract = () => selModify('축소 (선택 영역 좁히기)', (n) => SEL.grow(P.doc, -n), 5);
-  C.selectFromLayer = (l = P.doc?.active) => l && P.run('레이어 모양대로 선택', () => { P.doc.selection = SEL.fromLayer(P.doc, l); });
+  C.selectFromLayer = (l = P.doc?.active, mode = 'new') => l && P.run('레이어 모양대로 선택', () => {
+    const m = SEL.fromLayer(P.doc, l);
+    P.doc.selection = mode === 'new' ? m : SEL.combine(P.doc, m.canvas, mode);
+  });
+  C.maskToSelection = (l = P.doc?.active) => {
+    if (!l?.mask) return;
+    P.run('마스크를 선택 영역으로', () => {
+      const c = makeCanvas(P.doc.width, P.doc.height);
+      c.getContext('2d').drawImage(l.mask.canvas, l.mask.x, l.mask.y);
+      P.doc.selection = { canvas: c };
+    });
+  };
+  C.toggleClipFor = (l) => {
+    P.selectLayer(l.id);
+    C.toggleClip();
+  };
+  C.layerStyle = (section = 'blending') => need() && D.layerStyleDialog(P, section);
+  C.placeEmbedded = async () => {
+    if (!need()) return;
+    const { pickFiles } = await import('../ui/project-panel.js');
+    const files = await pickFiles({ accept: IO.OPEN_ACCEPT, multiple: true });
+    for (const f of files) {
+      try {
+        const isPsd = /\.ps[db]$/i.test(f.name);
+        const sub = isPsd || /\.mphoto$/i.test(f.name) ? await IO.openFile(f) : null;
+        const c = sub ? sub.flatten() : await IO.canvasFromFile(f);
+        C.placeEmbeddedCanvas(c, f.name.replace(/\.[^.]+$/, ''), sub);
+      } catch (err) {
+        toast(`${f.name}: 가져오지 못했습니다 (${err.message || err})`);
+      }
+    }
+  };
   C.colorRange = async () => {
     if (!need()) return;
     const v = await promptDialog('색상 범위 (전경색과 비슷한 곳 모두 선택)', '허용치 (0~255)', '40');
@@ -1686,11 +1639,14 @@ function buildMenus(P) {
       { label: '새로 만들기…', key: `${mod}N`, action: () => D.newDocDialog(P) },
       { label: '열기… (사진·PSD·Montage 사진 파일)', key: `${mod}O`, action: () => C.open() },
       { label: '영상 프로젝트의 이미지 열기', action: () => C.openFromVideo() },
-      { label: '가져오기 (새 레이어로)…', disabled: no(), action: () => C.place() },
+      { label: '포함 가져오기 (고급 개체)…', disabled: no(), action: () => C.placeEmbedded() },
+      { label: '가져오기 (새 픽셀 레이어로)…', disabled: no(), action: () => C.place() },
       { label: '닫기', disabled: no(), action: () => P.closeDoc() },
       '-',
       { label: 'Montage 사진 파일로 저장 (.mphoto)', key: `${mod}S`, disabled: no(), action: () => C.saveProject() },
       { label: 'PSD로 저장 (포토샵 파일)', disabled: no(), action: () => C.savePsd() },
+      { label: 'PSD로 저장 (글자 레이어를 포토샵 글자로, 실험적)', disabled: no(), action: () => C.savePsd({ editableText: true }) },
+      { label: '레이어를 파일로 내보내기 (PNG)…', disabled: no(), action: () => C.exportLayers() },
       { label: '내보내기 (PNG · JPG · WebP)…', key: `${mod}Shift+Alt+W`, disabled: no(), action: () => D.exportDialog(P) },
       '-',
       { label: '영상 편집으로 보내기…', disabled: no(), action: () => D.sendToVideoDialog(P) },
@@ -1734,37 +1690,11 @@ function buildMenus(P) {
       { label: '선택 영역으로 자르기', disabled: no() || !P.doc?.selection, action: () => C.cropToSelection() },
       { label: '투명 영역 잘라내기 (트리밍)', disabled: no(), action: () => C.trim() },
     ],
-    '레이어': () => [
-      { label: '새 레이어', key: `${mod}Shift+N`, disabled: no(), action: () => C.newLayer() },
-      { label: '새 조정 레이어', disabled: no(), submenu: () => Object.entries(ADJUSTMENTS).filter(([k]) => k !== 'desaturate').map(([k, a]) => ({ label: a.name, action: () => C.newAdjustLayer(k) })) },
-      { label: '레이어 복제', key: `${mod}J`, disabled: no(), action: () => C.duplicateLayer() },
-      { label: '잘라낸 레이어 (선택 영역)', key: `${mod}Shift+J`, disabled: no() || !P.doc?.selection, action: () => C.layerVia(true) },
-      { label: '레이어 삭제', disabled: no(), action: () => C.deleteLayer() },
-      { label: '이름 바꾸기…', disabled: no(), action: () => C.renameLayer() },
-      '-',
-      { label: '레이어 스타일 (그림자·획·광선)…', disabled: no(), action: () => C.layerStyle() },
-      { label: '레이어 마스크', disabled: no(), submenu: [
-        { label: '모두 나타내기 (또는 선택 영역만)', action: () => C.addMask(false) },
-        { label: '모두 숨기기', action: () => C.addMask(true) },
-        '-',
-        { label: '마스크 반전', disabled: !P.doc?.active?.mask, action: () => C.invertMask() },
-        { label: '마스크 적용', disabled: !P.doc?.active?.mask, action: () => C.applyMask() },
-        { label: '마스크 삭제', disabled: !P.doc?.active?.mask, action: () => C.deleteMask() },
-      ] },
-      { label: '래스터화 (글자·모양 → 이미지)', disabled: no() || !['text', 'shape'].includes(P.doc?.active?.kind), action: () => C.rasterize() },
-      '-',
-      { label: '정돈', disabled: no(), submenu: [
-        { label: '맨 앞으로', key: `${mod}Shift+]`, action: () => C.arrange('top') },
-        { label: '앞으로', key: `${mod}]`, action: () => C.arrange(1) },
-        { label: '뒤로', key: `${mod}[`, action: () => C.arrange(-1) },
-        { label: '맨 뒤로', key: `${mod}Shift+[`, action: () => C.arrange('bottom') },
-      ] },
-      { label: '아래로 병합', key: `${mod}E`, disabled: no(), action: () => C.mergeDown() },
-      { label: '보이는 레이어 병합', key: `${mod}Shift+E`, disabled: no(), action: () => C.mergeVisible() },
-      { label: '이미지 병합 (하나로)', disabled: no(), action: () => C.flatten() },
-    ],
+    '레이어': () => layerMenuItems(P, mod),
     '선택': () => [
       { label: '모두', key: `${mod}A`, disabled: no(), action: () => C.selectAll() },
+      { label: '모든 레이어', key: `${mod}Alt+A`, disabled: no(), action: () => C.selectAllLayers() },
+      { label: '레이어 선택 해제', disabled: no(), action: () => C.deselectLayers() },
       { label: '선택 해제', key: `${mod}D`, disabled: !P.doc?.selection, action: () => C.deselect() },
       { label: '다시 선택', key: `${mod}Shift+D`, disabled: !P.doc?.lastSelection, action: () => C.reselect() },
       { label: '반전', key: `${mod}Shift+I`, disabled: no(), action: () => C.inverse() },

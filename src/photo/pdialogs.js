@@ -5,6 +5,10 @@ import { openModal, formRow, toast } from '../ui/common.js';
 import { makeCanvas, cloneCanvas } from './doc.js';
 import { ADJUSTMENTS, defaultParams, applyAdjustment, curveLut, FILTERS, defaultFilterParams, applyFilter } from './adjust.js';
 import { EXPORT_TYPES } from './io.js';
+import { BLEND_MODES } from './blend.js';
+import { GRADIENTS, GRADIENT_STYLES, gradientSwatch, listPatterns, resolveStopColor } from './resources.js';
+import { FX_DEFAULTS, FX_NAMES, STYLE_PRESETS, normalizeFx } from './styles.js';
+import { createColorPicker } from './colorpicker.js';
 
 export const DOC_PRESETS = [
   ['1920x1080', '유튜브·동영상 1920 × 1080', 1920, 1080],
@@ -122,19 +126,22 @@ export function canvasSizeDialog(P) {
 
 // ---------------------------------------------------------------- param editors (shared by adjustments, filters and the properties panel)
 
-/** Controls for a params definition list. onChange(params, done). */
-export function paramEditors(defs, params, onChange) {
+/**
+ * Controls for a params definition list [key, label, min, max, default, kind]. kind: 'bool' | 'color' |
+ * 'curve' | 'gradient' | 'pattern' | 'blend' | [[value, label]…] (a select) | a number (slider step).
+ * onChange(params, done).
+ */
+export function paramEditors(defs, params, onChange, P = null) {
   const rows = [];
   for (const [key, label, min, max, , kind] of defs) {
-    const type = kind === 'bool' ? 'bool' : kind === 'color' ? 'color' : kind === 'curve' ? 'curve' : 'range';
-    if (type === 'bool') {
+    if (kind === 'bool') {
       const c = chk(!!params[key], label);
       c.box.addEventListener('change', () => {
         params[key] = c.box.checked;
         onChange(params, true);
       });
       rows.push(h('div.ph-prow', c.el));
-    } else if (type === 'color') {
+    } else if (kind === 'color') {
       const inp = h('input', { type: 'color', value: params[key] });
       inp.addEventListener('input', () => {
         params[key] = inp.value;
@@ -142,13 +149,27 @@ export function paramEditors(defs, params, onChange) {
       });
       inp.addEventListener('change', () => onChange(params, true));
       rows.push(h('label.ph-prow', h('span', label), inp));
-    } else if (type === 'curve') {
+    } else if (kind === 'curve') {
       rows.push(curveEditor(params[key], (pts, done) => {
         params[key] = pts;
         onChange(params, done);
       }));
+    } else if (kind === 'gradient') {
+      rows.push(h('div.ph-prow', h('span', label), gradientButton(P, params[key], (g) => {
+        params[key] = g;
+        onChange(params, true);
+      })));
+    } else if (kind === 'pattern' || kind === 'blend' || Array.isArray(kind)) {
+      const opts = kind === 'pattern' ? listPatterns().map((p) => [p.id, p.name]) : kind === 'blend' ? BLEND_MODES.map(([id, n]) => [id, n]) : kind;
+      const s2 = h('select', opts.map(([v, t]) => h('option', { value: v }, t)));
+      s2.value = params[key];
+      s2.addEventListener('change', () => {
+        params[key] = typeof opts[0][0] === 'number' ? +s2.value : s2.value;
+        onChange(params, true);
+      });
+      rows.push(h('label.ph-prow', h('span', label), s2));
     } else {
-      const step = kind || (max - min > 20 ? 1 : 0.01);
+      const step = typeof kind === 'number' ? kind : max - min > 20 ? 1 : 0.01;
       const r = h('input', { type: 'range', min, max, step, value: params[key] });
       const n = h('input.ph-num', { type: 'number', min, max, step, value: params[key] });
       const set = (v, done) => {
@@ -164,6 +185,18 @@ export function paramEditors(defs, params, onChange) {
     }
   }
   return rows;
+}
+
+function gradientButton(P, gr, onChange) {
+  const b = h('button.ph-gradbtn', { type: 'button', title: '그레이디언트 편집' });
+  const paint = (g) => b.replaceChildren(gradientSwatch(g, 140, 18, P?.fg, P?.bg));
+  paint(gr || GRADIENTS[0]);
+  b.addEventListener('click', () => gradientEditor(P, gr || GRADIENTS[0], (g) => {
+    gr = g;
+    paint(g);
+    onChange(g);
+  }));
+  return b;
 }
 
 /** A small curves editor: click to add a point, drag to move, double-click a point to remove it. */
@@ -328,6 +361,7 @@ function liveLayerDialog(P, { title, defs, params, compute, label, slow = false 
 export function adjustDialog(P, type) {
   const def = ADJUSTMENTS[type];
   const params = defaultParams(type);
+  if (P.doc?.active?.kind === 'smart') return smartFilterDialog(P, `adj:${type}`, params);
   if (!def.params.length) {
     // instant adjustments (invert, desaturate)
     const doc = P.doc;
@@ -375,6 +409,7 @@ let lastFilter = null;
 export function filterDialog(P, id) {
   const f = FILTERS[id];
   const params = lastFilter?.id === id ? { ...lastFilter.params } : defaultFilterParams(id);
+  if (P.doc?.active?.kind === 'smart') return smartFilterDialog(P, id, params);
   const run = (c, p) => applyFilter(c, id, p, { fg: P.fg, bg: P.bg });
   const remember = () => { lastFilter = { id, params: { ...params } }; };
   if (!f.params.length) {
@@ -391,64 +426,322 @@ export function filterDialog(P, id) {
 export function repeatFilter(P) {
   if (!lastFilter) return toast('아직 적용한 필터가 없습니다');
   const { id, params } = lastFilter;
+  if (P.doc?.active?.kind === 'smart') {
+    const l = P.doc.active;
+    P.run(`고급 필터: ${FILTERS[id].name}`, () => { l.smart = { ...l.smart, filters: [...(l.smart.filters || []), { id, params: { ...params, _fg: P.fg, _bg: P.bg }, enabled: true }] }; P.doc.touch(l); });
+    return undefined;
+  }
   if (!P.doc.active || P.doc.active.kind !== 'raster') return toast('이미지(일반) 레이어를 선택하세요');
   P.run(FILTERS[id].name, () => applyToLayer(P, (c) => applyFilter(c, id, params, { fg: P.fg, bg: P.bg })));
   return undefined;
 }
 
-// ---------------------------------------------------------------- layer style
+// ---------------------------------------------------------------- smart filters
 
-export function layerStyleDialog(P) {
+export const filterName = (id) => (id.startsWith('adj:') ? ADJUSTMENTS[id.slice(4)]?.name : FILTERS[id]?.name) || id;
+const filterDefs = (id) => (id.startsWith('adj:') ? ADJUSTMENTS[id.slice(4)].params : FILTERS[id].params.map((d) => [...d.slice(0, 5), d[5]]));
+
+/** Add (index = null) or edit a smart filter on a smart object layer, with live preview. */
+export function smartFilterDialog(P, id, params, index = null) {
   const doc = P.doc;
   const l = doc.active;
-  if (!l || l.kind === 'adjust') return toast('스타일은 일반·글자·모양 레이어에 넣을 수 있습니다');
   const before = doc.capture();
-  const fx = structuredClone(l.fx || {});
-  const S = {
-    shadow: { on: !!fx.shadow, v: fx.shadow || { color: '#000000', opacity: 0.6, angle: 120, distance: 12, blur: 10 } },
-    stroke: { on: !!fx.stroke, v: fx.stroke || { color: '#ffffff', size: 4 } },
-    glow: { on: !!fx.glow, v: fx.glow || { color: '#ffe680', opacity: 0.8, size: 14 } },
-  };
+  const defs = filterDefs(id);
+  const list = [...(l.smart.filters || [])];
+  const at = index ?? list.length;
+  let entry = index != null ? { ...list[index] } : { id, params: { ...params }, enabled: true };
+  const p = { ...entry.params };
   const apply = () => {
-    l.fx = { shadow: S.shadow.on ? { ...S.shadow.v } : null, stroke: S.stroke.on ? { ...S.stroke.v } : null, glow: S.glow.on ? { ...S.glow.v } : null };
+    entry = { ...entry, params: { ...p, _fg: P.fg, _bg: P.bg } };
+    const fl = [...list];
+    fl[at] = entry;
+    l.smart = { ...l.smart, filters: fl };
+    doc.touch(l);
+    P.redraw();
+  };
+  if (!defs.length) {
+    P.run(`고급 필터: ${filterName(id)}`, apply);
+    return undefined;
+  }
+  let timer = null;
+  let ok = false;
+  const op = { opacity: Math.round((entry.opacity ?? 1) * 100) };
+  openModal({
+    title: `고급 필터: ${filterName(id)}`,
+    width: '460px',
+    body: [...paramEditors(defs, p, () => { clearTimeout(timer); timer = setTimeout(apply, 60); }, P),
+      ...paramEditors([['opacity', '불투명도 (%)', 0, 100, 100]], op, () => { entry.opacity = op.opacity / 100; clearTimeout(timer); timer = setTimeout(apply, 60); }, P),
+      h('div.note', '고급 개체에 넣는 필터는 원본을 바꾸지 않습니다. 레이어 패널에서 끄거나 두 번 눌러 다시 고칠 수 있습니다.')],
+    buttons: [{ label: '취소' }, { label: '확인', primary: true, action: () => { clearTimeout(timer); apply(); ok = true; P.commit(`고급 필터: ${filterName(id)}`, before); } }],
+    onClose: () => {
+      clearTimeout(timer);
+      if (!ok) {
+        doc.restore(before);
+        P.afterHistory();
+      }
+    },
+  });
+  apply();
+  return undefined;
+}
+
+// ---------------------------------------------------------------- layer style
+
+const BLEND = 'blend';
+const FX_FIELDS = {
+  dropShadow: [['blend', '혼합 모드', null, null, 'multiply', BLEND], ['color', '색', null, null, '#000000', 'color'], ['opacity', '불투명도 (%)', 0, 100, 75], ['angle', '각도 (°)', -180, 180, 120], ['distance', '거리 (px)', 0, 300, 5], ['spread', '스프레드 (%)', 0, 100, 0], ['size', '크기 (px)', 0, 250, 5], ['knockout', '레이어가 그림자를 가림', null, null, true, 'bool']],
+  innerShadow: [['blend', '혼합 모드', null, null, 'multiply', BLEND], ['color', '색', null, null, '#000000', 'color'], ['opacity', '불투명도 (%)', 0, 100, 75], ['angle', '각도 (°)', -180, 180, 120], ['distance', '거리 (px)', 0, 300, 5], ['choke', '경계 감소 (%)', 0, 100, 0], ['size', '크기 (px)', 0, 250, 5]],
+  outerGlow: [['blend', '혼합 모드', null, null, 'screen', BLEND], ['color', '색', null, null, '#ffffbe', 'color'], ['opacity', '불투명도 (%)', 0, 100, 75], ['spread', '스프레드 (%)', 0, 100, 0], ['size', '크기 (px)', 0, 250, 5]],
+  innerGlow: [['blend', '혼합 모드', null, null, 'screen', BLEND], ['color', '색', null, null, '#ffffbe', 'color'], ['opacity', '불투명도 (%)', 0, 100, 75], ['source', '소스', null, null, 'edge', [['edge', '가장자리'], ['center', '가운데']]], ['choke', '경계 감소 (%)', 0, 100, 0], ['size', '크기 (px)', 0, 250, 5]],
+  bevel: [['style', '스타일', null, null, 'inner bevel', [['inner bevel', '내부 경사'], ['outer bevel', '외부 경사'], ['emboss', '엠보스'], ['pillow emboss', '쿠션 엠보스']]], ['technique', '기법', null, null, 'smooth', [['smooth', '매끄럽게'], ['chisel hard', '단단하게 깎기'], ['chisel soft', '부드럽게 깎기']]], ['depth', '깊이 (%)', 1, 1000, 100], ['direction', '방향', null, null, 'up', [['up', '위로'], ['down', '아래로']]], ['size', '크기 (px)', 0, 250, 5], ['soften', '부드럽게 (px)', 0, 16, 0], ['angle', '빛의 각도 (°)', -180, 180, 120], ['altitude', '빛의 높이 (°)', 0, 90, 30],
+    ['highlightBlend', '밝은 영역 모드', null, null, 'screen', BLEND], ['highlightColor', '밝은 영역 색', null, null, '#ffffff', 'color'], ['highlightOpacity', '밝은 영역 불투명도 (%)', 0, 100, 75], ['shadowBlend', '그림자 모드', null, null, 'multiply', BLEND], ['shadowColor', '그림자 색', null, null, '#000000', 'color'], ['shadowOpacity', '그림자 불투명도 (%)', 0, 100, 75]],
+  satin: [['blend', '혼합 모드', null, null, 'multiply', BLEND], ['color', '색', null, null, '#000000', 'color'], ['opacity', '불투명도 (%)', 0, 100, 50], ['angle', '각도 (°)', -180, 180, 19], ['distance', '거리 (px)', 0, 250, 11], ['size', '크기 (px)', 0, 250, 14], ['invert', '반전', null, null, true, 'bool']],
+  colorOverlay: [['blend', '혼합 모드', null, null, 'normal', BLEND], ['color', '색', null, null, '#ff0000', 'color'], ['opacity', '불투명도 (%)', 0, 100, 100]],
+  gradientOverlay: [['blend', '혼합 모드', null, null, 'normal', BLEND], ['opacity', '불투명도 (%)', 0, 100, 100], ['gradient', '그레이디언트', null, null, null, 'gradient'], ['reverse', '반전', null, null, false, 'bool'], ['style', '스타일', null, null, 'linear', GRADIENT_STYLES], ['angle', '각도 (°)', -180, 180, 90], ['scale', '비율 (%)', 10, 150, 100]],
+  patternOverlay: [['blend', '혼합 모드', null, null, 'normal', BLEND], ['opacity', '불투명도 (%)', 0, 100, 100], ['pattern', '패턴', null, null, 'checker', 'pattern'], ['scale', '비율 (%)', 1, 1000, 100]],
+  stroke: [['size', '크기 (px)', 1, 250, 3], ['position', '위치', null, null, 'outside', [['outside', '바깥쪽'], ['inside', '안쪽'], ['center', '가운데']]], ['blend', '혼합 모드', null, null, 'normal', BLEND], ['opacity', '불투명도 (%)', 0, 100, 100], ['fillType', '칠 유형', null, null, 'color', [['color', '색상'], ['gradient', '그레이디언트']]], ['color', '색', null, null, '#000000', 'color'], ['gradient', '그레이디언트', null, null, null, 'gradient'], ['angle', '각도 (°)', -180, 180, 90]],
+};
+const FX_LIST = ['bevel', 'stroke', 'innerShadow', 'innerGlow', 'satin', 'colorOverlay', 'gradientOverlay', 'patternOverlay', 'outerGlow', 'dropShadow'];
+const PCT = new Set(['opacity', 'highlightOpacity', 'shadowOpacity']);
+
+const userStyles = () => {
+  try {
+    return JSON.parse(localStorage.getItem('montage.photo.styles') || '[]');
+  } catch {
+    return [];
+  }
+};
+
+/** Photoshop-like layer style dialog: sections on the left, settings on the right, live preview. */
+export function layerStyleDialog(P, start = 'blending') {
+  const doc = P.doc;
+  const l = doc.active;
+  if (!l || l.kind === 'adjust') return toast('스타일은 조정 레이어가 아닌 레이어에 넣을 수 있습니다');
+  const before = doc.capture();
+  const fx = normalizeFx(structuredClone(l.fx || {}));
+  const blending = { blend: l.blend, opacity: Math.round(l.opacity * 100), fillOpacity: Math.round((l.fillOpacity ?? 1) * 100), thisLo: l.blendIf?.this[0] ?? 0, thisLo2: l.blendIf?.this[1] ?? 0, thisHi2: l.blendIf?.this[2] ?? 255, thisHi: l.blendIf?.this[3] ?? 255, underLo: l.blendIf?.under[0] ?? 0, underLo2: l.blendIf?.under[1] ?? 0, underHi2: l.blendIf?.under[2] ?? 255, underHi: l.blendIf?.under[3] ?? 255 };
+  let raf = 0;
+  const apply = () => {
+    raf = 0;
+    l.fx = structuredClone(fx);
+    l.blend = blending.blend;
+    l.opacity = blending.opacity / 100;
+    l.fillOpacity = blending.fillOpacity / 100;
+    const bi = { this: [blending.thisLo, Math.max(blending.thisLo, blending.thisLo2), Math.min(blending.thisHi, blending.thisHi2), blending.thisHi], under: [blending.underLo, Math.max(blending.underLo, blending.underLo2), Math.min(blending.underHi, blending.underHi2), blending.underHi] };
+    l.blendIf = bi.this[0] <= 0 && bi.this[3] >= 255 && bi.under[0] <= 0 && bi.under[3] >= 255 ? null : bi;
     l._styled = null;
     doc.touch(l);
     P.redraw();
   };
-  const section = (key, title, defs) => {
-    const on = chk(S[key].on, title);
+  const schedule = () => { if (!raf) raf = requestAnimationFrame(apply); };
+  const side = h('div.ph-fxlist');
+  const pane = h('div.ph-fxpane');
+  let current = start;
+  const showSection = (k) => {
+    current = k;
+    side.querySelectorAll('[data-k]').forEach((r) => r.classList.toggle('on', r.dataset.k === k));
+    if (k === 'blending') {
+      const defs = [['blend', '혼합 모드', null, null, 'normal', l.kind === 'group' ? [['pass through', '통과'], ...BLEND_MODES.map(([id, n]) => [id, n])] : BLEND], ['opacity', '불투명도 (%)', 0, 100, 100], ['fillOpacity', '칠 불투명도 (%) — 효과는 그대로', 0, 100, 100]];
+      const bi = [['thisLo', '이 레이어: 검정 쪽 시작', 0, 255, 0], ['thisLo2', '이 레이어: 검정 쪽 끝 (부드럽게)', 0, 255, 0], ['thisHi2', '이 레이어: 흰색 쪽 시작 (부드럽게)', 0, 255, 255], ['thisHi', '이 레이어: 흰색 쪽 끝', 0, 255, 255], ['underLo', '아래 레이어: 검정 쪽 시작', 0, 255, 0], ['underLo2', '아래 레이어: 검정 쪽 끝 (부드럽게)', 0, 255, 0], ['underHi2', '아래 레이어: 흰색 쪽 시작 (부드럽게)', 0, 255, 255], ['underHi', '아래 레이어: 흰색 쪽 끝', 0, 255, 255]];
+      pane.replaceChildren(h('h4', '혼합 옵션'), ...paramEditors(defs, blending, schedule, P), h('h4', '혼합 조건 (Blend If, 회색 밝기 기준)'), h('div.note', '이 레이어가 보일 밝기 범위와, 아래 레이어의 어느 밝기 위에서 보일지를 정합니다.'), ...paramEditors(bi, blending, schedule, P));
+      return;
+    }
+    if (k === 'styles') {
+      const presets = [...STYLE_PRESETS, ...userStyles().map((u) => ({ ...u, user: true }))];
+      pane.replaceChildren(h('h4', '스타일'), h('div.ph-stylegrid', presets.map((pr) => h('button.ph-stylecell', {
+        title: pr.name,
+        onclick: () => {
+          for (const key of FX_LIST) delete fx[key];
+          Object.assign(fx, structuredClone(pr.fx));
+          renderSide();
+          schedule();
+        },
+      }, h('span', pr.name)))));
+      return;
+    }
+    if (!fx[k]) fx[k] = { ...FX_DEFAULTS[k], enabled: true };
+    const ui = { ...fx[k] };
+    for (const key of PCT) if (key in ui) ui[key] = Math.round(ui[key] * 100);
+    const on = chk(!!fx[k].enabled, `${FX_NAMES[k]} 사용`);
     on.box.addEventListener('change', () => {
-      S[key].on = on.box.checked;
-      apply();
+      fx[k] = { ...fx[k], enabled: on.box.checked };
+      renderSide();
+      schedule();
     });
-    const vals = S[key].v;
-    const p = { ...vals, opacity: vals.opacity != null ? Math.round(vals.opacity * 100) : undefined };
-    const eds = paramEditors(defs, p, () => {
-      Object.assign(vals, p, p.opacity != null ? { opacity: p.opacity / 100 } : {});
-      S[key].on = true;
+    const eds = paramEditors(FX_FIELDS[k], ui, () => {
+      const v = { ...ui };
+      for (const key of PCT) if (key in v) v[key] = v[key] / 100;
+      fx[k] = { ...v, enabled: true };
       on.box.checked = true;
-      apply();
-    });
-    return h('fieldset.ph-fx', h('legend', on.el), ...eds);
+      renderSide();
+      schedule();
+    }, P);
+    pane.replaceChildren(h('h4', FX_NAMES[k]), on.el, ...eds, h('div.inline', h('button.small', { onclick: () => { fx[k] = { ...FX_DEFAULTS[k], enabled: fx[k].enabled }; showSection(k); schedule(); } }, '기본값으로')));
   };
+  const renderSide = () => {
+    side.replaceChildren(
+      h(`button.ph-fxitem${current === 'styles' ? '.on' : ''}`, { 'data-k': 'styles', onclick: () => showSection('styles') }, '스타일'),
+      h(`button.ph-fxitem${current === 'blending' ? '.on' : ''}`, { 'data-k': 'blending', onclick: () => showSection('blending') }, '혼합 옵션'),
+      ...FX_LIST.map((k) => {
+        const box = h('input', { type: 'checkbox', checked: !!fx[k]?.enabled, 'aria-label': `${FX_NAMES[k]} 켜기` });
+        box.addEventListener('click', (e) => {
+          e.stopPropagation();
+          fx[k] = { ...(fx[k] || FX_DEFAULTS[k]), enabled: box.checked };
+          schedule();
+          if (box.checked) showSection(k);
+        });
+        return h(`div.ph-fxitem${current === k ? '.on' : ''}`, { 'data-k': k, role: 'button', tabindex: 0, onclick: () => showSection(k) }, box, h('span', FX_NAMES[k]));
+      }));
+  };
+  renderSide();
+  showSection(start);
   let ok = false;
   openModal({
     title: '레이어 스타일',
-    width: '460px',
-    body: [
-      section('shadow', '그림자', [['color', '색', null, null, null, 'color'], ['opacity', '불투명도 (%)', 0, 100], ['angle', '각도', -180, 180], ['distance', '거리 (px)', 0, 200], ['blur', '흐림 (px)', 0, 100]]),
-      section('stroke', '획 (외곽선)', [['color', '색', null, null, null, 'color'], ['size', '두께 (px)', 1, 50]]),
-      section('glow', '외부 광선', [['color', '색', null, null, null, 'color'], ['opacity', '불투명도 (%)', 0, 100], ['size', '크기 (px)', 1, 100]]),
+    width: '760px',
+    body: [h('div.ph-fxdlg', side, pane)],
+    buttons: [
+      {
+        label: '새 스타일로 저장…', action: async () => {
+          const { promptDialog } = await import('../ui/common.js');
+          const name = await promptDialog('새 스타일', '스타일 이름', '내 스타일');
+          if (!name) return false;
+          const list = userStyles();
+          list.push({ id: `u${Date.now()}`, name, fx: structuredClone(fx) });
+          try { localStorage.setItem('montage.photo.styles', JSON.stringify(list)); } catch { /* storage unavailable */ }
+          toast(`스타일 "${name}"을(를) 저장했습니다 (스타일 패널·스타일 목록)`);
+          return false;
+        },
+      },
+      { label: '취소' },
+      { label: '확인', primary: true, action: () => { cancelAnimationFrame(raf); apply(); ok = true; P.commit('레이어 스타일', before); } },
     ],
-    buttons: [{ label: '취소' }, { label: '확인', primary: true, action: () => { ok = true; apply(); P.commit('레이어 스타일', before); } }],
     onClose: () => {
+      cancelAnimationFrame(raf);
       if (!ok) {
         doc.restore(before);
-        P.redraw();
+        P.afterHistory();
       }
     },
   });
   return undefined;
+}
+
+// ---------------------------------------------------------------- gradient editor
+
+/** Pick a preset or edit colour/opacity stops (drag them along the bar). onApply(gradient). */
+export function gradientEditor(P, gr, onApply) {
+  let g = structuredClone(gr?.stops ? gr : GRADIENTS[0]);
+  g.alphas ||= [{ pos: 0, a: 1 }, { pos: 1, a: 1 }];
+  const bar = h('div.ph-gbar');
+  const stopsC = h('div.ph-gstops.color');
+  const stopsA = h('div.ph-gstops.alpha');
+  const detail = h('div.ph-gdetail');
+  let selected = { kind: 'c', i: 0 };
+  const W = 360;
+  const paint = () => {
+    bar.replaceChildren(gradientSwatch(g, W, 26, P?.fg, P?.bg));
+    const mk = (arr, kind, el) => {
+      el.replaceChildren(...arr.map((s, i) => {
+        const m = h(`button.ph-gstop${selected.kind === kind && selected.i === i ? '.on' : ''}`, { style: { left: `${s.pos * 100}%`, background: kind === 'c' ? resolveStopColor(s.color, P?.fg, P?.bg) : `rgba(0,0,0,${s.a})` }, 'aria-label': `${kind === 'c' ? '색' : '불투명도'} 정지점 ${Math.round(s.pos * 100)}%` });
+        m.addEventListener('pointerdown', (e) => {
+          e.preventDefault();
+          selected = { kind, i };
+          m.setPointerCapture(e.pointerId);
+          const r = el.getBoundingClientRect();
+          const mv = (ev) => {
+            s.pos = clamp((ev.clientX - r.left) / r.width, 0, 1);
+            m.style.left = `${s.pos * 100}%`;
+            bar.replaceChildren(gradientSwatch(g, W, 26, P?.fg, P?.bg));
+          };
+          const up = () => {
+            m.removeEventListener('pointermove', mv);
+            m.removeEventListener('pointerup', up);
+            paint();
+          };
+          m.addEventListener('pointermove', mv);
+          m.addEventListener('pointerup', up);
+          paint();
+        });
+        return m;
+      }));
+    };
+    mk(g.stops, 'c', stopsC);
+    mk(g.alphas, 'a', stopsA);
+    const arr = selected.kind === 'c' ? g.stops : g.alphas;
+    const s = arr[Math.min(selected.i, arr.length - 1)];
+    if (!s) return;
+    const pos = h('input.ph-num', { type: 'number', min: 0, max: 100, value: Math.round(s.pos * 100) });
+    pos.addEventListener('change', () => { s.pos = clamp(+pos.value / 100, 0, 1); paint(); });
+    const del = h('button.small', { disabled: arr.length <= 2, onclick: () => { arr.splice(arr.indexOf(s), 1); selected.i = 0; paint(); } }, '정지점 삭제');
+    if (selected.kind === 'c') {
+      const col = h('input', { type: 'color', value: resolveStopColor(s.color, P?.fg, P?.bg) });
+      col.addEventListener('input', () => { s.color = col.value; paint(); });
+      detail.replaceChildren(h('label.ph-prow', h('span', '색'), col, h('button.small', { onclick: () => { s.color = 'fg'; paint(); } }, '전경색'), h('button.small', { onclick: () => { s.color = 'bg'; paint(); } }, '배경색')), h('label.ph-prow', h('span', '위치 (%)'), pos), del);
+    } else {
+      const a = h('input.ph-num', { type: 'number', min: 0, max: 100, value: Math.round(s.a * 100) });
+      a.addEventListener('change', () => { s.a = clamp(+a.value / 100, 0, 1); paint(); });
+      detail.replaceChildren(h('label.ph-prow', h('span', '불투명도 (%)'), a), h('label.ph-prow', h('span', '위치 (%)'), pos), del);
+    }
+  };
+  // click the strips to add stops
+  const addAt = (el, kind) => el.addEventListener('dblclick', (e) => {
+    const r = el.getBoundingClientRect();
+    const pos = clamp((e.clientX - r.left) / r.width, 0, 1);
+    if (kind === 'c') g.stops.push({ pos, color: '#808080' });
+    else g.alphas.push({ pos, a: 1 });
+    selected = { kind, i: (kind === 'c' ? g.stops : g.alphas).length - 1 };
+    paint();
+  });
+  addAt(stopsC, 'c');
+  addAt(stopsA, 'a');
+  const presets = h('div.ph-gpresets', GRADIENTS.map((pr) => h('button.ph-gpreset', { title: pr.name, onclick: () => { g = structuredClone(pr); g.alphas ||= [{ pos: 0, a: 1 }, { pos: 1, a: 1 }]; selected = { kind: 'c', i: 0 }; paint(); } }, gradientSwatch(pr, 64, 20, P?.fg, P?.bg))));
+  paint();
+  openModal({
+    title: '그레이디언트 편집기',
+    width: '440px',
+    body: [h('div.ph-sub', '사전 설정'), presets, h('div.ph-sub', '불투명도 정지점 (위) · 색 정지점 (아래) — 끌어서 옮기고, 줄을 두 번 눌러 추가'), h('div.ph-gwrap', stopsA, bar, stopsC), detail,
+      h('div.inline', h('button.small', { onclick: () => { g.stops = g.stops.map((s) => ({ ...s, pos: 1 - s.pos })); g.alphas = g.alphas.map((s) => ({ ...s, pos: 1 - s.pos })); paint(); } }, '좌우 뒤집기'))],
+    buttons: [{ label: '취소' }, { label: '확인', primary: true, action: () => onApply(structuredClone(g)) }],
+  });
+}
+
+// ---------------------------------------------------------------- new fill layer
+
+export function fillLayerDialog(P, type) {
+  if (type === 'solid') {
+    let color = P.fg;
+    const picker = createColorPicker({ value: color, onChange: (v) => { color = v; } });
+    openModal({
+      title: '새 칠 레이어: 단색',
+      width: '300px',
+      body: [picker.el],
+      buttons: [{ label: '취소' }, { label: '확인', primary: true, action: () => P.cmd.newFillLayer({ type: 'solid', color }) }],
+    });
+    return;
+  }
+  if (type === 'gradient') {
+    const p = { gradient: structuredClone(GRADIENTS[0]), style: 'linear', angle: 90, scale: 100, reverse: false };
+    openModal({
+      title: '새 칠 레이어: 그레이디언트',
+      width: '420px',
+      body: paramEditors([['gradient', '그레이디언트', null, null, null, 'gradient'], ['style', '스타일', null, null, 'linear', GRADIENT_STYLES], ['angle', '각도 (°)', -180, 180, 90], ['scale', '비율 (%)', 10, 150, 100], ['reverse', '반전', null, null, false, 'bool']], p, () => {}, P),
+      buttons: [{ label: '취소' }, { label: '확인', primary: true, action: () => P.cmd.newFillLayer({ type: 'gradient', ...structuredClone(p), gradient: resolveGradient(p.gradient, P) }) }],
+    });
+    return;
+  }
+  const p = { pattern: 'checker', scale: 100 };
+  openModal({
+    title: '새 칠 레이어: 패턴',
+    width: '380px',
+    body: paramEditors([['pattern', '패턴', null, null, 'checker', 'pattern'], ['scale', '비율 (%)', 1, 1000, 100]], p, () => {}, P),
+    buttons: [{ label: '취소' }, { label: '확인', primary: true, action: () => P.cmd.newFillLayer({ type: 'pattern', ...p }) }],
+  });
+}
+
+/** Fill layers keep real colours (not "foreground") so they look the same later. */
+function resolveGradient(g, P) {
+  return { ...g, stops: g.stops.map((s) => ({ ...s, color: resolveStopColor(s.color, P.fg, P.bg) })) };
 }
 
 // ---------------------------------------------------------------- fill / stroke

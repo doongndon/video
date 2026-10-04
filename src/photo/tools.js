@@ -380,7 +380,7 @@ class Retouch {
 // ---------------------------------------------------------------- floating pixels (move a selection / free transform)
 
 /** Lift the selected pixels of the active raster layer into a float (removed from the layer). */
-export function liftSelection(E) {
+export function liftSelection(E, { copy = false } = {}) {
   const doc = E.doc;
   const l = doc.active;
   if (!doc.selection || l.kind !== 'raster' || !l.canvas) return null;
@@ -389,11 +389,13 @@ export function liftSelection(E) {
   g.drawImage(l.canvas, l.x, l.y);
   g.globalCompositeOperation = 'destination-in';
   g.drawImage(doc.selection.canvas, 0, 0);
-  const lg = doc.editPixels(l);
-  lg.save();
-  lg.globalCompositeOperation = 'destination-out';
-  lg.drawImage(doc.selection.canvas, -l.x, -l.y);
-  lg.restore();
+  if (!copy) {
+    const lg = doc.editPixels(l);
+    lg.save();
+    lg.globalCompositeOperation = 'destination-out';
+    lg.drawImage(doc.selection.canvas, -l.x, -l.y);
+    lg.restore();
+  }
   const b = SEL.alphaBounds(c) || { x: 0, y: 0, w: 1, h: 1 };
   const t = makeCanvas(b.w, b.h);
   t.getContext('2d').drawImage(c, -b.x, -b.y);
@@ -426,11 +428,15 @@ function brushOpts(o, E, extra = {}) {
 function needRaster(E, what = '이 도구') {
   const l = E.doc.active;
   if (!l) return false;
-  if (l.locked) {
+  if (l.locked || (l.lockPixels && !(E.editMask && l.mask))) {
     E.toast('잠긴 레이어입니다 (레이어 패널에서 잠금 해제)');
     return false;
   }
   if (E.editMask && l.mask) return true;
+  if (l.kind === 'smart') {
+    E.toast('고급 개체에는 바로 칠할 수 없습니다. 레이어 ▸ 고급 개체 ▸ 내용 편집, 또는 래스터화한 뒤 칠하세요.');
+    return false;
+  }
   if (l.kind !== 'raster') {
     E.toast(`${what}는 일반(이미지) 레이어에서 씁니다. 레이어 ▸ 래스터화로 바꾸거나 새 레이어를 만드세요.`);
     return false;
@@ -665,23 +671,35 @@ export const TOOLS = [
   // ---- move
   {
     id: 'move', name: '이동', key: 'V', icon: 'move', group: 'move', cursor: 'move',
-    options: [['autoSelect', '클릭한 레이어 자동 선택', 'bool', null, null, false]],
-    down(E, p) {
+    options: [['autoSelect', '자동 선택', 'bool', null, null, false], ['autoTarget', '대상', 'select', null, null, 'layer', [['layer', '레이어'], ['group', '그룹']]], ['showTransform', '변형 컨트롤 표시', 'bool', null, null, false]],
+    down(E, p, e) {
       const doc = E.doc;
-      if (E.opts('move').autoSelect) {
-        const hit = E.layerAt(p);
-        if (hit) E.selectLayer(hit.id);
+      // Ctrl (⌘) inverts auto-select for one click, like Photoshop
+      if (!!E.opts('move').autoSelect !== !!(e?.ctrlKey || e?.metaKey)) {
+        let hit = E.layerAt(p);
+        if (hit && E.opts('move').autoTarget === 'group') {
+          const top = doc.ancestors(hit).pop();
+          if (top) hit = top;
+        }
+        if (hit) E.selectLayer(hit.id, e?.shiftKey ? 'add' : 'single');
       }
       const l = doc.active;
-      if (!l || l.kind === 'adjust') return;
-      if (l.locked) {
-        E.toast('잠긴 레이어입니다');
+      if (!l || l.kind === 'adjust' && !l.mask) return;
+      const moving = doc.selectedLayers.filter((x) => x.kind !== 'adjust' || x.mask);
+      if (moving.some((x) => x.locked || x.lockPos)) {
+        E.toast('위치가 잠긴 레이어가 있습니다 (레이어 패널에서 잠금 해제)');
         return;
       }
       const before = doc.capture();
       let float = null;
-      if (doc.selection && l.kind === 'raster') float = liftSelection(E);
-      this.d = { a: p, before, float, x0: l.x, y0: l.y, mx: l.mask?.x, my: l.mask?.y, sel: doc.selection };
+      // with a selection, Alt+drag duplicates the pixels instead of cutting them out
+      if (doc.selection && l.kind === 'raster') float = liftSelection(E, { copy: !!e?.altKey });
+      else if (e?.altKey && !doc.selection) {
+        // Alt+drag a layer: move a copy
+        E.cmd.duplicateLayer();
+        doc.history.undoStack.pop();
+      }
+      this.d = { a: p, before, float, moving: doc.selectedLayers.filter((x) => x.kind !== 'adjust' || x.mask), last: { dx: 0, dy: 0 }, sel: doc.selection };
       E.float = float;
       E.redraw();
     },
@@ -696,18 +714,13 @@ export const TOOLS = [
       }
       dx = Math.round(dx);
       dy = Math.round(dy);
-      const l = E.doc.active;
       if (d.float) {
         E.float = { ...d.float, x: d.float.x + dx, y: d.float.y + dy };
         d.offset = { dx, dy };
       } else {
-        l.x = d.x0 + dx;
-        l.y = d.y0 + dy;
-        if (l.mask && l.mask.linked !== false) {
-          l.mask = { ...l.mask, x: d.mx + dx, y: d.my + dy };
-        }
-        l._styled = null;
-        E.doc.touch(l);
+        const sx = E.snapMove ? E.snapMove(d.moving, dx, dy) : { dx, dy };
+        E.doc.translateLayers(d.moving, sx.dx - d.last.dx, sx.dy - d.last.dy);
+        d.last = sx;
       }
       E.redraw();
     },
@@ -724,6 +737,9 @@ export const TOOLS = [
           c.getContext('2d').drawImage(d.sel.canvas, off.dx, off.dy);
           E.doc.selection = { canvas: c };
         }
+      } else if (!d.last.dx && !d.last.dy) {
+        E.redraw();
+        return;
       }
       E.doc.touch(E.doc.active);
       E.commit('이동', d.before);
@@ -1213,6 +1229,26 @@ export class FreeTransform {
     this.layer = l;
     this.before = doc.capture();
     this.vector = l.kind === 'text' || l.kind === 'shape';
+    this.smart = l.kind === 'smart';
+    if (this.smart) {
+      // smart objects keep their source pixels: only the matrix changes (no quality loss)
+      const sm = l.smart;
+      const [a, b, c, d, e, f] = sm.m;
+      this.sm0 = { ...sm };
+      this.rot = (Math.atan2(b, a) * 180) / Math.PI;
+      const flip = a * d - b * c < 0 ? -1 : 1;
+      this.w = sm.w * Math.hypot(a, b);
+      this.h = sm.h * Math.hypot(c, d) * flip;
+      this.cx = a * (sm.w / 2) + c * (sm.h / 2) + e;
+      this.cy = b * (sm.w / 2) + d * (sm.h / 2) + f;
+      this.sx = 1;
+      this.sy = 1;
+      this.h = Math.abs(this.h);
+      this.flip = flip;
+      this.update();
+      return;
+    }
+    if (l.kind === 'group' || l.kind === 'fill') throw new Error(l.kind === 'group' ? '그룹은 이동 도구로 옮길 수 있습니다. 크기를 바꾸려면 고급 개체로 변환한 뒤 변형하세요.' : '칠 레이어는 문서 전체를 채워 변형할 수 없습니다 (마스크를 변형하려면 마스크를 고르세요)');
     if (this.vector) {
       const b = l.kind === 'text' ? textBox(l) : { w: l.shape.w, h: l.shape.h };
       this.w = b.w;
@@ -1255,6 +1291,23 @@ export class FreeTransform {
   /** Show the current transform (vector props, or a transformed float for pixels). */
   update() {
     const E = this.E;
+    if (this.smart) {
+      const l = this.layer;
+      const sm = this.sm0;
+      const a = (this.rot * Math.PI) / 180;
+      const kx = (this.w * this.sx) / sm.w;
+      const ky = ((this.h * this.sy) / sm.h) * this.flip;
+      const cos = Math.cos(a);
+      const sin = Math.sin(a);
+      // m = translate(cx, cy) · rotate · scale(kx, ky) · translate(-w/2, -h/2)
+      const m = [cos * kx, sin * kx, -sin * ky, cos * ky, 0, 0];
+      m[4] = this.cx - (m[0] * sm.w) / 2 - (m[2] * sm.h) / 2;
+      m[5] = this.cy - (m[1] * sm.w) / 2 - (m[3] * sm.h) / 2;
+      l.smart = { ...sm, m, corners: null };
+      E.doc.touch(l);
+      E.redraw();
+      return;
+    }
     if (this.vector) {
       const l = this.layer;
       if (l.kind === 'text') {
@@ -1348,7 +1401,7 @@ export class FreeTransform {
 
   apply() {
     const E = this.E;
-    if (!this.vector && E.float) {
+    if (!this.vector && !this.smart && E.float) {
       dropFloat(E, E.float);
       E.float = null;
       if (E.doc.selection) {

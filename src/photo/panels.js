@@ -5,7 +5,12 @@ import { showMenu, toast } from '../ui/common.js';
 import { icon } from '../ui/icons.js';
 import { openFontPicker } from '../ui/font-picker.js';
 import { fontLabel } from '../fonts.js';
-import { BLEND_MODES, makeCanvas, SHAPES } from './doc.js';
+import { makeCanvas, SHAPES, LAYER_COLORS, FILL_TYPES } from './doc.js';
+import { GRADIENTS, GRADIENT_STYLES, gradientSwatch, listPatterns } from './resources.js';
+import { BLEND_GROUPS, PASS_THROUGH, blendName } from './blend.js';
+import { hasFx, FX_NAMES } from './styles.js';
+
+const FX_ORDER = ['bevel', 'stroke', 'innerShadow', 'innerGlow', 'satin', 'colorOverlay', 'gradientOverlay', 'patternOverlay', 'outerGlow', 'dropShadow'];
 import { TOOLS, TOOL_BY_ID, TOOL_GROUPS } from './tools.js';
 import { ADJUSTMENTS } from './adjust.js';
 import { createColorPicker } from './colorpicker.js';
@@ -173,188 +178,343 @@ export function buildOptionsBar(P) {
 // ---------------------------------------------------------------- layers
 
 const thumbCache = new WeakMap();
-function thumb(P, l, mask = false) {
+function thumb(P, l, which = 'content') {
   const c = h('canvas.ph-thumb', { width: 40, height: 40 });
-  const key = `${l.rev}:${mask}`;
   const doc = P.doc;
-  const cache = thumbCache.get(l);
-  const draw = (g) => {
-    const s = Math.min(40 / doc.width, 40 / doc.height);
-    const w = doc.width * s;
-    const hh = doc.height * s;
-    g.save();
-    g.translate((40 - w) / 2, (40 - hh) / 2);
-    if (mask && l.mask) {
-      g.fillStyle = '#000';
-      g.fillRect(0, 0, w, hh);
-      const t = makeCanvas(40, 40);
-      const tg = t.getContext('2d');
-      tg.scale(s, s);
-      tg.drawImage(l.mask.canvas, l.mask.x, l.mask.y);
-      tg.setTransform(1, 0, 0, 1, 0, 0);
-      tg.globalCompositeOperation = 'source-in';
-      tg.fillStyle = '#fff';
-      tg.fillRect(0, 0, 40, 40);
-      g.drawImage(t, 0, 0);
-    } else if (l.kind === 'adjust') {
-      g.fillStyle = '#555';
-      g.fillRect(0, 0, w, hh);
-      g.fillStyle = '#fff';
-      g.font = 'bold 16px sans-serif';
-      g.textAlign = 'center';
-      g.fillText('◐', w / 2, hh / 2 + 6);
-    } else {
-      // checkerboard
-      for (let y = 0; y < hh; y += 5) for (let x = 0; x < w; x += 5) {
-        g.fillStyle = ((x + y) / 5) % 2 ? '#ccc' : '#fff';
-        g.fillRect(x, y, 5, 5);
-      }
-      const ct = doc.content(l);
-      if (ct) {
-        g.scale(s, s);
-        g.drawImage(ct.canvas, ct.x, ct.y);
-      }
-    }
-    g.restore();
-  };
-  if (cache?.key === key && cache.doc === doc.id) c.getContext('2d').drawImage(cache.c, 0, 0);
-  else {
-    draw(c.getContext('2d'));
-    const copy = makeCanvas(40, 40);
-    copy.getContext('2d').drawImage(c, 0, 0);
-    thumbCache.set(l, { key, c: copy, doc: doc.id });
+  const key = `${l.rev}:${which}:${doc.width}x${doc.height}`;
+  const cache = thumbCache.get(l)?.[which];
+  if (cache?.key === key && cache.doc === doc.id) {
+    c.getContext('2d').drawImage(cache.c, 0, 0);
+    return c;
   }
+  const g = c.getContext('2d');
+  const s = Math.min(40 / doc.width, 40 / doc.height);
+  const w = doc.width * s;
+  const hh = doc.height * s;
+  g.save();
+  g.translate((40 - w) / 2, (40 - hh) / 2);
+  if (which === 'mask' && l.mask) {
+    g.fillStyle = '#000';
+    g.fillRect(0, 0, w, hh);
+    const t = makeCanvas(40, 40);
+    const tg = t.getContext('2d');
+    tg.scale(s, s);
+    tg.drawImage(l.mask.canvas, l.mask.x, l.mask.y);
+    tg.setTransform(1, 0, 0, 1, 0, 0);
+    tg.globalCompositeOperation = 'source-in';
+    tg.fillStyle = '#fff';
+    tg.fillRect(0, 0, 40, 40);
+    g.drawImage(t, 0, 0);
+  } else if (which === 'vmask' && l.vmask) {
+    g.fillStyle = '#777';
+    g.fillRect(0, 0, w, hh);
+    const r = P.vectorMaskCanvas?.(l);
+    if (r) {
+      g.scale(s, s);
+      g.globalCompositeOperation = 'destination-out';
+      g.drawImage(r, 0, 0);
+      g.globalCompositeOperation = 'destination-over';
+      g.fillStyle = '#fff';
+      g.fillRect(0, 0, doc.width, doc.height);
+    }
+  } else if (l.kind === 'adjust') {
+    g.fillStyle = '#4a4f58';
+    g.fillRect(0, 0, w, hh);
+    g.fillStyle = '#fff';
+    g.font = 'bold 18px sans-serif';
+    g.textAlign = 'center';
+    g.fillText('◐', w / 2, hh / 2 + 6);
+  } else if (l.kind === 'group') {
+    g.restore();
+    g.fillStyle = '#c9a54a';
+    g.fillRect(4, 10, 32, 22);
+    g.fillRect(4, 7, 13, 5);
+    g.fillStyle = '#e4c870';
+    g.fillRect(4, 14, 32, 18);
+    g.save();
+  } else {
+    // checkerboard
+    for (let y = 0; y < hh; y += 5) for (let x = 0; x < w; x += 5) {
+      g.fillStyle = ((x + y) / 5) % 2 ? '#ccc' : '#fff';
+      g.fillRect(x, y, 5, 5);
+    }
+    const ct = doc.content(l);
+    if (ct) {
+      g.scale(s, s);
+      g.drawImage(ct.canvas, ct.x, ct.y);
+    }
+  }
+  g.restore();
+  if (l.kind === 'smart') {
+    g.fillStyle = '#fff';
+    g.fillRect(28, 28, 11, 11);
+    g.strokeStyle = '#333';
+    g.strokeRect(28.5, 28.5, 10, 10);
+    g.fillStyle = '#333';
+    g.fillRect(31, 31, 5, 5);
+  }
+  if (l.kind === 'text') {
+    g.fillStyle = 'rgba(0,0,0,.65)';
+    g.fillRect(0, 26, 14, 14);
+    g.fillStyle = '#fff';
+    g.font = 'bold 11px sans-serif';
+    g.fillText('T', 3, 37);
+  }
+  const copy = makeCanvas(40, 40);
+  copy.getContext('2d').drawImage(c, 0, 0);
+  thumbCache.set(l, { ...(thumbCache.get(l) || {}), [which]: { key, c: copy, doc: doc.id } });
   return c;
 }
 
+/** The blend-mode <select> with Photoshop's groups (and "pass through" for groups). */
+export function blendSelect(withPass = false) {
+  const s = h('select.ph-blend', { 'aria-label': '혼합 모드', title: '혼합 모드' });
+  if (withPass) s.append(h('option', { value: PASS_THROUGH[0] }, PASS_THROUGH[1]));
+  BLEND_GROUPS.forEach((grp, i) => {
+    if (i || withPass) s.append(h('option', { disabled: true }, '──────'));
+    for (const [id, name] of grp) s.append(h('option', { value: id }, name));
+  });
+  return s;
+}
+
+const LAYER_COLOR_CSS = Object.fromEntries(LAYER_COLORS.map(([id, , c]) => [id, c]));
+
 export function buildLayersPanel(P) {
-  const blend = h('select.ph-blend', { 'aria-label': '혼합 모드', title: '혼합 모드' }, BLEND_MODES.map(([id, name]) => h('option', { value: id }, name)));
+  let blend = blendSelect(true);
   const opacity = h('input.ph-num', { type: 'number', min: 0, max: 100, 'aria-label': '불투명도', title: '불투명도 (%)' });
   const opRange = h('input', { type: 'range', min: 0, max: 100, 'aria-label': '불투명도' });
-  const lockAll = h('button.small.ph-lock', { title: '모두 잠그기', 'aria-label': '모두 잠그기' }, icon('lock', 14));
-  const lockAlpha = h('button.small.ph-lock', { title: '투명 픽셀 잠그기 (칠한 곳에만 칠하기)', 'aria-label': '투명 픽셀 잠그기' }, '▦');
-  const list = h('div.ph-layers', { role: 'listbox', 'aria-label': '레이어' });
-  const footBtn = (ic, label, fn) => h('button.small', { title: label, 'aria-label': label, onclick: fn }, icon(ic, 15));
+  const fillNum = h('input.ph-num', { type: 'number', min: 0, max: 100, 'aria-label': '칠', title: '칠 (효과는 그대로 두고 레이어 내용만 투명하게)' });
+  const lockBtn = (kind, label, glyph) => h('button.small.ph-lock', { title: label, 'aria-label': label, 'data-lock': kind, onclick: () => P.cmd.lock(kind) }, glyph);
+  const locks = [lockBtn('alpha', '투명 픽셀 잠그기 (칠한 곳에만 칠하기)', '▦'), lockBtn('pixels', '이미지 픽셀 잠그기 (칠하기 막기)', '✎'), lockBtn('position', '위치 잠그기 (옮기기 막기)', '✥'), lockBtn('all', '모두 잠그기', icon('lock', 13))];
+  const list = h('div.ph-layers', { role: 'tree', 'aria-label': '레이어', 'aria-multiselectable': 'true' });
+  const footBtn = (ic, label, fn) => h('button.small', { title: label, 'aria-label': label, onclick: fn }, typeof ic === 'string' && ic.length > 2 ? icon(ic, 15) : ic);
+  const menuAt = (e, items) => {
+    const r = e.currentTarget.getBoundingClientRect();
+    showMenu(items, r.left, r.top - 4);
+  };
   const foot = h('div.ph-lfoot',
-    h('button.small', { title: '레이어 스타일 (그림자·획·광선)', onclick: () => P.cmd.layerStyle() }, 'fx'),
-    footBtn('mask', '레이어 마스크 추가', () => P.cmd.addMask()),
-    h('button.small', {
-      title: '새 조정 레이어', onclick: (e) => {
-        const r = e.currentTarget.getBoundingClientRect();
-        showMenu(Object.entries(ADJUSTMENTS).filter(([k]) => k !== 'desaturate').map(([k, a]) => ({ label: a.name, action: () => P.cmd.newAdjustLayer(k) })), r.left, r.top - 4);
-      },
-    }, '◐'),
+    footBtn('link', '레이어 연결', () => (P.doc?.active?.linkId ? P.cmd.unlink() : P.cmd.link())),
+    footBtn('fx', '레이어 스타일 추가', (e) => menuAt(e, [{ label: '혼합 옵션…', action: () => P.cmd.layerStyle('blending') }, '-', ...FX_ORDER.map((k) => ({ label: `${FX_NAMES[k]}…`, action: () => P.cmd.layerStyle(k) }))])),
+    footBtn('mask', '레이어 마스크 추가 (Alt: 모두 숨김)', (e) => P.cmd.addMask(e.altKey)),
+    footBtn('◐', '새 칠 또는 조정 레이어', (e) => menuAt(e, P.newFillOrAdjustMenu())),
+    footBtn('folderPlus', '새 그룹 (Ctrl+G: 고른 레이어로 그룹 만들기)', () => P.cmd.newGroup()),
     footBtn('plus', '새 레이어', () => P.cmd.newLayer()),
-    footBtn('copy', '레이어 복제 (Ctrl+J)', () => P.cmd.duplicateLayer()),
     footBtn('trash', '레이어 삭제', () => P.cmd.deleteLayer()));
-  const el = h('div.ph-panel.layers', h('div.ph-lhead', blend, h('label.ph-op', '불투명도', opRange, opacity), lockAll, lockAlpha), list, foot);
+  const head = h('div.ph-lhead');
+  const el = h('div.ph-panel.layers', head, list, foot);
 
   let opBefore = null;
-  const setOpacity = (v, done) => {
+  const setNum = (key, v, done) => {
     const l = P.doc?.active;
     if (!l) return;
     if (!opBefore) opBefore = P.doc.capture();
-    l.opacity = clamp(v, 0, 100) / 100;
+    l[key] = clamp(v, 0, 100) / 100;
+    l._styled = null;
     P.doc.touch(l);
     P.redraw();
-    opacity.value = Math.round(l.opacity * 100);
-    opRange.value = opacity.value;
+    if (key === 'opacity') {
+      opacity.value = Math.round(l.opacity * 100);
+      opRange.value = opacity.value;
+    }
     if (done) {
-      P.commit('불투명도', opBefore);
+      P.commit(key === 'opacity' ? '불투명도' : '칠', opBefore);
       opBefore = null;
     }
   };
-  opRange.addEventListener('input', () => setOpacity(+opRange.value, false));
-  opRange.addEventListener('change', () => setOpacity(+opRange.value, true));
-  opacity.addEventListener('change', () => setOpacity(+opacity.value, true));
-  blend.addEventListener('change', () => {
-    const l = P.doc?.active;
-    if (l) P.run('혼합 모드', () => { l.blend = blend.value; P.doc.touch(l); });
-  });
-  lockAll.addEventListener('click', () => {
-    const l = P.doc?.active;
-    if (l) P.run(l.locked ? '잠금 해제' : '레이어 잠금', () => { l.locked = !l.locked; P.doc.touch(l); });
-  });
-  lockAlpha.addEventListener('click', () => {
-    const l = P.doc?.active;
-    if (l) P.run('투명 픽셀 잠금', () => { l.lockAlpha = !l.lockAlpha; P.doc.touch(l); });
-  });
+  opRange.addEventListener('input', () => setNum('opacity', +opRange.value, false));
+  opRange.addEventListener('change', () => setNum('opacity', +opRange.value, true));
+  opacity.addEventListener('change', () => setNum('opacity', +opacity.value, true));
+  fillNum.addEventListener('change', () => setNum('fillOpacity', +fillNum.value, true));
+  const onBlend = () => {
+    const d = P.doc;
+    const v = blend.value;
+    if (d) P.run('혼합 모드', () => { for (const l of d.selectedLayers) { if (v === 'pass through' && l.kind !== 'group') continue; l.blend = v; d.touch(l); } });
+  };
 
-  let dragId = null;
+  let drag = null;
+  const rowsFor = (l, depth, rows, clipBaseName) => {
+    const doc = P.doc;
+    const sel = new Set([...(doc.selectedIds || []), doc.activeId]);
+    const eye = h('button.ph-eye', { title: `${l.visible ? '숨기기' : '보이기'} (Alt+클릭: 이 레이어만 보기)`, 'aria-label': l.visible ? '숨기기' : '보이기' }, icon(l.visible ? 'eye' : 'eyeOff', 15));
+    eye.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (e.altKey) return P.cmd.soloLayer(l);
+      P.run(l.visible ? '레이어 숨기기' : '레이어 보이기', () => { l.visible = !l.visible; doc.touch(l); });
+      return undefined;
+    });
+    if (LAYER_COLOR_CSS[l.color]) eye.style.background = LAYER_COLOR_CSS[l.color];
+    const twist = l.kind === 'group' ? h('button.ph-twist', { 'aria-label': l.collapsed ? '펼치기' : '접기', 'aria-expanded': String(!l.collapsed), onclick: (e) => { e.stopPropagation(); l.collapsed = !l.collapsed; P.emit('layers'); } }, l.collapsed ? '▸' : '▾') : null;
+    const t = thumb(P, l);
+    t.title = 'Ctrl(⌘)+클릭: 이 레이어 모양대로 선택 · 두 번 클릭: 편집';
+    t.addEventListener('click', (e) => {
+      if (e.ctrlKey || e.metaKey) {
+        e.stopPropagation();
+        P.cmd.selectFromLayer(l, e.shiftKey ? 'add' : e.altKey ? 'sub' : 'new');
+        return;
+      }
+      P.editMask = false;
+    });
+    t.addEventListener('dblclick', (e) => {
+      e.stopPropagation();
+      if (l.kind === 'smart') P.cmd.editSmartContents(l);
+      else if (l.kind === 'fill' || l.kind === 'adjust') P.showPanel('props');
+      else P.cmd.layerStyle('blending');
+    });
+    const mt = l.mask ? thumb(P, l, 'mask') : null;
+    if (mt) {
+      mt.title = '마스크 편집 (검정으로 칠하면 숨김, 흰색은 보임) · Shift+클릭: 끄기/켜기 · Alt+클릭: 마스크만 보기';
+      mt.classList.add('mask');
+      mt.classList.toggle('editing', P.editMask && l.id === doc.activeId);
+      mt.classList.toggle('disabled', !l.mask.enabled);
+      mt.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (e.shiftKey) {
+          P.run('마스크 켜기/끄기', () => { l.mask = { ...l.mask, enabled: !l.mask.enabled }; doc.touch(l); });
+          return;
+        }
+        if (e.altKey) {
+          P.showMaskOnly = P.showMaskOnly === l.id ? null : l.id;
+          P.redraw();
+        }
+        P.selectLayer(l.id);
+        P.editMask = true;
+        P.emit('layers');
+      });
+    }
+    const vt = l.vmask ? thumb(P, l, 'vmask') : null;
+    if (vt) {
+      vt.classList.add('mask', 'vmask');
+      vt.title = '벡터 마스크 (패스 선택 도구로 고칩니다) · Shift+클릭: 끄기/켜기';
+      vt.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (e.shiftKey) P.run('벡터 마스크 켜기/끄기', () => { l.vmask = { ...l.vmask, enabled: l.vmask.enabled === false }; doc.touch(l); });
+        else {
+          P.selectLayer(l.id);
+          P.editVectorMask?.(l);
+        }
+      });
+    }
+    const fxOn = hasFx(l.fx);
+    const badges = [
+      l.linkId ? h('span.ph-badge', { title: '연결된 레이어' }, icon('link', 12)) : null,
+      fxOn ? h('button.ph-badge.fx', { title: '효과 보기/숨기기', onclick: (e) => { e.stopPropagation(); l.fxOpen = !l.fxOpen; P.emit('layers'); } }, 'fx', l.fxOpen ? '▾' : '▸') : null,
+      l.locked || l.lockPixels || l.lockPos || l.lockAlpha ? h('span.ph-badge', { title: '잠김' }, icon('lock', 12)) : null,
+    ];
+    const name = h('span.ph-lname', l.clip ? h('span.ph-clipmark', { title: `아래 레이어(${clipBaseName || ''})에 클리핑됨` }, '↳ ') : null, h('span', l.name), l.kind === 'group' && l.blend !== 'pass through' ? h('small', ` · ${blendName(l.blend)}`) : null);
+    name.addEventListener('dblclick', (e) => {
+      e.stopPropagation();
+      P.cmd.renameLayer(l);
+    });
+    const row = h(`div.ph-layer${sel.has(l.id) ? '.on' : ''}${l.id === doc.activeId ? '.active' : ''}${doc.shown(l) ? '' : '.hidden'}${l.clip ? '.clipped' : ''}`, {
+      role: 'treeitem', 'aria-selected': String(sel.has(l.id)), 'aria-level': String(depth + 1), draggable: 'true',
+      style: { paddingLeft: `${6 + depth * 16 + (l.clip ? 12 : 0)}px` },
+    }, eye, twist, t, mt, vt, name, h('span.ph-badges', badges));
+    row.addEventListener('click', (e) => {
+      if (e.altKey && !e.ctrlKey && !e.metaKey) return P.cmd.toggleClipFor(l);
+      if (doc.activeId !== l.id) P.editMask = false;
+      P.selectLayer(l.id, e.ctrlKey || e.metaKey ? 'add' : e.shiftKey ? 'range' : 'single');
+      return undefined;
+    });
+    row.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      if (!sel.has(l.id)) P.selectLayer(l.id);
+      showMenu(P.layerMenu(), e.clientX, e.clientY);
+    });
+    // long press on touch: the layer menu
+    let lp = null;
+    row.addEventListener('pointerdown', (e) => {
+      if (e.pointerType !== 'touch') return;
+      lp = setTimeout(() => { P.selectLayer(l.id); showMenu(P.layerMenu(), e.clientX, e.clientY); }, 550);
+    });
+    for (const ev of ['pointerup', 'pointercancel', 'pointermove']) row.addEventListener(ev, () => clearTimeout(lp));
+    row.addEventListener('dragstart', (e) => {
+      drag = l.id;
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', l.name);
+    });
+    row.addEventListener('dragover', (e) => {
+      if (!drag || drag === l.id) return;
+      e.preventDefault();
+      const r = row.getBoundingClientRect();
+      const y = (e.clientY - r.top) / r.height;
+      const zone = l.kind === 'group' && y > 0.3 && y < 0.7 ? 'into' : y < 0.5 ? 'above' : 'below';
+      row.dataset.drop = zone;
+    });
+    row.addEventListener('dragleave', () => delete row.dataset.drop);
+    row.addEventListener('drop', (e) => {
+      e.preventDefault();
+      const zone = row.dataset.drop;
+      delete row.dataset.drop;
+      if (!drag || drag === l.id) return;
+      if (zone === 'into') P.cmd.moveLayerTo(drag, doc.index(l.id), l.id);
+      else if (zone === 'above') P.cmd.moveLayerTo(drag, doc.index(l.id) + 1, l.parent || null);
+      else P.cmd.moveLayerTo(drag, doc.block(l.id)[0], l.parent || null);
+      drag = null;
+    });
+    rows.push(row);
+    // effects and smart filters listed under the layer
+    if (fxOn && l.fxOpen) {
+      rows.push(h('div.ph-subrow', { style: { paddingLeft: `${46 + depth * 16}px` } }, h('span', '효과')));
+      for (const k of FX_ORDER) {
+        const f = l.fx[k];
+        if (!f) continue;
+        const ey = h('button.ph-eye.small', { 'aria-label': f.enabled ? '효과 끄기' : '효과 켜기' }, icon(f.enabled ? 'eye' : 'eyeOff', 13));
+        ey.addEventListener('click', (e) => {
+          e.stopPropagation();
+          P.run('효과 켜기/끄기', () => { l.fx = { ...l.fx, [k]: { ...f, enabled: !f.enabled } }; l._styled = null; doc.touch(l); });
+        });
+        const r = h('div.ph-subrow', { style: { paddingLeft: `${46 + depth * 16}px` }, ondblclick: () => { P.selectLayer(l.id); P.cmd.layerStyle(k); } }, ey, h('span', FX_NAMES[k]));
+        rows.push(r);
+      }
+    }
+    if (l.kind === 'smart' && l.smart.filters?.length) {
+      rows.push(h('div.ph-subrow', { style: { paddingLeft: `${46 + depth * 16}px` } }, h('span', '고급 필터')));
+      l.smart.filters.forEach((f, i) => {
+        const ey = h('button.ph-eye.small', { 'aria-label': '필터 켜기/끄기', onclick: (e) => { e.stopPropagation(); P.cmd.smartFilterToggle(l, i); } }, icon(f.enabled === false ? 'eyeOff' : 'eye', 13));
+        const del = h('button.ph-badge', { title: '이 고급 필터 지우기', onclick: (e) => { e.stopPropagation(); P.cmd.smartFilterDelete(l, i); } }, '×');
+        rows.push(h('div.ph-subrow', { style: { paddingLeft: `${46 + depth * 16}px` }, title: '두 번 클릭: 설정 바꾸기', ondblclick: () => { P.selectLayer(l.id); P.editSmartFilter?.(l, i); } }, ey, h('span', P.filterName?.(f.id) || f.id), del));
+      });
+    }
+    if (l.kind === 'group' && !l.collapsed) renderLevel(l.id, depth + 1, rows);
+  };
+  const renderLevel = (pid, depth, rows) => {
+    const kids = P.doc.children(pid);
+    for (let i = kids.length - 1; i >= 0; i--) {
+      const l = kids[i];
+      // a clipped layer names its base (the nearest unclipped layer below)
+      let base = null;
+      if (l.clip) for (let j = i - 1; j >= 0; j--) if (!kids[j].clip) { base = kids[j].name; break; }
+      rowsFor(l, depth, rows, base);
+    }
+  };
+
   const render = () => {
     const doc = P.doc;
     list.replaceChildren();
-    if (!doc) return;
+    if (!doc) {
+      head.replaceChildren();
+      return;
+    }
     const a = doc.active;
+    const nb = blendSelect(a?.kind === 'group');
+    nb.addEventListener('change', onBlend);
+    blend.replaceWith?.(nb);
+    blend = nb;
     blend.value = a?.blend || 'normal';
     opacity.value = Math.round((a?.opacity ?? 1) * 100);
     opRange.value = opacity.value;
-    lockAll.classList.toggle('on', !!a?.locked);
-    lockAlpha.classList.toggle('on', !!a?.lockAlpha);
-    for (const l of [...doc.layers].reverse()) {
-      const eye = h('button.ph-eye', { title: l.visible ? '숨기기' : '보이기', 'aria-label': l.visible ? '숨기기' : '보이기', onclick: (e) => { e.stopPropagation(); P.run(l.visible ? '레이어 숨기기' : '레이어 보이기', () => { l.visible = !l.visible; doc.touch(l); }); } }, icon(l.visible ? 'eye' : 'eyeOff', 15));
-      const t = thumb(P, l);
-      t.title = 'Ctrl(⌘)+클릭: 이 레이어 모양대로 선택';
-      t.addEventListener('click', (e) => {
-        if (e.ctrlKey || e.metaKey) {
-          e.stopPropagation();
-          P.cmd.selectFromLayer(l);
-          return;
-        }
-        P.editMask = false;
-      });
-      const mt = l.mask ? thumb(P, l, true) : null;
-      if (mt) {
-        mt.title = '마스크 편집 (검정으로 칠하면 숨김, 흰색은 보임) · Shift+클릭: 마스크 끄기/켜기';
-        mt.classList.add('mask');
-        mt.classList.toggle('editing', P.editMask && l.id === doc.activeId);
-        mt.classList.toggle('disabled', !l.mask.enabled);
-        mt.addEventListener('click', (e) => {
-          e.stopPropagation();
-          if (e.shiftKey) {
-            P.run('마스크 켜기/끄기', () => { l.mask = { ...l.mask, enabled: !l.mask.enabled }; doc.touch(l); });
-            return;
-          }
-          P.selectLayer(l.id);
-          P.editMask = true;
-          P.emit('layers');
-        });
-      }
-      const badges = [l.kind === 'text' ? 'T' : l.kind === 'shape' ? '◇' : l.kind === 'adjust' ? '◐' : '', l.fx && (l.fx.shadow || l.fx.stroke || l.fx.glow) ? 'fx' : '', l.locked ? '🔒' : '', l.blend !== 'normal' ? '◑' : ''].filter(Boolean);
-      const name = h('span.ph-lname', l.name);
-      name.addEventListener('dblclick', (e) => {
-        e.stopPropagation();
-        P.cmd.renameLayer(l);
-      });
-      const row = h(`div.ph-layer${l.id === doc.activeId ? '.on' : ''}${l.visible ? '' : '.hidden'}`, { role: 'option', 'aria-selected': String(l.id === doc.activeId), draggable: 'true' },
-        eye, t, mt, name, h('span.ph-badges', badges.join(' ')));
-      row.addEventListener('click', () => {
-        if (P.doc.activeId !== l.id) P.editMask = false;
-        P.selectLayer(l.id);
-      });
-      row.addEventListener('contextmenu', (e) => {
-        e.preventDefault();
-        P.selectLayer(l.id);
-        showMenu(P.layerMenu(), e.clientX, e.clientY);
-      });
-      row.addEventListener('dragstart', (e) => {
-        dragId = l.id;
-        e.dataTransfer.effectAllowed = 'move';
-      });
-      row.addEventListener('dragover', (e) => {
-        if (!dragId) return;
-        e.preventDefault();
-        row.classList.add('drop');
-      });
-      row.addEventListener('dragleave', () => row.classList.remove('drop'));
-      row.addEventListener('drop', (e) => {
-        e.preventDefault();
-        row.classList.remove('drop');
-        if (dragId && dragId !== l.id) P.cmd.moveLayerTo(dragId, doc.index(l.id));
-        dragId = null;
-      });
-      list.append(row);
+    fillNum.value = Math.round((a?.fillOpacity ?? 1) * 100);
+    fillNum.disabled = !a || a.kind === 'group' || a.kind === 'adjust';
+    for (const b of locks) {
+      const key = { alpha: 'lockAlpha', pixels: 'lockPixels', position: 'lockPos', all: 'locked' }[b.dataset.lock];
+      b.classList.toggle('on', !!a?.[key]);
     }
+    head.replaceChildren(
+      h('div.ph-lrow', blend, h('label.ph-op', '불투명도', opRange, opacity)),
+      h('div.ph-lrow', h('span.ph-lockl', '잠그기:'), ...locks, h('label.ph-op.fill', '칠', fillNum)));
+    const rows = [];
+    renderLevel(null, 0, rows);
+    list.append(...rows);
   };
   P.on('layers', render);
   P.on('doc', render);
@@ -475,19 +635,67 @@ export function buildPropertiesPanel(P) {
       rows.push(h('div.ph-sub', `조정: ${def.name}`));
       const params = structuredClone(l.adjust.params);
       rows.push(...paramEditors(def.params, params, (p, done) => live(def.name, () => { l.adjust = { ...l.adjust, params: structuredClone(p) }; l._cache = null; }, done)));
+    } else if (l.kind === 'fill') {
+      const f = l.fill;
+      rows.push(h('div.ph-sub', `칠 레이어: ${FILL_TYPES.find((t) => t[0] === f.type)?.[1] || ''}`));
+      const set = (label, patch, done) => live(label, () => { l.fill = { ...l.fill, ...patch }; }, done);
+      if (f.type === 'solid') {
+        const c = h('input', { type: 'color', value: f.color || '#808080' });
+        c.addEventListener('input', () => set('칠 색상', { color: c.value }, false));
+        c.addEventListener('change', () => set('칠 색상', {}, true));
+        rows.push(field('색', c));
+      } else if (f.type === 'gradient') {
+        rows.push(field('그레이디언트', gradientPicker(P, f.gradient, (g) => set('그레이디언트', { gradient: g }, true))));
+        const st = h('select', GRADIENT_STYLES.map(([v, n]) => h('option', { value: v }, n)));
+        st.value = f.style || 'linear';
+        st.addEventListener('change', () => set('스타일', { style: st.value }, true));
+        rows.push(field('스타일', st),
+          field('각도 (°)', numIn(f.angle ?? 90, -180, 180, 1, (v) => set('각도', { angle: v }, true))),
+          field('비율 (%)', numIn(f.scale ?? 100, 10, 150, 1, (v) => set('비율', { scale: v }, true))),
+          h('label.ph-prow', h('input', { type: 'checkbox', checked: !!f.reverse, onchange: (e) => set('반전', { reverse: e.target.checked }, true) }), '반전'));
+      } else {
+        const ps = h('select', listPatterns().map((p) => h('option', { value: p.id }, p.name)));
+        ps.value = f.pattern || 'checker';
+        ps.addEventListener('change', () => set('패턴', { pattern: ps.value }, true));
+        rows.push(field('패턴', ps), field('비율 (%)', numIn(f.scale ?? 100, 1, 1000, 1, (v) => set('비율', { scale: v }, true))));
+      }
+    } else if (l.kind === 'smart') {
+      const sm = l.smart;
+      const [a, b] = sm.m;
+      const scale = Math.hypot(a, b);
+      rows.push(h('div.ph-sub', '고급 개체 (원본 화질을 지키며 크기·변형·필터를 바꿀 수 있음)'),
+        h('div.ph-prow', h('span', '원본 크기'), h('span.mono', `${sm.w} × ${sm.h}`)),
+        h('div.ph-prow', h('span', '배율'), h('span.mono', `${Math.round(scale * 1000) / 10}%  ${Math.round((Math.atan2(b, a) * 180) / Math.PI)}°`)),
+        h('div.ph-prow', h('button.small', { onclick: () => P.cmd.editSmartContents(l) }, '내용 편집'), h('button.small', { onclick: () => P.cmd.replaceSmartContents() }, '내용 바꾸기…'), h('button.small', { onclick: () => P.cmd.exportSmartContents() }, '내용 내보내기')),
+        h('div.ph-prow', h('button.small', { onclick: () => P.cmd.rasterize() }, '래스터화 (일반 레이어로)'), h('button.small', { onclick: () => P.cmd.freeTransform() }, '변형')));
+    } else if (l.kind === 'group') {
+      rows.push(h('div.ph-sub', `그룹 · 레이어 ${doc.descendants(l.id).length}개`), h('div.ph-prow', h('button.small', { onclick: () => P.cmd.mergeGroup() }, '그룹 병합'), h('button.small', { onclick: () => P.cmd.ungroup() }, '그룹 해제')));
     } else {
       rows.push(h('div.ph-prow', h('span', '위치'), h('span.mono', `${Math.round(l.x)}, ${Math.round(l.y)}`)),
         h('div.ph-prow', h('span', '크기'), h('span.mono', l.canvas ? `${l.canvas.width} × ${l.canvas.height}` : '-')));
+      if (l.psdText) rows.push(h('div.note', `PSD의 글자 레이어였습니다: "${String(l.psdText.text || '').slice(0, 40)}"`), h('div.ph-prow', h('button.small', { onclick: () => P.cmd.psdTextToEditable?.(l) }, '고칠 수 있는 글자로 다시 만들기')));
     }
     // mask controls
     if (l.mask) {
-      rows.push(h('div.ph-sub', '레이어 마스크'), h('div.ph-prow',
-        h('button.small', { onclick: () => P.run('마스크 켜기/끄기', () => { l.mask = { ...l.mask, enabled: !l.mask.enabled }; doc.touch(l); }) }, l.mask.enabled ? '끄기' : '켜기'),
-        h('button.small', { onclick: () => P.cmd.invertMask() }, '반전'),
-        l.kind === 'raster' ? h('button.small', { onclick: () => P.cmd.applyMask() }, '적용') : null,
-        h('button.small', { onclick: () => P.cmd.deleteMask() }, '삭제')));
+      const m = l.mask;
+      rows.push(h('div.ph-sub', '레이어 마스크'),
+        field('농도 (%)', numIn(Math.round((m.density ?? 1) * 100), 0, 100, 1, (v) => live('마스크 농도', () => { l.mask = { ...l.mask, density: v / 100 }; }, true))),
+        field('페더 (px)', numIn(m.feather || 0, 0, 250, 0.5, (v) => live('마스크 페더', () => { l.mask = { ...l.mask, feather: v }; }, true))),
+        h('div.ph-prow',
+          h('button.small', { onclick: () => P.run('마스크 켜기/끄기', () => { l.mask = { ...l.mask, enabled: !l.mask.enabled }; doc.touch(l); }) }, l.mask.enabled ? '끄기' : '켜기'),
+          h('button.small', { onclick: () => P.cmd.invertMask() }, '반전'),
+          h('button.small', { onclick: () => P.cmd.maskToSelection?.() }, '선택 영역으로'),
+          l.kind === 'raster' ? h('button.small', { onclick: () => P.cmd.applyMask() }, '적용') : null,
+          h('button.small', { onclick: () => P.cmd.deleteMask() }, '삭제'),
+          h('button.small', { title: '연결하면 레이어를 옮길 때 마스크도 같이 움직입니다', onclick: () => P.run('마스크 연결', () => { l.mask = { ...l.mask, linked: l.mask.linked === false }; doc.touch(l); }) }, l.mask.linked === false ? '연결' : '연결 해제')));
     }
-    rows.push(h('div.ph-prow', h('button.small', { onclick: () => P.cmd.layerStyle() }, 'fx 레이어 스타일…')));
+    if (l.vmask) {
+      rows.push(h('div.ph-sub', '벡터 마스크'), h('div.ph-prow',
+        h('button.small', { onclick: () => P.run('벡터 마스크 켜기/끄기', () => { l.vmask = { ...l.vmask, enabled: l.vmask.enabled === false }; doc.touch(l); }) }, l.vmask.enabled === false ? '켜기' : '끄기'),
+        h('button.small', { onclick: () => P.cmd.rasterizeVectorMask?.() }, '래스터화'),
+        h('button.small', { onclick: () => P.run('벡터 마스크 삭제', () => { l.vmask = null; doc.touch(l); }) }, '삭제')));
+    }
+    if (l.kind !== 'adjust') rows.push(h('div.ph-prow', h('button.small', { onclick: () => P.cmd.layerStyle('blending') }, 'fx 레이어 스타일…'), h('button.small', { onclick: () => P.cmd.convertToSmart() }, l.kind === 'smart' ? '고급 개체 안에 넣기' : '고급 개체로 변환')));
     el.replaceChildren(...rows);
   };
   P.on('layers', render);
@@ -513,4 +721,20 @@ export function buildHistoryPanel(P) {
   P.on('history', render);
   P.on('doc', render);
   return el;
+}
+
+/** A button showing a gradient; opens the gradient editor. onChange(gradient). */
+export function gradientPicker(P, gr, onChange) {
+  const b = h('button.ph-gradbtn', { title: '그레이디언트 고르기·편집', type: 'button' });
+  const paint = (g) => b.replaceChildren(gradientSwatch(g, 140, 18, P.fg, P.bg));
+  paint(gr || GRADIENTS[0]);
+  b.addEventListener('click', async () => {
+    const D = await import('./pdialogs.js');
+    D.gradientEditor(P, gr || GRADIENTS[0], (g) => {
+      gr = g;
+      paint(g);
+      onChange(g);
+    });
+  });
+  return b;
 }
