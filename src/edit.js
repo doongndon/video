@@ -531,6 +531,45 @@ export function addFrameHold(c, t = store.ui.playhead) {
   });
 }
 
+/** Normalize clip volume so the loudest peak in the used range hits targetDb. */
+export function normalizeAudio(ids, peakFn, targetDb = -1) {
+  const s = seq();
+  let changed = 0;
+  store.transact('Normalize Audio', () => {
+    for (const id of ids) {
+      const c = s.clips[id];
+      if (!c || c.kind !== 'audio') continue;
+      const a = c.inPoint;
+      const b = c.inPoint + c.duration * c.speed;
+      const peak = peakFn(c.mediaId, Math.min(a, b), Math.max(a, b));
+      if (!peak) continue;
+      const vol = c.effects.find((e) => e.type === 'volume');
+      if (!vol) continue;
+      const level = clamp(targetDb - 20 * Math.log10(peak), -60, 15);
+      const p = vol.params.level;
+      if (p.kf) {
+        const d = level - Math.max(...p.kf.map((k) => k.v));
+        for (const k of p.kf) k.v = clamp(k.v + d, -60, 15);
+      }
+      p.value = Math.round(level * 10) / 10;
+      changed++;
+    }
+  });
+  return changed;
+}
+
+/** Apply cuts at the given sequence times to one clip (and its linked partners). */
+export function cutClipAt(clipId, times) {
+  const s = seq();
+  store.transact('Scene Edit Detection', () => {
+    for (const t of [...times].sort((a, b) => b - a)) {
+      const c = Object.values(s.clips).find((x) => (x.id === clipId || (s.clips[clipId]?.linkId && x.linkId === s.clips[clipId].linkId)) && x.start < t - EPS && clipEnd(x) > t + EPS);
+      if (!c) continue;
+      splitGroup(linkedClips(s, c).filter((x) => x.start < t - EPS && clipEnd(x) > t + EPS), t);
+    }
+  });
+}
+
 export function setEnabled(ids, enabled) {
   const s = seq();
   store.transact(enabled ? 'Enable' : 'Disable', () => {

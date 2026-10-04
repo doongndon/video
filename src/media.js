@@ -367,6 +367,83 @@ export async function createFrameReader(id, width, height) {
   return { sink, first };
 }
 
+/**
+ * Scene Edit Detection: sample frames between [start, end) media-seconds and return media times
+ * where the picture changes abruptly (luma-histogram distance above threshold).
+ */
+export async function detectScenes(id, start, end, { fps = 10, threshold = 0.35, onProgress = () => {} } = {}) {
+  const rt = getRuntime(id);
+  const times = [];
+  for (let t = start; t < end; t += 1 / fps) times.push(t);
+  const BINS = 32;
+  const hist = (canvas) => {
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    const d = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+    const hst = new Float32Array(BINS * 3);
+    const n = d.length / 4;
+    for (let i = 0; i < d.length; i += 4) {
+      hst[(d[i] * BINS) >> 8]++;
+      hst[BINS + ((d[i + 1] * BINS) >> 8)]++;
+      hst[2 * BINS + ((d[i + 2] * BINS) >> 8)]++;
+    }
+    for (let i = 0; i < hst.length; i++) hst[i] /= n * 3;
+    return hst;
+  };
+  const cuts = [];
+  let prev = null;
+  let i = 0;
+  const consume = (canvas, t) => {
+    const hcur = hist(canvas);
+    if (prev) {
+      let dist = 0;
+      for (let k = 0; k < hcur.length; k++) dist += Math.abs(hcur[k] - prev[k]);
+      dist /= 2;
+      if (dist > threshold && (!cuts.length || t - cuts[cuts.length - 1] > 0.5)) cuts.push(t);
+    }
+    prev = hcur;
+    if (++i % 10 === 0) onProgress(i / times.length);
+  };
+  try {
+    const input = getInput(rt);
+    const vt = await input.getPrimaryVideoTrack();
+    if (!vt || !(await vt.canDecode())) throw new Error('not decodable');
+    const first = await vt.getFirstTimestamp();
+    const sink = new MB.CanvasSink(vt, { width: 64, height: 36, fit: 'fill' });
+    let k = 0;
+    for await (const wc of sink.canvasesAtTimestamps(times.map((t) => t + first))) {
+      if (wc) consume(wc.canvas, times[k]);
+      k++;
+    }
+  } catch (err) {
+    console.warn('scene detection via WebCodecs failed, using <video> seeking', err);
+    const el = document.createElement('video');
+    el.muted = true;
+    el.src = mediaUrl(id);
+    await once(el, 'loadeddata', 15000);
+    const c = document.createElement('canvas');
+    c.width = 64;
+    c.height = 36;
+    for (const t of times) {
+      el.currentTime = t;
+      if (!(await once(el, 'seeked', 5000))) continue;
+      c.getContext('2d').drawImage(el, 0, 0, 64, 36);
+      consume(c, t);
+    }
+    el.removeAttribute('src');
+    el.load();
+  }
+  return cuts;
+}
+
+/** Peak amplitude (0..1) of a media item's audio between two media times, from waveform data. */
+export function peakInRange(id, start, end) {
+  const p = getRuntime(id).peaks;
+  if (!p) return null;
+  let m = 0;
+  for (let i = Math.max(0, Math.floor(start * p.rate)); i <= Math.min(p.data.length - 1, Math.ceil(end * p.rate)); i++) m = Math.max(m, p.data[i]);
+  return m;
+}
+
 // ---------------------------------------------------------------- synthetic items
 
 export function createSyntheticMedia(kind, { name, color, width, height } = {}) {

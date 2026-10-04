@@ -7,7 +7,7 @@ import { Compositor } from '../compositor.js';
 import * as edit from '../edit.js';
 import { clipEnd, clipsOnTrack, videoTracks, sequenceDuration, evalEffect } from '../model.js';
 import { h, clamp, formatTimecode, parseTimecode, downloadBlob } from '../util.js';
-import { fitRect, fitCanvasToBox, loadPref, savePref, toast, dnd } from './common.js';
+import { fitRect, fitCanvasToBox, loadPref, savePref, toast, dnd, inlineEdit } from './common.js';
 import { exportFrame } from '../export.js';
 
 export const programApi = {};
@@ -377,23 +377,12 @@ export function createProgramMonitor() {
   });
 
   tcEl.addEventListener('click', () => {
-    const input = h('input', { type: 'text', value: tcEl.textContent, style: { width: '96px' } });
-    tcEl.replaceWith(input);
-    input.focus();
-    input.select();
-    const done = (apply) => {
-      if (apply) {
-        const t = parseTimecode(input.value, store.seq.fps);
+    inlineEdit(tcEl, {
+      onCommit: (v) => {
+        const t = parseTimecode(v, store.seq.fps);
         if (t != null) store.setPlayhead(t);
-      }
-      input.replaceWith(tcEl);
-    };
-    input.addEventListener('keydown', (e) => {
-      e.stopPropagation();
-      if (e.key === 'Enter') done(true);
-      if (e.key === 'Escape') done(false);
+      },
     });
-    input.addEventListener('blur', () => done(false));
   });
 
   function refresh() {

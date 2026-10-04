@@ -4,7 +4,7 @@ import { store } from '../store.js';
 import { mediaUrl, runtime, mediaEvents, mediaStatus } from '../media.js';
 import * as edit from '../edit.js';
 import { h, clamp, formatTimecode, parseTimecode, snapFrame } from '../util.js';
-import { fitRect, fitCanvasToBox, dnd } from './common.js';
+import { fitRect, fitCanvasToBox, dnd, inlineEdit } from './common.js';
 
 export const sourceApi = {};
 
@@ -260,23 +260,12 @@ export function createSourceMonitor() {
 
   tcEl.addEventListener('click', () => {
     if (!media()) return;
-    const input = h('input', { type: 'text', value: tcEl.textContent, style: { width: '96px' } });
-    tcEl.replaceWith(input);
-    input.focus();
-    input.select();
-    const done = (apply) => {
-      if (apply) {
-        const t = parseTimecode(input.value, fps());
+    inlineEdit(tcEl, {
+      onCommit: (v) => {
+        const t = parseTimecode(v, fps());
         if (t != null) seek(t);
-      }
-      input.replaceWith(tcEl);
-    };
-    input.addEventListener('keydown', (e) => {
-      e.stopPropagation();
-      if (e.key === 'Enter') done(true);
-      if (e.key === 'Escape') done(false);
+      },
     });
-    input.addEventListener('blur', () => done(false));
   });
 
   const setDrag = (el, opts) => {

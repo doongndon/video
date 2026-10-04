@@ -10,7 +10,7 @@ import {
 } from '../model.js';
 import { EFFECTS, TRANSITIONS } from '../effects.js';
 import { h, clamp, EPS, formatTimecode, parseTimecode, snapFrame, dbToGain, modKey } from '../util.js';
-import { showMenu, loadPref, savePref, fitCanvasToBox, promptDialog, toast, dnd } from './common.js';
+import { showMenu, loadPref, savePref, fitCanvasToBox, promptDialog, toast, dnd, inlineEdit } from './common.js';
 import { openSpeedDialog, openMarkerDialog } from './dialogs.js';
 
 const RULER_H = 34;
@@ -236,27 +236,18 @@ export function createTimeline() {
   }
 
   tcEl.addEventListener('click', () => {
-    const input = h('input', { type: 'text', value: tcEl.textContent, style: { width: '110px' } });
-    tcEl.replaceWith(input);
-    input.focus();
-    input.select();
-    const done = (apply) => {
-      if (apply) {
-        let txt = input.value.trim();
+    // absolute timecode, or +/- offset relative to the playhead (e.g. +15 = 15 frames)
+    inlineEdit(tcEl, {
+      width: '110px',
+      onCommit: (v) => {
+        let txt = v.trim();
         const rel = /^[+-]/.test(txt) ? txt[0] : null;
         if (rel) txt = txt.slice(1);
         const t = parseTimecode(txt, fps());
         if (t != null) store.setPlayhead(rel === '+' ? store.ui.playhead + t : rel === '-' ? store.ui.playhead - t : t);
-      }
-      input.replaceWith(tcEl);
-      refreshTopBar();
-    };
-    input.addEventListener('keydown', (e) => {
-      e.stopPropagation();
-      if (e.key === 'Enter') done(true);
-      if (e.key === 'Escape') done(false);
+        refreshTopBar();
+      },
     });
-    input.addEventListener('blur', () => done(false));
   });
 
   function toggleSnap() {
@@ -528,7 +519,12 @@ export function createTimeline() {
     if (c.hold) label += ' [Hold]';
     else if (c.speed !== 1 || c.reverse) label += ` [${c.reverse ? '-' : ''}${Math.round(c.speed * 100)}%]`;
     if (offline) label = `MEDIA OFFLINE · ${label}`;
-    ctx.fillText(label, labelX, y + 11, Math.max(0, x + w - labelX - 3));
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(labelX, y, Math.max(0, x + w - labelX - 3), nameH);
+    ctx.clip();
+    ctx.fillText(label, labelX, y + 11);
+    ctx.restore();
 
     // edges
     ctx.strokeStyle = selected ? '#ffffff' : 'rgba(0,0,0,0.6)';
@@ -908,7 +904,8 @@ export function createTimeline() {
       const c = hit.clip;
       if (hit.zone === 'volume') {
         store.selectClips([c.id]);
-        beginVolume(y, hit);
+        if (modKey(e)) addVolumeKeyframe(c.id, hit.t);
+        else beginVolume(y, hit, x);
         return;
       }
       if (hit.zone === 'in' || hit.zone === 'out') {
@@ -1009,11 +1006,29 @@ export function createTimeline() {
     drag = { type: 'slip', ids: [...edit.withLinked([c.id])], x0: x, min, max, applied: 0, restorePlayhead: store.ui.playhead };
   }
 
-  function beginVolume(y, hit) {
+  function beginVolume(y, hit, x) {
     const c = hit.clip;
     const nameH = Math.min(15, hit.row.h - 3);
-    store.begin('Volume');
-    drag = { type: 'volume', id: c.id, bodyY: rowY(hit.row) + 1 + nameH, bodyH: hit.row.h - 3 - nameH, tl: hit.t - c.start };
+    const vol = c.effects.find((e) => e.type === 'volume');
+    // grabbing a keyframe dot moves just that keyframe
+    const kfIndex = vol?.params.level.kf ? vol.params.level.kf.findIndex((k) => Math.abs(xOf(c.start + k.t) - x) <= 5) : -1;
+    store.begin(kfIndex >= 0 ? 'Move Volume Keyframe' : 'Volume');
+    drag = { type: 'volume', id: c.id, bodyY: rowY(hit.row) + 1 + nameH, bodyH: hit.row.h - 3 - nameH, tl: hit.t - c.start, kfIndex, x0: x };
+  }
+
+  /** Ctrl/Cmd+click on the volume rubber band adds a keyframe there. */
+  function addVolumeKeyframe(clipId, t) {
+    store.transact('Add Volume Keyframe', () => {
+      const c = store.seq.clips[clipId];
+      const vol = c?.effects.find((e) => e.type === 'volume');
+      if (!vol) return;
+      const p = vol.params.level;
+      const tl = clamp(snapFrame(t, fps()) - c.start, 0, c.duration);
+      const v = evalParamAt(vol, 'level', tl);
+      if (!p.kf) p.kf = [];
+      if (!p.kf.some((k) => Math.abs(k.t - tl) < 0.5 / fps())) p.kf.push({ t: tl, v, ease: 'linear' });
+      p.kf.sort((a, b) => a.t - b.t);
+    });
   }
 
   function onPointerMove(e) {
@@ -1133,7 +1148,11 @@ export function createTimeline() {
         if (!vol) break;
         const db = Math.round(dbFromY(y, drag.bodyY, drag.bodyH) * 10) / 10;
         const p = vol.params.level;
-        if (isAnimated(p)) {
+        if (drag.kfIndex >= 0 && p.kf?.[drag.kfIndex]) {
+          const k = p.kf[drag.kfIndex];
+          k.v = clamp(db, -60, 15);
+          k.t = clamp(snapFrame(drag.tl + (x - drag.x0) / view.pps, fps()), 0, c.duration);
+        } else if (isAnimated(p)) {
           // move every keyframe by the same delta
           const cur = evalParamAt(vol, 'level', drag.tl);
           const d = db - cur;

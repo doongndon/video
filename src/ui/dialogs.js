@@ -5,7 +5,7 @@ import * as edit from '../edit.js';
 import { h, formatTimecode, parseTimecode, formatBytes, downloadBlob, clamp } from '../util.js';
 import { openModal, formRow, toast } from './common.js';
 import { FORMATS, exportRange, exportSequence, exportFrame } from '../export.js';
-import { createSyntheticMedia } from '../media.js';
+import { createSyntheticMedia, detectScenes, mediaStatus } from '../media.js';
 import { clipEnd, clipsOnTrack, createClip, createTrack, renameTracks, videoTracks } from '../model.js';
 
 // ---------------------------------------------------------------- speed / duration
@@ -257,6 +257,50 @@ export function openColorMatteDialog() {
     title: 'New Color Matte',
     body: [formRow('Color', color), formRow('Name', name)],
     buttons: [{ label: 'Cancel' }, { label: 'OK', primary: true, action: () => createSyntheticMedia('color', { name: name.value, color: color.value }) }],
+  });
+}
+
+// ---------------------------------------------------------------- scene edit detection
+
+export function openSceneDetectDialog() {
+  const clip = store.selectedClips().find((c) => c.kind === 'video');
+  if (!clip || mediaStatus(clip.mediaId) !== 'ready') {
+    toast('Select a video clip first');
+    return;
+  }
+  const sens = h('input', { type: 'range', min: 5, max: 95, value: 60 });
+  const mode = h('select', h('option', { value: 'cuts' }, 'Apply a cut at each detected cut point'), h('option', { value: 'markers' }, 'Create a marker at each detected cut point'));
+  const bar = h('div');
+  const status = h('div.note', 'Samples the clip at 10 fps and compares colour histograms.');
+  let running = false;
+  openModal({
+    title: 'Scene Edit Detection',
+    body: [formRow('Mode', mode), formRow('Sensitivity', sens), h('div.progress', bar), status],
+    buttons: [
+      { label: 'Close' },
+      {
+        label: 'Analyze', primary: true, action: async () => {
+          if (running) return false;
+          running = true;
+          const c = store.seq.clips[clip.id];
+          if (!c) return true;
+          const a = c.inPoint;
+          const b = c.inPoint + c.duration * c.speed;
+          const threshold = 0.6 - (parseInt(sens.value, 10) / 100) * 0.5;
+          status.textContent = 'Analyzing…';
+          const cuts = await detectScenes(c.mediaId, Math.min(a, b), Math.max(a, b), { threshold, onProgress: (p) => { bar.style.width = `${Math.round(p * 100)}%`; } });
+          bar.style.width = '100%';
+          const seqTimes = cuts.map((mt) => (c.reverse ? c.start + (b - mt) / c.speed : c.start + (mt - a) / c.speed))
+            .map((t) => Math.round(t * store.seq.fps) / store.seq.fps)
+            .filter((t) => t > c.start + 1e-3 && t < c.start + c.duration - 1e-3);
+          if (mode.value === 'cuts') edit.cutClipAt(c.id, seqTimes);
+          else store.transact('Scene Markers', () => { for (const t of seqTimes) store.seq.markers.push({ id: `mk_${Math.random().toString(36).slice(2)}`, time: t, name: 'Scene', color: '#fb923c', comment: '' }); store.seq.markers.sort((x, y) => x.time - y.time); });
+          status.textContent = `Found ${seqTimes.length} scene change(s).`;
+          running = false;
+          return false;
+        },
+      },
+    ],
   });
 }
 

@@ -4,7 +4,7 @@
 import { store } from './store.js';
 import { playback } from './playback.js';
 import * as edit from './edit.js';
-import { createSyntheticMedia, importFiles, mediaStatus, runtime } from './media.js';
+import { createSyntheticMedia, importFiles, mediaStatus, runtime, peakInRange } from './media.js';
 import { saveProjectFile, openProjectFile, clearSession, relinkFromFiles, setAutosave, saveProjectNow } from './persist.js';
 import { createProject, clipEnd, clipsOnTrack, editPoints, sequenceDuration, videoTracks, mediaTimeAt } from './model.js';
 import { snapFrame, EPS } from './util.js';
@@ -12,10 +12,10 @@ import { sourceApi } from './ui/source-monitor.js';
 import { programApi } from './ui/program-monitor.js';
 import { timelineApi } from './ui/timeline.js';
 import { pickFiles, importDialog } from './ui/project-panel.js';
-import { showPanel, toggleMaximize, confirmDialog, toast } from './ui/common.js';
+import { showPanel, toggleMaximize, confirmDialog, promptDialog, toast } from './ui/common.js';
 import {
   openSpeedDialog, openSequenceSettings, openExportDialog, openShortcutsDialog, openAboutDialog,
-  openColorMatteDialog, importSrt, exportSrt, openMarkerDialog,
+  openColorMatteDialog, importSrt, exportSrt, openMarkerDialog, openSceneDetectDialog,
 } from './ui/dialogs.js';
 
 const inSource = () => store.ui.focusPanel === 'source' && sourceApi.hasMedia?.();
@@ -114,6 +114,10 @@ export const commands = {
   exportMedia: () => openExportDialog(),
   exportFrame: () => programApi.saveFrame?.(),
   linkMedia,
+  renameProject: async () => {
+    const n = await promptDialog('Rename Project', 'Project name', store.project.name);
+    if (n) store.transact('Rename Project', () => { store.project.name = n; });
+  },
 
   // ---- edit
   undo: () => store.undo(),
@@ -153,6 +157,12 @@ export const commands = {
   overwrite: () => sourceApi.overwrite?.(),
   nudgeLeft: () => nudge(-1),
   nudgeRight: () => nudge(1),
+  normalize: () => {
+    const ids = [...edit.withLinked(selIds())];
+    const n = edit.normalizeAudio(ids, peakInRange, -1);
+    toast(n ? `Normalized ${n} audio clip(s) to -1 dB peak` : 'Select audio clips (waveforms must be analysed)');
+  },
+  sceneDetect: () => openSceneDetectDialog(),
   removeEffects: () => store.transact('Remove Effects', () => {
     for (const c of sel()) c.effects = c.effects.filter((fx) => ['motion', 'opacity', 'text', 'fill', 'volume', 'panner'].includes(fx.type));
   }),

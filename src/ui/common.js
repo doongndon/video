@@ -365,6 +365,29 @@ export function scrubNumber(opts) {
   return wrap;
 }
 
+/**
+ * Swap an element for a text input until Enter/Escape/blur. onCommit(value) runs on Enter or blur.
+ */
+export function inlineEdit(el, { width = '96px', onCommit }) {
+  const input = h('input', { type: 'text', value: el.textContent, style: { width } });
+  el.replaceWith(input);
+  input.focus();
+  input.select();
+  let done = false;
+  const finish = (apply) => {
+    if (done) return;
+    done = true;
+    if (input.isConnected) input.replaceWith(el);
+    if (apply) onCommit(input.value);
+  };
+  input.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Enter') finish(true);
+    if (e.key === 'Escape') finish(false);
+  });
+  input.addEventListener('blur', () => finish(false));
+}
+
 /** Fit a w×h box inside a container, returning CSS pixel rect. */
 export function fitRect(cw, ch, w, h, zoom = 0) {
   const s = zoom > 0 ? zoom : Math.min(cw / w, ch / h);
