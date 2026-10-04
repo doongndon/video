@@ -52,6 +52,7 @@ const P = {
   historyBrush: '<path d="M13.5 2.5 7 9l-1.5-1.5L12 1z" transform="translate(0 .5)"/><path d="M5.5 8.5c-2 0-3 1.5-3 3.5v1.5H4c2 0 3.5-1 3.5-3z"/><path d="M2.5 2.5v3h3M2.7 5.3A4 4 0 0 1 8 2.6"/>',
   bgEraser: '<path d="M9.5 2.5 14 7l-6.5 6.5H4L1.8 11.3z"/><path d="M6 6l4.5 4.5"/><path d="M11 14h3.5M12.75 12.25v3.5" />',
   magicEraser: '<path d="M9.5 4.5 14 9l-4.5 4.5H6L3.8 11.3z"/><path d="M8 8l3.5 3.5"/><path d="M4 1.5v3M2.5 3h3"/>',
+  patternStamp: '<path d="M6 2.5h4v3.5l1.5 2.5h-7L6 6z"/><path d="M3 9h10v2.5H3z"/><path d="M4 13.5h1.5M7.25 13.5h1.5M10.5 13.5H12"/>',
   ruler: '<path d="M1.5 11 11 1.5l3.5 3.5L5 14.5z"/><path d="M4.5 8l1.5 1.5M6.5 6l2 2M8.5 4l1.5 1.5"/>',
   note: '<path d="M3 2.5h7.5L13 5v8.5H3z"/><path d="M10.5 2.5V5H13M5 7.5h6M5 10h4.5"/>',
   count: '<path d="M3.5 3.5h9v9h-9z"/><path d="M6.5 6.2 8 5v6M6.5 11h3"/>',

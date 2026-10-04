@@ -20,6 +20,48 @@ const SWATCHES = ['#000000', '#ffffff', '#7f7f7f', '#c0c0c0', '#ff0000', '#ff7f0
 
 // ---------------------------------------------------------------- toolbar
 
+/** The list of tools in a toolbar slot, shown beside it while hovering (like Photoshop's flyout). */
+function toolFlyout(P, onPick) {
+  const el = h('div.ph-flyout', { role: 'menu', hidden: true });
+  document.body.append(el);
+  let openT = 0;
+  let closeT = 0;
+  let cur = null;
+  const close = () => {
+    clearTimeout(openT);
+    el.hidden = true;
+    cur = null;
+  };
+  const show = (b, g) => {
+    cur = b;
+    el.replaceChildren(...g.map((id) => {
+      const t = TOOL_BY_ID[id];
+      return h(`button.ph-fly-item${id === P.tool ? '.on' : ''}`, { role: 'menuitem', onclick: () => { onPick(g, id); P.setTool(id); close(); } },
+        icon(t.icon, 18), h('span', t.name), t.key ? h('kbd', t.key) : null);
+    }));
+    el.hidden = false;
+    const r = b.getBoundingClientRect();
+    el.style.left = `${r.right + 4}px`;
+    el.style.top = `${Math.min(r.top, window.innerHeight - el.offsetHeight - 8)}px`;
+  };
+  el.addEventListener('pointerenter', () => clearTimeout(closeT));
+  el.addEventListener('pointerleave', () => { closeT = setTimeout(close, 220); });
+  P.on('tool', close);
+  return {
+    open(b, g) {
+      clearTimeout(closeT);
+      clearTimeout(openT);
+      if (!el.hidden && cur !== b) return show(b, g);
+      openT = setTimeout(() => show(b, g), 380);
+      return undefined;
+    },
+    leave() {
+      clearTimeout(openT);
+      closeT = setTimeout(close, 220);
+    },
+  };
+}
+
 export function buildToolbar(P) {
   const groupPick = new Map(TOOL_GROUPS.map((g) => [g[0], g[0]]));
   const el = h('div.ph-tools', { role: 'toolbar', 'aria-label': '도구' });
@@ -30,6 +72,7 @@ export function buildToolbar(P) {
   const qm = h('button.ph-tool.ph-qm', { title: '빠른 마스크 모드로 편집 (Q) · 두 번 눌러 옵션', 'aria-label': '빠른 마스크', onclick: () => P.cmd.quickMask?.(), ondblclick: () => P.cmd.quickMaskOptions?.() }, icon('quickMask', 18));
   const syncQm = () => qm.classList.toggle('on', !!P.doc?.quickMask);
   const btns = [];
+  const flyout = toolFlyout(P, (g, id) => groupPick.set(g[0], id));
   const render = () => {
     el.replaceChildren();
     for (const g of TOOL_GROUPS) {
@@ -46,6 +89,9 @@ export function buildToolbar(P) {
         showMenu(g.map((id) => ({ label: `${TOOL_BY_ID[id].name}${TOOL_BY_ID[id].key ? `  (${TOOL_BY_ID[id].key})` : ''}`, checked: id === P.tool, action: () => { groupPick.set(g[0], id); P.setTool(id); } })), r.right + 2, r.top);
       };
       if (g.length > 1) {
+        // hovering shows the hidden tools of this slot (mouse only; touch uses a long press)
+        b.addEventListener('pointerenter', (e) => { if (e.pointerType === 'mouse') flyout.open(b, g); });
+        b.addEventListener('pointerleave', (e) => { if (e.pointerType === 'mouse') flyout.leave(); });
         b.addEventListener('contextmenu', menu);
         let timer = null;
         b.addEventListener('pointerdown', (e) => { timer = setTimeout(() => menu(e), 500); });
@@ -119,7 +165,7 @@ export function buildOptionsBar(P) {
       } else if (type === 'select') {
         if (key === 'custom' && o.type !== 'custom') continue;
         if (key === 'sides' && !['polygon', 'star'].includes(o.type)) continue;
-        const items = list === 'customShapes' ? P.customShapeList() : list;
+        const items = list === 'customShapes' ? P.customShapeList() : typeof list === 'function' ? list() : list;
         const s = h('select', { 'aria-label': label }, items.map(([v, txt]) => h('option', { value: v }, txt)));
         s.value = o[key];
         s.addEventListener('change', () => P.setOpt(t.id, key, isNaN(+s.value) || s.value === '' ? s.value : +s.value));

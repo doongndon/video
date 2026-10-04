@@ -1202,7 +1202,7 @@ export const TOOLS = [
       }
       const mg = m.getContext('2d');
       mg.globalCompositeOperation = 'source-in';
-      mg.fillStyle = E.fg;
+      mg.fillStyle = o.fill === 'pattern' && E.patternStyle ? E.patternStyle(mg, o.pattern) : E.fg;
       mg.fillRect(0, 0, m.width, m.height);
       if (doc.selection) {
         mg.globalCompositeOperation = 'destination-in';
@@ -1243,6 +1243,7 @@ export const TOOLS = [
     up(E) {
       if (!this.d) return;
       if (dist(this.d.a, this.d.b) > 1) {
+        this.d.final = true;
         this.paint(E);
         E.commit('그레이디언트', this.d.before);
       } else E.doc.restore(this.d.before);
@@ -1254,23 +1255,26 @@ export const TOOLS = [
       const doc = E.doc;
       const l = doc.active;
       const o = E.opts('gradient');
-      const gc = makeCanvas(doc.width, doc.height);
+      // presets, five styles, reverse and dither come from paint2.js
+      const gc = E.gradientCanvas ? E.gradientCanvas(a, b, { ...o, final: !!this.d.final }) : makeCanvas(doc.width, doc.height);
       const gg = gc.getContext('2d');
-      const len = Math.max(1, dist(a, b));
-      const grad = o.type === 'linear' ? gg.createLinearGradient(a.x, a.y, b.x, b.y) : gg.createRadialGradient(a.x, a.y, 0, a.x, a.y, len);
-      const end = o.to === 'clear' ? `${E.fg}00` : E.bg;
-      if (o.type === 'reflected') {
-        const g2 = gg.createLinearGradient(a.x - (b.x - a.x), a.y - (b.y - a.y), b.x, b.y);
-        g2.addColorStop(0, end);
-        g2.addColorStop(0.5, E.fg);
-        g2.addColorStop(1, end);
-        gg.fillStyle = g2;
-      } else {
-        grad.addColorStop(0, E.fg);
-        grad.addColorStop(1, end);
-        gg.fillStyle = grad;
+      if (!E.gradientCanvas) {
+        const len = Math.max(1, dist(a, b));
+        const grad = o.type === 'linear' ? gg.createLinearGradient(a.x, a.y, b.x, b.y) : gg.createRadialGradient(a.x, a.y, 0, a.x, a.y, len);
+        const end = o.to === 'clear' ? `${E.fg}00` : E.bg;
+        if (o.type === 'reflected') {
+          const g2 = gg.createLinearGradient(a.x - (b.x - a.x), a.y - (b.y - a.y), b.x, b.y);
+          g2.addColorStop(0, end);
+          g2.addColorStop(0.5, E.fg);
+          g2.addColorStop(1, end);
+          gg.fillStyle = g2;
+        } else {
+          grad.addColorStop(0, E.fg);
+          grad.addColorStop(1, end);
+          gg.fillStyle = grad;
+        }
+        gg.fillRect(0, 0, gc.width, gc.height);
       }
-      gg.fillRect(0, 0, gc.width, gc.height);
       if (doc.selection) {
         gg.globalCompositeOperation = 'destination-in';
         gg.drawImage(doc.selection.canvas, 0, 0);

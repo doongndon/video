@@ -19,6 +19,7 @@ import { nearestOnPath } from './paths.js';
 import { installPathTools } from './pathtools.js';
 import { installSelectionTools, buildChannelsPanel } from './seltools.js';
 import { installBrushTools } from './brushes.js';
+import { installPaint2 } from './paint2.js';
 import { installViewExtras, buildNavigatorPanel, buildInfoPanel, buildHistogramPanel } from './view2.js';
 import { mixIntoMask } from './selectx.js';
 import { buildPathsPanel, buildCharacterPanel, installTypeCommands, warpTextDialog } from './panels2.js';
@@ -1016,7 +1017,7 @@ export function createPhotoEditor(root) {
       KeyE: () => (mod && e.shiftKey && e.altKey ? P.cmd.stampVisible() : mod ? (e.shiftKey ? P.cmd.mergeVisible() : P.cmd.mergeDown()) : cycle(['eraser', 'bgEraser', 'magicEraser'], e.shiftKey)),
       KeyN: () => (mod && e.shiftKey ? P.cmd.newLayer() : mod ? D.newDocDialog(P) : null),
       KeyO: () => (mod ? P.cmd.open() : P.setTool(P.tool === 'dodge' ? 'burn' : 'dodge')),
-      KeyS: () => (mod ? P.cmd.saveProject() : P.setTool('clone')),
+      KeyS: () => (mod ? P.cmd.saveProject() : cycle(['clone', 'patternStamp'], e.shiftKey)),
       KeyC: () => (mod ? P.cmd.copy(e.shiftKey) : P.setTool('crop')),
       KeyX: () => (mod && e.shiftKey ? P.cmd.liquify() : mod ? P.cmd.cut() : P.swapColors()),
       KeyV: () => (mod ? P.cmd.paste() : P.setTool('move')),
@@ -1124,6 +1125,7 @@ export function createPhotoEditor(root) {
   installPathTools(P);
   installSelectionTools(P);
   installBrushTools(P);
+  installPaint2(P);
   installViewExtras(P, { stage });
   installTypeCommands(P, PT);
   P.emit('tool', P.tool);
@@ -1840,6 +1842,7 @@ function buildMenus(P) {
       ] },
       '-',
       { label: '브러시 사전 설정 정의… (선택 영역의 어두운 부분)', disabled: no(), action: () => C.defineBrush() },
+      { label: '패턴 정의… (선택 영역 또는 전체)', disabled: no(), action: () => C.definePattern() },
     ],
     '이미지': () => [
       { label: '조정', disabled: no(), submenu: adjustItems },

@@ -327,3 +327,12 @@ body.mobile .ph-samview { max-height: 50vh; }
 .ph-histo { width: 100%; height: auto; background: #18191c; border-radius: 4px; }
 .ph-histo-mode { display: flex; align-items: center; gap: 8px; font-size: var(--fs-s); }
 .ph-histo-stats { font-size: var(--fs-s); color: var(--text-dim); }
+/* toolbar flyout: the tools hidden in a slot */
+.ph-flyout { position: fixed; z-index: 800; display: flex; flex-direction: column; min-width: 210px; padding: 4px; background: var(--bg-2); border: 1px solid var(--line-2); border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,.45); }
+.ph-flyout[hidden] { display: none; }
+.ph-fly-item { display: grid; grid-template-columns: 22px 1fr auto; align-items: center; gap: 8px; min-height: 0; height: calc(32px * var(--ui-scale)); padding: 0 8px; border: 0; border-radius: 5px; background: none; text-align: left; color: var(--text-dim); }
+.ph-fly-item:hover { background: var(--bg-4); color: var(--text); }
+.ph-fly-item.on { color: var(--text); background: var(--accent-soft); }
+.ph-fly-item kbd { font: 600 11px ui-monospace, monospace; color: var(--text-faint); }
+/* the corner mark of a slot with more tools, easier to see */
+.ph-tool .ph-more { border-width: 0 0 6px 6px !important; }
