@@ -8,7 +8,8 @@ import { openModal, formRow, toast, showPanel } from './common.js';
 import { FORMATS, EXPORT_PRESETS, exportRange, exportSequence, exportFrame } from '../export.js';
 import { createSyntheticMedia, detectScenes, mediaStatus, getRuntime, audioSyncOffsets, AUDIO_FILE_FORMATS, audioFileFormatSupport, extractAudioFile, importFiles } from '../media.js';
 import { clipEnd, clipsOnTrack, videoTracks, audioTracks, isTimed, mediaTimeAt, hasSpeedRamp, sourceOut } from '../model.js';
-import { ASR_MODELS, ASR_LANGUAGES, transcribeSequence, createCaptionTrack } from '../captions.js';
+import { ASR_MODELS, ASR_LANGUAGES, transcribeSequence, createCaptionTrack, stripSoundTags } from '../captions.js';
+import { geminiSettings, transcribeWithGemini } from '../ai.js';
 import { silentIntervals, cutSilence, detectBeats, addBeatMarkers, createSlideshow } from '../features.js';
 import { TRANSITIONS } from '../effects.js';
 
@@ -476,25 +477,46 @@ export function openAutoCaptionDialog() {
     toast('타임라인에 소리가 있는 클립이 없습니다');
     return;
   }
+  const engine = select([
+    ['whisper', 'Whisper — 이 브라우저 안에서 (무료)'],
+    ['gemini', `Gemini — 더 정확할 수 있음 (API 키 필요${geminiSettings.key ? '' : ', 아직 없음'})`],
+  ], geminiSettings.key ? 'gemini' : 'whisper');
   const model = select(ASR_MODELS, 'onnx-community/whisper-base');
+  const modelRow = formRow('인식 모델', model);
   const language = select(ASR_LANGUAGES, 'korean');
   const range = select([['all', '시퀀스 전체'], ['inout', '시작(In)~끝(Out) 표시 구간']], s.inPoint != null || s.outPoint != null ? 'inout' : 'all');
   const maxChars = select([['18', '짧게 (18자)'], ['28', '보통 (28자)'], ['42', '길게 (42자)'], ['999', '나누지 않음']], '28');
+  const stripTags = check(true, '괄호 속 소리 설명 빼기 — (음악), [박수], (끝끝)처럼 말이 아닌 괄호 글자');
   const prog = progressBar();
   const status = note('');
+  const whisperNote = note('Whisper 음성 인식 모델을 이 브라우저 안에서 실행합니다. 소리는 외부 서버로 보내지 않지만, 처음 한 번은 인터넷에서 라이브러리와 모델(40~250MB)을 내려받아야 합니다. 짧은 외침이나 음악이 섞인 말은 엉뚱하게 받아 적기 쉽습니다.');
+  const geminiNote = note('섞인 소리를 Google Gemini로 보내 받아 적습니다(3분씩 나눠 보냄). AI 편집 패널 ▸ 설정에 API 키가 있어야 하고, 사용량에 따라 요금이나 무료 한도가 적용됩니다. 시간 위치가 조금 어긋날 수 있습니다.');
+  const syncEngine = () => {
+    const g = engine.value === 'gemini';
+    modelRow.hidden = g;
+    whisperNote.hidden = g;
+    geminiNote.hidden = !g;
+  };
+  engine.addEventListener('change', syncEngine);
+  syncEngine();
   let running = false;
+  const token = { controller: null };
   openModal({
     title: '자동 자막 (음성 인식)',
     width: '560px',
+    onClose: () => token.controller?.abort(),
     body: [
+      formRow('인식 엔진', engine),
       formRow('언어', language),
-      formRow('인식 모델', model),
+      modelRow,
       formRow('범위', range),
       formRow('자막 한 줄 길이', maxChars),
+      formRow('', stripTags.el),
       prog.el,
       status,
-      note('Whisper 음성 인식 모델을 이 브라우저 안에서 실행합니다. 소리는 외부 서버로 보내지 않지만, 처음 한 번은 인터넷에서 라이브러리와 모델(40~250MB)을 내려받아야 합니다.'),
-      h('div.note.warn', 'claude.ai 보기 화면처럼 외부 다운로드가 막힌 곳에서는 작동하지 않습니다. 이 기능은 개발 환경에서 실제 모델로 시험해 보지 못했습니다(다운로드 차단). 결과가 이상하면 SRT 자막 가져오기를 쓰세요.'),
+      whisperNote,
+      geminiNote,
+      h('div.note.warn', 'claude.ai 보기 화면처럼 외부 연결이 막힌 곳에서는 두 엔진 모두 작동하지 않습니다. 결과가 이상하면 다른 엔진을 쓰거나 SRT 자막 가져오기를 쓰세요. 틀린 글자는 AI 편집 ▸ 대본에서 고칠 수 있습니다.'),
     ],
     buttons: [
       { label: '닫기' },
@@ -503,29 +525,36 @@ export function openAutoCaptionDialog() {
           if (running) return false;
           running = true;
           const r = exportRange(range.value);
+          const onStatus = (text, f) => {
+            status.textContent = text;
+            prog.set(f);
+          };
           try {
-            const cues = await transcribeSequence({
-              seq: store.seq,
-              start: r.start,
-              end: r.end,
-              model: model.value,
-              language: language.value,
-              onStatus: (text, f) => {
-                status.textContent = text;
-                prog.set(f);
-              },
-            });
+            let cues;
+            if (engine.value === 'gemini') {
+              if (!geminiSettings.key) throw new Error('Gemini API 키가 없습니다. AI 편집 패널 ▸ 설정에서 넣으세요.');
+              token.controller = new AbortController();
+              cues = await transcribeWithGemini({ seq: store.seq, start: r.start, end: r.end, language: language.value, onStatus, signal: token.controller.signal });
+            } else {
+              cues = await transcribeSequence({ seq: store.seq, start: r.start, end: r.end, model: model.value, language: language.value, onStatus });
+            }
             prog.set(1);
+            let removed = 0;
+            if (stripTags.box.checked) ({ cues, removed } = stripSoundTags(cues));
             const final = splitCues(cues, parseInt(maxChars.value, 10));
-            if (!final.length) status.textContent = '알아들은 말이 없습니다.';
+            const tagNote = removed ? ` 괄호 설명 ${removed}개는 뺐습니다.` : '';
+            if (!final.length) status.textContent = `알아들은 말이 없습니다.${tagNote}`;
             else {
               createCaptionTrack(final, '자동 자막');
-              status.textContent = `자막 ${final.length}개를 새 비디오 트랙에 넣었습니다. 틀린 글자는 텍스트 클립을 선택해 효과 컨트롤에서 고치세요.`;
+              status.textContent = `자막 ${final.length}개를 새 비디오 트랙에 넣었습니다.${tagNote} 틀린 글자는 AI 편집 ▸ 대본에서 고치세요.`;
             }
           } catch (err) {
-            console.error(err);
-            status.textContent = `실패: ${err.message || err}`;
+            if (err?.name !== 'AbortError') {
+              console.error(err);
+              status.textContent = `실패: ${err.message || err}`;
+            }
           }
+          token.controller = null;
           running = false;
           return false;
         },

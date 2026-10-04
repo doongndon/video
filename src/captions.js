@@ -92,6 +92,26 @@ export async function transcribeSequence({ seq, start, end, model, language, onS
   return cues;
 }
 
+// (음악), [박수], （笑） — sound descriptions, which Whisper also makes up on shouts and music.
+// Music notes are removed but the words between them (lyrics) are kept.
+const SOUND_TAGS = /\([^()]*\)|\[[^\[\]]*\]|（[^（）]*）|【[^【】]*】/g;
+
+/** Remove bracketed sound descriptions; cues left without words are dropped. Returns {cues, removed}. */
+export function stripSoundTags(cues) {
+  let removed = 0;
+  const out = [];
+  for (const c of cues) {
+    const text = c.text
+      .replace(SOUND_TAGS, () => { removed++; return ' '; })
+      .replace(/[♪♫]/g, ' ')
+      .replace(/[ \t]+/g, ' ')
+      .replace(/ *\n */g, '\n')
+      .trim();
+    if (/[\p{L}\p{N}]/u.test(text)) out.push({ ...c, text });
+  }
+  return { cues: out, removed };
+}
+
 /** Put caption cues on a new video track as styled text clips. Returns the number of clips. */
 export function createCaptionTrack(cues, label = '자막') {
   const s = store.seq;

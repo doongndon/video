@@ -7,7 +7,7 @@ import { playback } from '../playback.js';
 import * as edit from '../edit.js';
 import { commands as c } from '../commands.js';
 import { h } from '../util.js';
-import { showPanel, toast, closeMenus } from './common.js';
+import { showPanel, toast, closeMenus, panelHooks } from './common.js';
 import { icon } from './icons.js';
 import { quickApi } from './quick-panel.js';
 import { menubarApi } from './menubar.js';
@@ -20,11 +20,11 @@ import { duplicateClips } from '../features.js';
 const MQ = '(max-width: 760px), (pointer: coarse) and (max-height: 540px)';
 const LAND = '(orientation: landscape)';
 const SHEET_PANELS = {
-  'pg-top-left': ['source', 'effectControls', 'quick', 'mixer', 'scopes', 'multicam'],
+  'pg-top-left': ['source', 'effectControls', 'quick', 'ai', 'mixer', 'scopes', 'multicam'],
   'pg-bottom-left': ['project', 'effects', 'markers', 'history'],
 };
 const PANEL_NAMES = {
-  source: '소스', effectControls: '조정 (효과 컨트롤)', quick: '빠른 편집', mixer: '오디오 믹서', scopes: '스코프', multicam: '멀티캠',
+  source: '소스', effectControls: '조정 (효과 컨트롤)', quick: '빠른 편집', ai: 'AI 편집 (Gemini)', mixer: '오디오 믹서', scopes: '스코프', multicam: '멀티캠',
   project: '미디어', effects: '효과', markers: '마커', history: '작업 내역',
 };
 
@@ -80,6 +80,7 @@ export function initMobile() {
   // ---------------------------------------------------------------- bottom navigation
   const navItems = [
     ['folder', '미디어', () => openSheet('project')],
+    ['ai', 'AI', () => c.ai()],
     ['text', '텍스트', () => openQuick('text')],
     ['smile', '스티커', () => openQuick('sticker')],
     ['wand', '애니메이션', () => openQuick('anim')],
@@ -120,11 +121,14 @@ export function initMobile() {
     return groups.find((g) => SHEET_PANELS[g.id].includes(panelId)) || null;
   }
 
+  let opening = false;
   function openSheet(panelId) {
     closeMenus();
     const g = groupOf(panelId);
     if (!g) return;
+    opening = true;
     showPanel(panelId);
+    opening = false;
     for (const x of groups) x.classList.toggle('m-open', x === g);
     openGroup = g;
     heads.get(g).textContent = PANEL_NAMES[panelId] || '';
@@ -149,6 +153,11 @@ export function initMobile() {
     document.body.classList.toggle('m-sheet-big', big);
     window.dispatchEvent(new Event('resize'));
   }
+
+  // menus and commands that bring a panel forward open its sheet on the phone
+  panelHooks.onShow = (id) => {
+    if (!opening && mobileApi.active && groupOf(id)) openSheet(id);
+  };
 
   // keep the sheet title in sync when the user switches tabs inside it
   store.on('focus', () => {

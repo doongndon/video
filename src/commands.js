@@ -24,6 +24,7 @@ import {
   openSilenceCutDialog, openBeatDialog, openSlideshowDialog,
 } from './ui/dialogs.js';
 import { quickApi } from './ui/quick-panel.js';
+import { aiApi } from './ui/ai-panel.js';
 
 const inSource = () => store.ui.focusPanel === 'source' && sourceApi.hasMedia?.();
 const seq = () => store.seq;
@@ -187,6 +188,10 @@ export const commands = {
   quick: (section) => {
     showPanel('quick');
     quickApi.show?.(section);
+  },
+  ai: (section = 'chat') => {
+    showPanel('ai');
+    aiApi.show?.(section);
   },
   extractAudio: () => {
     const c = sel().find((x) => x.mediaId && ['video', 'audio'].includes(store.project.media[x.mediaId]?.kind));

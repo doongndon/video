@@ -65,8 +65,12 @@ export function panelGroup(el, name, panels) {
 }
 
 /** Bring a panel to front wherever it lives. */
-export function showPanel(id) {
+/** onShow(id) runs whenever a panel is brought forward on purpose (the phone layout opens its sheet). */
+export const panelHooks = { onShow: null };
+
+export function showPanel(id, { quiet = false } = {}) {
   for (const g of groups) if (g.has(id)) g.activate(id);
+  if (!quiet) panelHooks.onShow?.(id);
 }
 
 export function toggleMaximize() {

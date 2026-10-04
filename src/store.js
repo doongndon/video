@@ -80,6 +80,17 @@ class Store extends Emitter {
     this.changed('restore');
   }
 
+  /** Remember the history position; squashSince(mark) later merges every step since into one. */
+  undoMark() {
+    return { depth: this.undoStack.length, before: this.snapshot() };
+  }
+
+  squashSince(mark, label) {
+    if (this.pending || this.undoStack.length <= mark.depth) return;
+    this.undoStack.length = mark.depth;
+    this.pushUndo(label, mark.before);
+  }
+
   pushUndo(label, before) {
     if (this.snapshot() === before) return;
     this.undoStack.push({ label, snapshot: before });

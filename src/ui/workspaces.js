@@ -20,7 +20,7 @@ export function applyWorkspace(id) {
     root.style.setProperty(k, v);
     savePref(`split${k}`, v);
   }
-  for (const tab of ws.tabs) showPanel(tab);
+  for (const tab of ws.tabs) showPanel(tab, { quiet: true });
   savePref('workspace', id);
   window.dispatchEvent(new Event('resize'));
 }

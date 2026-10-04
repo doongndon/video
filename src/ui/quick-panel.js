@@ -333,7 +333,9 @@ export function createQuickPanel() {
           item('무음 구간 자동 삭제', '말 사이 조용한 부분을 잘라 붙입니다 (점프 컷)', () => openSilenceCutDialog()),
           item('비트 마커', '음악의 박자마다 마커를 찍거나 영상을 자릅니다', () => openBeatDialog()),
           item('사진 슬라이드쇼', '사진 여러 장을 전환·천천히 확대와 함께 이어 붙입니다', () => openSlideshowDialog()),
-          item('자동 자막', '말소리를 글자로 (인터넷 필요)', () => openAutoCaptionDialog()),
+          item('자동 자막', '말소리를 글자로 (인터넷 필요, Whisper 또는 Gemini)', () => openAutoCaptionDialog()),
+          item('AI 편집 도우미', '말로 요청하면 Gemini가 자르고·자막 고치고·꾸밉니다 (API 키 필요)', () => window.montage?.commands.ai('chat')),
+          item('대본으로 편집', '자막을 한 줄씩 보며 고치고, 필요 없는 줄을 영상에서 잘라 냅니다', () => window.montage?.commands.ai('script')),
           item('장면 전환 감지', '장면이 바뀌는 곳마다 자르기', () => openSceneDetectDialog()),
           item('손떨림 보정', '선택한 영상에 보정 효과를 넣고 분석합니다', () => {
             const c = store.selectedClips().find((x) => x.kind === 'video');
