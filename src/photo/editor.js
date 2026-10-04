@@ -10,6 +10,7 @@ import { History } from './history.js';
 import * as SEL from './selection.js';
 import { TOOL_BY_ID } from './tools.js';
 import { ADJUSTMENTS, FILTERS } from './adjust.js';
+import './fx2.js';
 import * as IO from './io.js';
 import * as D from './pdialogs.js';
 import { installLayerCommands, layerMenuItems } from './layercmds.js';
@@ -1758,7 +1759,8 @@ function buildMenus(P) {
   const filterGroups = () => {
     const groups = {};
     for (const [id, f] of Object.entries(FILTERS)) (groups[f.group] ||= []).push({ label: `${f.name}${f.params.length ? '…' : ''}`, disabled: no(), action: () => D.filterDialog(P, id) });
-    return Object.entries(groups).map(([g, items]) => ({ label: g, submenu: items }));
+    // a group of one (Camera Raw) is a plain item, like Photoshop's
+    return Object.entries(groups).map(([g, items]) => (items.length === 1 ? items[0] : { label: g, submenu: items }));
   };
   return {
     '파일': () => [

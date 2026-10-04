@@ -119,6 +119,11 @@ const lum = (r, g, b) => 0.299 * r + 0.587 * g + 0.114 * b;
 
 /** Apply an adjustment to ImageData in place. */
 export function applyAdjustment(img, type, p) {
+  // adjustments registered by fx2.js bring their own code
+  if (ADJUSTMENTS[type]?.fn) {
+    ADJUSTMENTS[type].fn(img, p);
+    return img;
+  }
   const d = img.data;
   const n = d.length;
   if (type === 'brightness') {
@@ -359,6 +364,7 @@ export const defaultFilterParams = (id) => Object.fromEntries(FILTERS[id].params
 
 /** Apply a filter to a canvas; returns a new canvas of the same size. ctx.filter is used where it is fast. */
 export function applyFilter(canvas, id, p, { fg = '#000000', bg = '#ffffff' } = {}) {
+  if (FILTERS[id]?.fn) return FILTERS[id].fn(canvas, p, { fg, bg });
   const w = canvas.width;
   const h = canvas.height;
   const out = document.createElement('canvas');

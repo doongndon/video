@@ -419,7 +419,7 @@ export function filterDialog(P, id) {
     return undefined;
   }
   const big = P.doc.width * P.doc.height;
-  liveLayerDialog(P, { title: f.name, defs: f.params.map((d) => [...d.slice(0, 5), d[5]]), params, label: f.name, compute: (c, p) => { remember(); return run(c, p); }, slow: big > 2e6 || ['median', 'oil', 'motion', 'twirl', 'spherize', 'pinch', 'wave', 'clouds', 'edges'].includes(id) });
+  liveLayerDialog(P, { title: f.name, defs: f.params.map((d) => [...d.slice(0, 5), d[5]]), params, label: f.name, compute: (c, p) => { remember(); return run(c, p); }, slow: big > 2e6 || !!f.slow || ['median', 'oil', 'motion', 'twirl', 'spherize', 'pinch', 'wave', 'clouds', 'edges'].includes(id) });
   return undefined;
 }
 
