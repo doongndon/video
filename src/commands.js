@@ -189,9 +189,9 @@ export const commands = {
     showPanel('quick');
     quickApi.show?.(section);
   },
-  ai: (section = 'chat') => {
+  ai: (section) => {
     showPanel('ai');
-    aiApi.show?.(section);
+    if (section) aiApi.show?.(section);
   },
   extractAudio: () => {
     const c = sel().find((x) => x.mediaId && ['video', 'audio'].includes(store.project.media[x.mediaId]?.kind));

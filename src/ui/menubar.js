@@ -136,6 +136,7 @@ export function createMenubar(el) {
       { label: '마커 모두 지우기', action: c.clearMarkers },
     ],
     'AI': () => [
+      { label: 'AI로 전체 편집하기…', action: () => c.ai('auto') },
       { label: 'AI 편집 도우미 (Gemini)…', action: () => c.ai('chat') },
       { label: '대본으로 편집 (자막 고치기·줄 잘라내기)', action: () => c.ai('script') },
       { label: 'Gemini API 키 설정…', action: () => c.ai('settings') },

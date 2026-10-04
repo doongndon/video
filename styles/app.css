@@ -53,7 +53,7 @@ button.icon.on, .ibtn.on { color: var(--value); background: var(--accent-soft); 
 button:disabled { opacity: 0.4; cursor: default; }
 .ico { display: inline-flex; line-height: 0; }
 .ico svg { width: calc(16px * var(--ui-scale)); height: calc(16px * var(--ui-scale)); }
-input[type=text], input[type=number], select, textarea { background: var(--bg); border: 1px solid var(--line-2); border-radius: 5px; padding: 4px 7px; min-height: var(--ctl-h); }
+input[type=text], input[type=number], input[type=search], input[type=password], select, textarea { background: var(--bg); border: 1px solid var(--line-2); border-radius: 5px; padding: 4px 7px; min-height: var(--ctl-h); }
 input[type=color] { width: 40px; height: calc(24px * var(--ui-scale)); padding: 0; border: 1px solid var(--line-2); border-radius: 4px; background: none; }
 input[type=range] { accent-color: var(--accent); }
 input[type=checkbox] { width: 16px; height: 16px; accent-color: var(--accent); }
@@ -432,6 +432,34 @@ label.check { display: inline-flex; align-items: center; gap: 6px; cursor: point
 .ai-field input[type=password], .ai-field input[type=text] { flex: 1; min-width: 0; font-family: ui-monospace, Menlo, Consolas, monospace; }
 .ai-list { margin: 0; padding-left: 18px; display: grid; gap: 4px; color: var(--text-dim); }
 .ai a { color: var(--value); }
+.ai-styles { display: grid; grid-template-columns: repeat(auto-fill, minmax(calc(150px * var(--ui-scale)), 1fr)); gap: 6px; }
+.ai-style { display: grid; gap: 2px; text-align: left; padding: 8px 10px; min-height: 56px; align-content: start; }
+.ai-style small { color: var(--text-faint); font-size: var(--fs-xs); line-height: 1.35; }
+.ai-style.on { border-color: var(--accent); background: var(--accent-soft); }
+.ai-style.on b { color: var(--value); }
+.ai-steps { display: grid; gap: 2px; border: 1px solid var(--line); border-radius: 8px; padding: 4px 8px; }
+.ai-step-row { display: grid; gap: 1px; padding: 5px 0; border-bottom: 1px solid var(--line); }
+.ai-step-row:last-child { border-bottom: none; }
+.ai-step-row label { display: flex; flex-wrap: nowrap; align-items: flex-start; gap: 8px; }
+.ai-step-row label > input { flex: none; margin-top: 3px; }
+.ai-step-row label > span { display: grid; gap: 1px; min-width: 0; }
+.ai-details { border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; display: grid; gap: 8px; }
+.ai-details[open] { padding-bottom: 10px; }
+.ai-details > summary { cursor: pointer; color: var(--text-dim); padding: 4px 2px; }
+.ai-details > .ai-steps { border: none; padding: 0 2px; }
+.ai-gobar { position: sticky; bottom: -12px; margin: 0 -10px -12px; padding: 8px 10px calc(8px + env(safe-area-inset-bottom, 0px)); background: var(--bg-2); border-top: 1px solid var(--line); z-index: 2; }
+.ai-step-row small { color: var(--text-faint); font-size: var(--fs-xs); }
+.ai-step-row.off b { color: var(--text-faint); }
+.ai-st-line { display: flex; gap: 6px; padding-left: 26px; font-size: var(--fs-s); min-height: 0; }
+.ai-st-line:empty, .ai-st:empty + .ai-st-msg:empty { display: none; }
+.ai-st.done { color: var(--ok); }
+.ai-st.fail, .ai-st.fail + .ai-st-msg { color: var(--danger); }
+.ai-st.skip, .ai-st.skip + .ai-st-msg { color: var(--text-faint); }
+.ai-st-msg { color: var(--text-dim); overflow-wrap: anywhere; }
+.ai-subopts { display: flex; flex-wrap: wrap; gap: 4px 14px; padding: 0 4px; }
+.ai-go { flex: 1; min-height: calc(40px * var(--ui-scale)); font-size: calc(15px * var(--ui-scale)); font-weight: 700; }
+.ai-result { display: grid; gap: 6px; }
+.ai-result .ai-msg { max-width: 100%; }
 .qp-row { display: flex; flex-wrap: wrap; gap: 6px; }
 .qp-slider { display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: center; }
 .qp-slider input[type=range] { width: 100%; }
@@ -492,7 +520,14 @@ body.mobile #pg-top-left, body.mobile #pg-bottom-left {
   transform: translateY(115%); transition: transform .22s ease; box-shadow: 0 -10px 28px rgba(0,0,0,.55); visibility: hidden;
 }
 body.mobile #pg-top-left.m-open, body.mobile #pg-bottom-left.m-open { transform: none; visibility: visible; }
-body.mobile.m-sheet-big #pg-top-left, body.mobile.m-sheet-big #pg-bottom-left { height: calc(100dvh - var(--m-nav-h) - 56px - env(safe-area-inset-top, 0px)); }
+/* portrait: the sheet starts right under the preview and its play controls (top set from mobile.js) */
+body.mobile:not(.m-land) #pg-top-left, body.mobile:not(.m-land) #pg-bottom-left { top: var(--m-sheet-top, 46dvh); height: auto; }
+body.mobile.m-sheet-big:not(.m-land) #pg-top-left, body.mobile.m-sheet-big:not(.m-land) #pg-bottom-left { top: var(--m-bar-bottom, 52px); }
+/* the bottom navigation already switches panels: no second tab row inside sheets */
+body.mobile #pg-top-left > .tabs, body.mobile #pg-bottom-left > .tabs { display: none; }
+/* typing in a sheet (on-screen keyboard up): the sheet takes the whole screen */
+body.mobile.m-typing #pg-top-left.m-open, body.mobile.m-typing #pg-bottom-left.m-open { top: 0; bottom: 0; height: auto; width: auto !important; left: 0; border-radius: 0; z-index: 90; padding-top: env(safe-area-inset-top, 0px); }
+body.mobile.m-typing .m-grip { display: none; }
 body.mobile .m-sheet-head { display: flex; align-items: center; gap: 6px; padding: 4px 6px 0 12px; flex-shrink: 0; position: relative; }
 body.mobile .m-sheet-name { flex: 1; font-weight: 700; padding-top: 10px; }
 .m-grip { position: absolute; left: 50%; top: 2px; transform: translateX(-50%); width: 64px; height: 18px; min-height: 0; padding: 0; background: none; border: none; }
@@ -502,7 +537,7 @@ body.mobile .tabs { height: 40px; }
 body.mobile .tabs .tab { padding: 0 12px; }
 body.mobile .toasts { bottom: calc(var(--m-nav-h) + 72px + env(safe-area-inset-bottom, 0px)); width: calc(100vw - 32px); }
 body.mobile .toast { max-width: 100%; text-align: center; }
-body.mobile input[type=text], body.mobile input[type=number], body.mobile input[type=search], body.mobile select, body.mobile textarea { font-size: 16px; }
+body.mobile input[type=text], body.mobile input[type=number], body.mobile input[type=search], body.mobile input[type=password], body.mobile select, body.mobile textarea { font-size: 16px; }
 body.mobile button { min-height: 36px; }
 body.mobile .menu { min-width: 220px; max-width: 92vw; font-size: 15px; }
 body.mobile .menu .item { padding: 11px 16px 11px 30px; }

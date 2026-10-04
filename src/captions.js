@@ -92,6 +92,36 @@ export async function transcribeSequence({ seq, start, end, model, language, onS
   return cues;
 }
 
+/** Split long recognised segments into readable caption cues, spreading time by text length. */
+export function splitCues(cues, maxChars) {
+  const out = [];
+  for (const cue of cues) {
+    const text = cue.text.replace(/\s+/g, ' ').trim();
+    if (text.length <= maxChars) {
+      out.push({ ...cue, text });
+      continue;
+    }
+    const words = text.split(' ');
+    const parts = [];
+    let cur = '';
+    for (const w of words) {
+      if (cur && (cur + ' ' + w).length > maxChars) {
+        parts.push(cur);
+        cur = w;
+      } else cur = cur ? `${cur} ${w}` : w;
+    }
+    if (cur) parts.push(cur);
+    const total = parts.reduce((n, p) => n + p.length, 0) || 1;
+    let t = cue.start;
+    for (const p of parts) {
+      const d = ((cue.end - cue.start) * p.length) / total;
+      out.push({ start: t, end: t + d, text: p });
+      t += d;
+    }
+  }
+  return out;
+}
+
 // (음악), [박수], （笑） — sound descriptions, which Whisper also makes up on shouts and music.
 // Music notes are removed but the words between them (lyrics) are kept.
 const SOUND_TAGS = /\([^()]*\)|\[[^\[\]]*\]|（[^（）]*）|【[^【】]*】/g;

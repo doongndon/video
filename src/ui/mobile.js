@@ -131,6 +131,7 @@ export function initMobile() {
     opening = false;
     for (const x of groups) x.classList.toggle('m-open', x === g);
     openGroup = g;
+    placeSheets();
     heads.get(g).textContent = PANEL_NAMES[panelId] || '';
     document.body.classList.add('m-sheet-open');
     window.dispatchEvent(new Event('resize'));
@@ -142,6 +143,7 @@ export function initMobile() {
   }
 
   function closeSheet() {
+    document.body.classList.remove('m-typing');
     for (const x of groups) x.classList.remove('m-open');
     openGroup = null;
     document.body.classList.remove('m-sheet-open');
@@ -153,6 +155,34 @@ export function initMobile() {
     document.body.classList.toggle('m-sheet-big', big);
     window.dispatchEvent(new Event('resize'));
   }
+
+  // portrait sheets start right under the preview and its play controls, so playback stays usable
+  const program = document.getElementById('pg-top-right');
+  function placeSheets() {
+    if (!mobileApi.active) return;
+    const root = document.documentElement.style;
+    root.setProperty('--m-sheet-top', `${Math.round(program.getBoundingClientRect().bottom)}px`);
+    root.setProperty('--m-bar-bottom', `${Math.round(top.getBoundingClientRect().bottom)}px`);
+  }
+  new ResizeObserver(placeSheets).observe(program);
+  window.addEventListener('resize', placeSheets);
+
+  // typing in a sheet: the on-screen keyboard takes half the screen, so the sheet takes the rest
+  const typable = (el) => el?.matches?.('textarea, input:not([type]), input[type=text], input[type=search], input[type=password], input[type=number], [contenteditable=""], [contenteditable="true"]');
+  let typingTimer = null;
+  document.addEventListener('focusin', (e) => {
+    if (!mobileApi.active || !typable(e.target) || !e.target.closest('.m-open')) return;
+    clearTimeout(typingTimer);
+    document.body.classList.add('m-typing');
+  });
+  document.addEventListener('focusout', () => {
+    clearTimeout(typingTimer);
+    // focus may be moving to the next field: decide after it lands
+    typingTimer = setTimeout(() => {
+      const a = document.activeElement;
+      if (!(typable(a) && a.closest('.m-open'))) document.body.classList.remove('m-typing');
+    }, 120);
+  });
 
   // menus and commands that bring a panel forward open its sheet on the phone
   panelHooks.onShow = (id) => {

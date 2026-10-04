@@ -11,10 +11,11 @@ import {
   geminiSettings, saveGeminiSettings, listGeminiModels, runAssistant, AI_TOOLS, API_KEY_PAGE,
 } from '../ai.js';
 import { openAutoCaptionDialog } from './dialogs.js';
+import { AUTO_STYLES, AUTO_STEPS, runAutoEdit } from '../autoedit.js';
 
 export const aiApi = {};
 
-const SECTIONS = [['chat', '도우미', 'sparkle'], ['script', '대본', 'text'], ['settings', '설정', 'gear']];
+const SECTIONS = [['auto', '전체 편집', 'ai'], ['chat', '도우미', 'sparkle'], ['script', '대본', 'text'], ['settings', '설정', 'gear']];
 
 const PROMPTS = [
   ['자막 맞춤법 고치기', '자막(텍스트 클립)의 맞춤법과 띄어쓰기를 고쳐 줘. 뜻과 말투는 바꾸지 마.'],
@@ -30,7 +31,7 @@ const PROMPTS = [
 const keyHint = () => h('div.note', 'Gemini API 키는 Google AI Studio에서 무료로 만들 수 있습니다: ', h('a', { href: API_KEY_PAGE, target: '_blank', rel: 'noopener' }, 'aistudio.google.com/apikey'));
 
 export function createAiPanel() {
-  let section = loadPref('ai.section', 'chat');
+  let section = loadPref('ai.section', 'auto');
   const tabs = h('div.qp-tabs', SECTIONS.map(([id, name, ic]) => {
     const b = h('button.qp-tab', { onclick: () => show(id), title: name }, icon(ic), h('span', name));
     b.dataset.sec = id;
@@ -42,7 +43,7 @@ export function createAiPanel() {
   let refreshers = [];
 
   function show(id) {
-    section = SECTIONS.some(([s]) => s === id) ? id : 'chat';
+    section = SECTIONS.some(([s]) => s === id) ? id : 'auto';
     savePref('ai.section', section);
     tabs.querySelectorAll('.qp-tab').forEach((b) => b.classList.toggle('on', b.dataset.sec === section));
     refreshers = [];
@@ -51,6 +52,121 @@ export function createAiPanel() {
   }
   function refresh() {
     if (visible) for (const r of refreshers) r();
+  }
+
+  // ---------------------------------------------------------------- whole-video edit
+  const auto = { running: false, controller: null, states: {}, summary: null };
+
+  function autoView() {
+    const prefs = loadPref('ai.auto', {});
+    let style = prefs.style || 'vlog';
+    const steps = new Set(prefs.steps || AUTO_STEPS.map(([id]) => id));
+    const sub = { mistakes: true, title: true, emphasis: true, spelling: true, ...(prefs.sub || {}) };
+    const save = () => savePref('ai.auto', { style, steps: [...steps], sub, len: lenSel.value, open: details.open });
+
+    const styleBtns = h('div.ai-styles', AUTO_STYLES.map((st) => {
+      const b = h('button.ai-style', { onclick: () => { style = st.id; save(); syncStyles(); }, 'aria-pressed': 'false' }, h('b', st.name), h('small', st.desc));
+      b.dataset.id = st.id;
+      return b;
+    }));
+    const syncStyles = () => styleBtns.querySelectorAll('.ai-style').forEach((b) => { const on = b.dataset.id === style; b.classList.toggle('on', on); b.setAttribute('aria-pressed', String(on)); });
+    const lenSel = h('select', { 'aria-label': '목표 길이' },
+      [['style', '스타일 기본 (쇼츠는 60초)'], ['0', '줄이지 않음'], ['30', '약 30초'], ['60', '약 60초'], ['90', '약 90초'], ['180', '약 3분'], ['300', '약 5분']].map(([v, t]) => h('option', { value: v }, t)));
+    lenSel.value = prefs.len || 'style';
+    lenSel.addEventListener('change', save);
+    const stepRows = AUTO_STEPS.map(([id, name, desc]) => {
+      const box = h('input', { type: 'checkbox', checked: steps.has(id) });
+      box.addEventListener('change', () => { if (box.checked) steps.add(id); else steps.delete(id); save(); });
+      const state = h('span.ai-st');
+      const msg = h('span.ai-st-msg');
+      const row = h('div.ai-step-row', h('label.inline', box, h('span', h('b', name), h('small', desc))), h('div.ai-st-line', state, msg));
+      row.dataset.id = id;
+      return { id, row, state, msg };
+    });
+    const subBox = (key, label) => {
+      const b = h('input', { type: 'checkbox', checked: !!sub[key] });
+      b.addEventListener('change', () => { sub[key] = b.checked; save(); });
+      return h('label.inline', b, label);
+    };
+    const subOpts = h('div.ai-subopts', subBox('mistakes', '말 실수·반복 잘라내기'), subBox('title', '오프닝 제목'), subBox('emphasis', '강조 문구·스티커'), subBox('spelling', '자막 맞춤법'));
+    const extra = h('textarea.ai-input', { rows: 2, placeholder: '추가로 바라는 점 (선택) 예) 고양이 나오는 부분 위주로 / 마지막에 구독 문구', 'aria-label': '추가 요청' });
+    const details = h('details.ai-details', h('summary', '세부 설정 · 진행 상황 (할 일 고르기, 추가 요청)'),
+      h('div.ai-steps', stepRows.map((r) => r.row)), subOpts, extra);
+    details.open = !!prefs.open;
+    details.addEventListener('toggle', () => { prefs.open = details.open; savePref('ai.auto', { ...loadPref('ai.auto', {}), open: details.open }); });
+    const startBtn = h('button.primary.ai-go', { onclick: start }, '✨ 전체 편집 시작');
+    const stopBtn = h('button', { onclick: () => auto.controller?.abort(), hidden: true }, '멈추기');
+    const keyNote = h('div.note');
+    const result = h('div.ai-result');
+
+    function paint() {
+      for (const r of stepRows) {
+        const st = auto.states[r.id];
+        r.row.classList.toggle('off', !steps.has(r.id));
+        r.state.textContent = !st ? '' : { run: '⏳', done: '✓', skip: '–', fail: '✗' }[st.state];
+        r.state.className = `ai-st ${st?.state || ''}`;
+        r.msg.textContent = st?.msg || '';
+      }
+      startBtn.hidden = auto.running;
+      stopBtn.hidden = !auto.running;
+      startBtn.disabled = !steps.size;
+      keyNote.textContent = geminiSettings.key
+        ? `Gemini(${geminiSettings.model || '자동 선택'})가 자막을 읽고 내용 편집을 합니다. 자막이 없으면 Gemini로 만듭니다.`
+        : 'Gemini 키가 없습니다: 자막은 Whisper(처음 한 번 약 80MB 내려받기)로 만들고, 내용 편집(길이 맞추기·강조 문구 등)은 건너뜁니다. 설정 탭에서 키를 넣으면 전부 됩니다.';
+      result.replaceChildren();
+      if (auto.summary) {
+        result.append(h('div.ai-msg.model', auto.summary.text || '전체 편집을 마쳤습니다.'),
+          h('div.inline', h('button.small', {
+            onclick: () => {
+              if (store.undoStack.at(-1)?.label === auto.summary.undoLabel) store.undo();
+              else toast('그 뒤에 다른 편집이 있어 여기서 되돌릴 수 없습니다. 작업 내역 패널을 쓰세요.');
+            },
+          }, '전체 편집 되돌리기'), h('span.note', '마음에 안 드는 부분은 도우미에게 말로 고쳐 달라고 할 수 있습니다.')));
+      }
+    }
+
+    async function start() {
+      if (auto.running) return;
+      const st = AUTO_STYLES.find((x) => x.id === style);
+      const len = lenSel.value === 'style' ? st.targetLen || 0 : parseInt(lenSel.value, 10) || 0;
+      auto.running = true;
+      auto.summary = null;
+      auto.states = {};
+      auto.controller = new AbortController();
+      details.open = true; // show the progress of each step
+      paint();
+      try {
+        const res = await runAutoEdit({ style, steps, targetLen: len, extra: extra.value.trim(), ...sub }, {
+          signal: auto.controller.signal,
+          onStep: (id, state, msg) => {
+            const prev = auto.states[id];
+            auto.states[id] = { state, msg: state === 'run' && !msg ? prev?.msg || '진행 중…' : msg };
+            paint();
+          },
+        });
+        const failed = Object.values(auto.states).filter((x) => x.state === 'fail').length;
+        auto.summary = { text: [res.text, failed ? `${failed}단계는 실패했습니다(위 ✗ 표시). 나머지는 적용됐습니다.` : ''].filter(Boolean).join('\n\n'), undoLabel: store.undoStack.at(-1)?.label };
+      } catch (err) {
+        auto.summary = { text: err?.name === 'AbortError' ? '멈췄습니다. 그때까지 한 편집은 남아 있습니다(실행 취소 한 번으로 되돌리기).' : `실패: ${err?.message || err}`, undoLabel: store.undoStack.at(-1)?.label };
+      }
+      auto.running = false;
+      auto.controller = null;
+      paint();
+    }
+
+    syncStyles();
+    refreshers.push(paint);
+    return [
+      h('div.ai-card',
+        h('b', 'AI로 전체 편집하기'),
+        h('div.note', '타임라인에 촬영한 영상(과 음악)을 넣고 스타일을 고른 뒤 시작하세요. 자르기·자막·제목·전환·색감·음악을 한 번에 하고, 결과는 실행 취소 한 번으로 모두 되돌릴 수 있습니다.')),
+      h('div.qp-title', h('span', '스타일')), styleBtns,
+      h('label.ai-field', h('span', '목표 길이 (AI가 덜 중요한 부분을 잘라 맞춤)'), lenSel),
+      details,
+      keyNote,
+      result,
+      h('div.ai-row.ai-gobar', startBtn, stopBtn),
+    ];
   }
 
   // ---------------------------------------------------------------- assistant chat
@@ -170,7 +286,8 @@ export function createAiPanel() {
     const findIn = h('input', { type: 'search', placeholder: '찾을 말', 'aria-label': '찾을 말' });
     const repIn = h('input', { type: 'text', placeholder: '바꿀 말', 'aria-label': '바꿀 말' });
     const repBtn = h('button.small', { onclick: replaceAll }, '모두 바꾸기');
-    const cutBtn = h('button.primary', { onclick: cutChecked }, '선택한 줄 잘라내기');
+    const cutBtn = h('button.primary', { onclick: cutChecked, title: '체크한 줄의 시간 구간을 영상·소리까지 모든 트랙에서 잘라 내고 빈자리를 당깁니다' }, '영상에서 잘라내기');
+    const delBtn = h('button', { onclick: deleteChecked, title: '영상은 그대로 두고 체크한 자막만 지웁니다' }, '자막만 지우기');
     const selInfo = h('span.ai-selinfo');
     const empty = h('div.ai-card',
       h('b', '자막이 없습니다'),
@@ -180,8 +297,8 @@ export function createAiPanel() {
       h('div.ai-row', h('span', '자막 트랙'), trackSel, h('button.small', { onclick: () => openAutoCaptionDialog(), title: '말소리를 글자로 바꿔 새 자막 트랙 만들기' }, '자동 자막…')),
       h('div.ai-row', findIn, repIn, repBtn),
       list,
-      h('div.ai-row.ai-cutbar', selInfo, h('button.small', { onclick: () => { checked.clear(); renderList(); } }, '선택 해제'), cutBtn),
-      h('div.note', '줄을 누르면 그 위치로 갑니다. 글자를 고치면 자막이 바로 바뀝니다. 체크한 줄의 시간 구간을 모든 트랙에서 잘라 내고 빈자리를 당깁니다(영상·소리 함께).'));
+      h('div.ai-row.ai-cutbar', selInfo, h('button.small', { onclick: () => { checked.clear(); renderList(); } }, '선택 해제'), delBtn, cutBtn),
+      h('div.note', '시간을 누르면 그 위치로 갑니다. 글자를 고치면 자막이 바로 바뀝니다. "자막만 지우기"는 잘못 받아 적은 줄을 없애고, "영상에서 잘라내기"는 그 말을 한 구간을 영상·소리까지 잘라 내고 빈자리를 당깁니다.'));
 
     trackSel.addEventListener('change', () => {
       scriptTrack = trackSel.value;
@@ -235,6 +352,18 @@ export function createAiPanel() {
     function updateSel() {
       selInfo.textContent = checked.size ? `${checked.size}줄 선택` : '';
       cutBtn.disabled = !checked.size;
+      delBtn.disabled = !checked.size;
+    }
+    function deleteChecked() {
+      const s = store.seq;
+      const ids = [...checked].filter((id) => s.clips[id]);
+      if (!ids.length) return;
+      store.transact('자막 지우기', () => {
+        for (const id of ids) delete s.clips[id];
+      });
+      store.pruneSelection?.();
+      checked.clear();
+      toast(`자막 ${ids.length}줄을 지웠습니다`);
     }
     function markCurrent() {
       const t = store.ui.playhead;
@@ -336,7 +465,7 @@ export function createAiPanel() {
     ];
   }
 
-  const VIEWS = { chat: chatView, script: scriptView, settings: settingsView };
+  const VIEWS = { auto: autoView, chat: chatView, script: scriptView, settings: settingsView };
 
   aiApi.show = (id) => show(id);
   store.on('change', refresh);

@@ -293,8 +293,10 @@ function timeIn(t, name = '시간') {
   if (!Number.isFinite(v)) throw new Error(`${name} 값이 숫자가 아닙니다`);
   return Math.max(0, v);
 }
+// tracks the current request must leave alone (whole-video edit keeps background music continuous)
+let keepTracks = new Set();
 function unlockedTracks() {
-  return seqOf().tracks.filter((t) => !t.locked).map((t) => t.id);
+  return seqOf().tracks.filter((t) => !t.locked && !keepTracks.has(t.id)).map((t) => t.id);
 }
 /** A video track (not V1) free over [a, b], created above the others when none is. */
 function freeVideoTrack(a, b) {
@@ -582,11 +584,12 @@ const SYSTEM = [
  * onEvent({type:'tool', name, label, args, result|error}) for each tool call.
  * Returns {text}. All edits made during the request are merged into one undo step.
  */
-export async function runAssistant(prompt, { history = [], onEvent = () => {}, signal, maxRounds = 10 } = {}) {
+export async function runAssistant(prompt, { history = [], onEvent = () => {}, signal, maxRounds = 10, keepTrackIds = [] } = {}) {
   const contents = history.slice(-8).map((m) => ({ role: m.role, parts: [{ text: m.text }] }));
   contents.push({ role: 'user', parts: [{ text: `[현재 타임라인 정보]\n${JSON.stringify(timelineContext())}\n\n[요청]\n${prompt}` }] });
   const mark = store.undoMark();
   let edits = 0;
+  keepTracks = new Set(keepTrackIds);
   try {
     for (let round = 0; round < maxRounds; round++) {
       const d = await generate({ systemInstruction: { parts: [{ text: SYSTEM }] }, contents, tools: DECLARATIONS, generationConfig: { temperature: 0.2 } }, signal);
@@ -619,6 +622,7 @@ export async function runAssistant(prompt, { history = [], onEvent = () => {}, s
     }
     return { text: '요청이 길어져 중간에 멈췄습니다. 지금까지 한 편집은 남아 있습니다.', edits };
   } finally {
+    keepTracks = new Set();
     store.squashSince(mark, `AI 편집: ${prompt.slice(0, 24)}`);
   }
 }

@@ -3,14 +3,14 @@
 
 import { store } from '../store.js';
 import * as edit from '../edit.js';
-import { h, formatTimecode, parseTimecode, formatBytes, downloadBlob, clamp, dbToGain } from '../util.js';
+import { h, formatTimecode, parseTimecode, formatBytes, downloadBlob, clamp } from '../util.js';
 import { openModal, formRow, toast, showPanel } from './common.js';
 import { FORMATS, EXPORT_PRESETS, exportRange, exportSequence, exportFrame } from '../export.js';
 import { createSyntheticMedia, detectScenes, mediaStatus, getRuntime, audioSyncOffsets, AUDIO_FILE_FORMATS, audioFileFormatSupport, extractAudioFile, importFiles } from '../media.js';
-import { clipEnd, clipsOnTrack, videoTracks, audioTracks, isTimed, mediaTimeAt, hasSpeedRamp, sourceOut } from '../model.js';
-import { ASR_MODELS, ASR_LANGUAGES, transcribeSequence, createCaptionTrack, stripSoundTags } from '../captions.js';
+import { clipEnd, clipsOnTrack, videoTracks, audioTracks, isTimed, hasSpeedRamp, sourceOut } from '../model.js';
+import { ASR_MODELS, ASR_LANGUAGES, transcribeSequence, createCaptionTrack, stripSoundTags, splitCues } from '../captions.js';
 import { geminiSettings, transcribeWithGemini } from '../ai.js';
-import { silentIntervals, cutSilence, detectBeats, addBeatMarkers, createSlideshow } from '../features.js';
+import { silentIntervals, cutSilence, detectBeats, addBeatMarkers, createSlideshow, soundIntervals } from '../features.js';
 import { TRANSITIONS } from '../effects.js';
 
 const note = (...t) => h('div.note', ...t);
@@ -441,36 +441,6 @@ export function exportSrt() {
 
 // ---------------------------------------------------------------- auto captions (speech recognition)
 
-/** Split long recognised segments into readable caption cues, spreading time by text length. */
-export function splitCues(cues, maxChars) {
-  const out = [];
-  for (const cue of cues) {
-    const text = cue.text.replace(/\s+/g, ' ').trim();
-    if (text.length <= maxChars) {
-      out.push({ ...cue, text });
-      continue;
-    }
-    const words = text.split(' ');
-    const parts = [];
-    let cur = '';
-    for (const w of words) {
-      if (cur && (cur + ' ' + w).length > maxChars) {
-        parts.push(cur);
-        cur = w;
-      } else cur = cur ? `${cur} ${w}` : w;
-    }
-    if (cur) parts.push(cur);
-    const total = parts.reduce((n, p) => n + p.length, 0) || 1;
-    let t = cue.start;
-    for (const p of parts) {
-      const d = ((cue.end - cue.start) * p.length) / total;
-      out.push({ start: t, end: t + d, text: p });
-      t += d;
-    }
-  }
-  return out;
-}
-
 export function openAutoCaptionDialog() {
   const s = store.seq;
   if (!Object.values(s.clips).some((c) => c.kind === 'audio' || c.kind === 'nest')) {
@@ -564,44 +534,6 @@ export function openAutoCaptionDialog() {
 }
 
 // ---------------------------------------------------------------- auto ducking
-
-/** Sequence-time intervals where the given tracks carry audible sound (from waveform peaks). */
-export function soundIntervals(seq, trackIds, thresholdDb, { step = 0.05, minGap = 0.5, minLen = 0.2 } = {}) {
-  const thr = dbToGain(thresholdDb);
-  const raw = [];
-  for (const tid of trackIds) {
-    const track = seq.tracks.find((t) => t.id === tid);
-    if (!track || track.muted) continue;
-    for (const c of clipsOnTrack(seq, tid)) {
-      if (c.kind !== 'audio' || c.enabled === false) continue;
-      const p = getRuntime(c.mediaId).peaks;
-      if (!p) continue;
-      let open = null;
-      for (let t = c.start; t < clipEnd(c); t += step) {
-        const mt = mediaTimeAt(c, t);
-        const i0 = Math.max(0, Math.floor(mt * p.rate));
-        const i1 = Math.min(p.data.length, i0 + Math.max(1, Math.ceil(step * p.rate * Math.abs(c.speed || 1))));
-        let m = 0;
-        for (let i = i0; i < i1; i++) m = Math.max(m, p.data[i]);
-        if (m >= thr) {
-          if (open == null) open = t;
-        } else if (open != null) {
-          raw.push([open, t]);
-          open = null;
-        }
-      }
-      if (open != null) raw.push([open, clipEnd(c)]);
-    }
-  }
-  raw.sort((a, b) => a[0] - b[0]);
-  const merged = [];
-  for (const iv of raw) {
-    const last = merged[merged.length - 1];
-    if (last && iv[0] - last[1] < minGap) last[1] = Math.max(last[1], iv[1]);
-    else merged.push([...iv]);
-  }
-  return merged.filter(([a, b]) => b - a >= minLen);
-}
 
 export function openDuckingDialog() {
   const s = store.seq;
