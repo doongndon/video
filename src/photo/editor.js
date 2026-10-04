@@ -21,6 +21,7 @@ import { installSelectionTools, buildChannelsPanel } from './seltools.js';
 import { installBrushTools } from './brushes.js';
 import { installPaint2 } from './paint2.js';
 import { installActions, buildActionsPanel } from './actions.js';
+import { installEdit2 } from './edit2.js';
 import { installViewExtras, buildNavigatorPanel, buildInfoPanel, buildHistogramPanel } from './view2.js';
 import { mixIntoMask } from './selectx.js';
 import { buildPathsPanel, buildCharacterPanel, installTypeCommands, warpTextDialog } from './panels2.js';
@@ -1028,7 +1029,7 @@ export function createPhotoEditor(root) {
       KeyU: () => (mod ? (e.shiftKey ? D.adjustDialog(P, 'desaturate') : D.adjustDialog(P, 'hueSat')) : P.setTool('shape')),
       KeyB: () => (mod ? D.adjustDialog(P, 'colorBalance') : cycle(['brush', 'pencil', 'colorReplace', 'mixer'], e.shiftKey)),
       KeyG: () => (mod ? (e.altKey ? P.cmd.toggleClip() : e.shiftKey ? P.cmd.ungroup() : P.cmd.groupLayers()) : P.setTool(e.shiftKey ? (P.tool === 'gradient' ? 'bucket' : 'gradient') : P.tool === 'bucket' ? 'bucket' : 'gradient')),
-      KeyF: () => (mod ? D.repeatFilter(P) : null),
+      KeyF: () => (mod ? (e.shiftKey ? P.cmd.fade() : D.repeatFilter(P)) : null),
       KeyW: () => (mod ? null : cycle(['objSel', 'quickSel', 'wand'], e.shiftKey)),
       KeyQ: () => (mod ? null : P.cmd.quickMask()),
       F6: () => (e.shiftKey && !mod ? P.cmd.feather() : null),
@@ -1128,6 +1129,7 @@ export function createPhotoEditor(root) {
   installSelectionTools(P);
   installBrushTools(P);
   installPaint2(P);
+  installEdit2(P);
   installViewExtras(P, { stage });
   installTypeCommands(P, PT);
   installActions(P); // last: it wraps every command so it can record them
@@ -1824,6 +1826,8 @@ function buildMenus(P) {
       { label: '붙여넣기', key: `${mod}V`, disabled: no(), action: () => C.paste() },
       { label: '지우기 (선택 영역)', key: 'Delete', disabled: no(), action: () => C.clear() },
       '-',
+      { label: '희미하게 하기… (마지막 작업)', key: `${mod}Shift+F`, disabled: no(), action: () => C.fade() },
+      '-',
       { label: '칠…', key: 'Shift+F5', disabled: no(), action: () => D.fillDialog(P) },
       { label: '내용 인식 채우기 (선택 영역을 주변으로)', disabled: no() || !P.doc?.selection, action: () => C.contentAwareFill() },
       { label: '획 (선택 영역 테두리)…', disabled: no(), action: () => D.strokeDialog(P) },
@@ -1844,6 +1848,8 @@ function buildMenus(P) {
         { label: '가로로 뒤집기', action: () => C.transformLayer('flipH') },
         { label: '세로로 뒤집기', action: () => C.transformLayer('flipV') },
       ] },
+      { label: '내용 인식 비율…', key: `${mod}Alt+Shift+C`, disabled: no(), action: () => C.contentAwareScale() },
+      { label: '퍼펫 뒤틀기…', disabled: no(), action: () => C.puppetWarp() },
       '-',
       { label: '브러시 사전 설정 정의… (선택 영역의 어두운 부분)', disabled: no(), action: () => C.defineBrush() },
       { label: '패턴 정의… (선택 영역 또는 전체)', disabled: no(), action: () => C.definePattern() },
@@ -1854,6 +1860,8 @@ function buildMenus(P) {
       '-',
       { label: '이미지 크기…', key: `${mod}Alt+I`, disabled: no(), action: () => D.imageSizeDialog(P) },
       { label: '캔버스 크기…', key: `${mod}Alt+C`, disabled: no(), action: () => D.canvasSizeDialog(P) },
+      { label: '모두 나타내기 (캔버스 밖 부분까지)', disabled: no(), action: () => C.revealAll() },
+      { label: '복제 (새 문서로)', disabled: no(), action: () => C.duplicateDoc() },
       { label: '이미지 회전', disabled: no(), submenu: [
         { label: '180°', action: () => C.rotateCanvas('180') },
         { label: '90° 시계 방향', action: () => C.rotateCanvas('cw') },
