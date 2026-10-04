@@ -19,7 +19,8 @@ function isTyping(target) {
 
 export function installShortcuts() {
   window.addEventListener('keydown', (e) => {
-    if (menusOpen()) return;
+    // the photo editor has its own shortcuts
+    if (menusOpen() || document.body.classList.contains('photo-mode')) return;
     if (isTyping(e.target)) return;
     const mod = modKey(e);
     const { shiftKey: shift, altKey: alt } = e;

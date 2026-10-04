@@ -126,6 +126,16 @@ export const commands = {
   exportCaptions: () => exportSrt(),
   exportMedia: () => openExportDialog(),
   exportFrame: () => programApi.saveFrame?.(),
+  frameToPhoto: async () => {
+    playback.stop();
+    toast('현재 프레임을 사진 편집으로 보내는 중…');
+    const { exportFrameCanvas } = await import('./export.js');
+    const { openInPhoto } = await import('./mode.js');
+    const { formatTimecode } = await import('./util.js');
+    const canvas = await exportFrameCanvas();
+    await openInPhoto(canvas, `${seq().name || '프레임'} ${formatTimecode(store.ui.playhead, seq().fps).replace(/:/g, '-')}`);
+  },
+  photoMode: () => import('./mode.js').then(({ setMode }) => setMode('photo')),
   linkMedia,
   renameProject: async () => {
     const n = await promptDialog('프로젝트 이름 바꾸기', '프로젝트 이름', store.project.name);

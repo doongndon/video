@@ -149,6 +149,14 @@ export function createProjectPanel() {
     store.ui.selectedMedia.clear();
   }
 
+  async function openImageInPhoto(id) {
+    const m = store.project.media[id];
+    const img = runtime.get(id)?.image;
+    if (!m || !img) return toast('이미지를 아직 불러오지 못했습니다');
+    const [{ canvasFromImage }, { openInPhoto }] = await Promise.all([import('../photo/io.js'), import('../mode.js')]);
+    await openInPhoto(canvasFromImage(img), m.name.replace(/\.[^.]+$/, ''), id);
+  }
+
   function openInSource(id) {
     const m = store.project.media[id];
     if (!m) return;
@@ -433,6 +441,7 @@ export function createProjectPanel() {
       const videos = selIds.filter((x) => store.project.media[x]?.kind === 'video');
       showMenu([
         { label: '소스 모니터에서 열기', disabled: !real || st !== 'ready', action: () => openInSource(id) },
+        m.kind === 'image' ? { label: '사진 편집에서 열기 (레이어·보정·PSD)', disabled: st !== 'ready', action: () => openImageInPhoto(id) } : null,
         { label: '재생헤드에 삽입', key: ',', disabled: st !== 'ready', action: () => edit.placeMedia(id, { mode: 'insert' }) },
         { label: '재생헤드에 덮어쓰기', key: '.', disabled: st !== 'ready', action: () => edit.placeMedia(id, { mode: 'overwrite' }) },
         { label: '시퀀스 끝에 이어 붙이기', disabled: st !== 'ready', action: () => appendToEnd(selIds) },

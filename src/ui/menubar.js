@@ -8,6 +8,7 @@ import { showMenu, closeMenus, UI_SCALES, uiScale } from './common.js';
 import { LABEL_COLORS } from '../model.js';
 import { TEMPLATES } from '../templates.js';
 import { WORKSPACES } from './workspaces.js';
+import { appMode, setMode } from '../mode.js';
 
 const mod = isMac ? '⌘' : 'Ctrl+';
 
@@ -30,6 +31,7 @@ export function createMenubar(el) {
       '-',
       { label: '내보내기…', key: `${mod}M`, action: c.exportMedia },
       { label: '현재 프레임 저장 (PNG)', key: `${mod}Shift+E`, action: c.exportFrame },
+      { label: '현재 프레임을 사진 편집에서 열기', action: c.frameToPhoto },
       { label: '자막 내보내기 (.srt)', action: c.exportCaptions },
       '-',
       { label: '샘플 프로젝트 열기', action: c.loadSample },
@@ -205,34 +207,69 @@ export function createMenubar(el) {
   };
 
   menubarApi.menus = menus;
+  menubarApi.videoMenus = menus;
   el.append(h('span.brand', 'Montage'));
+  // 영상 / 사진: the two editors share this bar; each brings its own menus
+  const modeBtns = [['video', '영상 편집'], ['photo', '사진 편집']].map(([id, label]) => h('button.mode-btn', { 'data-mode': id, 'aria-pressed': 'false', onclick: () => setMode(id) }, label));
+  el.append(h('div.mode-switch', { role: 'group', 'aria-label': '편집기 바꾸기' }, modeBtns));
+  const menuWrap = h('div.menu-btns');
+  el.append(menuWrap);
   const buttons = [];
-  for (const [name, items] of Object.entries(menus)) {
-    const b = h('button.menu-btn', name);
-    const open = () => {
-      const r = b.getBoundingClientRect();
-      showMenu(items, r.left, r.bottom + 2);
-      buttons.forEach((x) => x.classList.remove('open'));
-      b.classList.add('open');
-    };
-    b.addEventListener('click', (e) => {
-      e.stopPropagation();
-      if (b.classList.contains('open')) closeMenus();
-      else open();
-    });
-    b.addEventListener('pointerenter', () => {
-      if (buttons.some((x) => x.classList.contains('open') && x !== b) && document.querySelector('.menu')) open();
-    });
-    buttons.push(b);
-    el.append(b);
-  }
+  const renderMenus = () => {
+    closeMenus();
+    buttons.length = 0;
+    menuWrap.replaceChildren();
+    for (const [name, items] of Object.entries(menubarApi.menus)) {
+      const b = h('button.menu-btn', name);
+      const open = () => {
+        const r = b.getBoundingClientRect();
+        showMenu(items, r.left, r.bottom + 2);
+        buttons.forEach((x) => x.classList.remove('open'));
+        b.classList.add('open');
+      };
+      b.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (b.classList.contains('open')) closeMenus();
+        else open();
+      });
+      b.addEventListener('pointerenter', () => {
+        if (buttons.some((x) => x.classList.contains('open') && x !== b) && document.querySelector('.menu')) open();
+      });
+      buttons.push(b);
+      menuWrap.append(b);
+    }
+  };
+  renderMenus();
   const name = h('span.project-name');
   const saved = h('span.saved');
-  el.append(h('span.spacer'), name, saved,
-    h('button', { onclick: c.guide, title: '처음 쓰는 분을 위한 안내', style: { marginLeft: '8px' } }, '시작 가이드'),
-    h('button.primary', { onclick: c.exportMedia, style: { marginLeft: '6px' } }, '내보내기'));
-  const refresh = () => { name.textContent = store.project.name; };
+  const guideBtn = h('button', { onclick: () => (appMode.isPhoto() ? appMode.P.menus['도움말']()[0].action() : c.guide()), title: '처음 쓰는 분을 위한 안내', style: { marginLeft: '8px' } }, '시작 가이드');
+  const exportBtn = h('button.primary', { onclick: () => (appMode.isPhoto() ? appMode.P.exportDialog() : c.exportMedia()), style: { marginLeft: '6px' } }, '내보내기');
+  el.append(h('span.spacer'), name, saved, guideBtn, exportBtn);
+  const refresh = () => {
+    const P = appMode.isPhoto() ? appMode.P : null;
+    name.textContent = P ? (P.doc ? `${P.doc.name} · ${P.doc.width}×${P.doc.height}` : '사진 편집') : store.project.name;
+    guideBtn.textContent = P ? '단축키' : '시작 가이드';
+    guideBtn.title = P ? '사진 편집 단축키' : '처음 쓰는 분을 위한 안내';
+    for (const b of modeBtns) {
+      const on = b.dataset.mode === appMode.current;
+      b.classList.toggle('on', on);
+      b.setAttribute('aria-pressed', String(on));
+    }
+  };
   store.on('change', refresh);
-  store.on('saved', (d) => { saved.textContent = `자동 저장됨 ${d.toLocaleTimeString('ko-KR')}`; });
+  store.on('saved', (d) => { if (!appMode.isPhoto()) saved.textContent = `자동 저장됨 ${d.toLocaleTimeString('ko-KR')}`; });
+  let photoHooked = false;
+  appMode.on((m) => {
+    menubarApi.menus = m === 'photo' && appMode.P ? appMode.P.menus : menus;
+    if (appMode.P && !photoHooked) {
+      photoHooked = true;
+      appMode.P.on('doc', refresh);
+      appMode.P.on('history', refresh);
+      appMode.P.on('saved', () => { if (appMode.isPhoto()) saved.textContent = `자동 저장됨 ${new Date().toLocaleTimeString('ko-KR')}`; });
+    }
+    saved.textContent = '';
+    renderMenus();
+    refresh();
+  });
   refresh();
 }

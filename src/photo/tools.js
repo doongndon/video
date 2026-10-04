@@ -1,0 +1,1409 @@
+// Photo editor tools. A tool gets pointer events in document coordinates plus the editor context
+// `E` (current doc, colours, tool options, view and helpers) and draws its own overlay.
+
+import { makeCanvas, cloneCanvas, newLayer, textBox, boxCorners, SHAPES } from './doc.js';
+import * as SEL from './selection.js';
+import { FONT_CATEGORIES } from '../fonts.js';
+
+const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+const hexRgb = (hex) => {
+  const n = parseInt(String(hex).slice(1), 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+};
+export const rgbHex = (r, g, b) => `#${[r, g, b].map((v) => Math.round(v).toString(16).padStart(2, '0')).join('')}`;
+
+// ---------------------------------------------------------------- brush dabs
+
+const dabCache = new Map();
+/** A round brush dab of diameter `size`, hardness 0..1, in `color` (alpha = brush shape). */
+function dab(size, hardness, color, hard = false) {
+  const key = `${size}|${hardness}|${color}|${hard}`;
+  let c = dabCache.get(key);
+  if (c) return c;
+  const s = Math.max(1, Math.ceil(size));
+  c = makeCanvas(s, s);
+  const g = c.getContext('2d');
+  if (hard) {
+    g.fillStyle = color;
+    if (s <= 2) g.fillRect(0, 0, s, s);
+    else {
+      const img = g.createImageData(s, s);
+      const [r, gg, b] = hexRgb(color);
+      const rr = s / 2;
+      for (let y = 0; y < s; y++) {
+        for (let x = 0; x < s; x++) {
+          if ((x + 0.5 - rr) ** 2 + (y + 0.5 - rr) ** 2 <= rr * rr) {
+            const o = (y * s + x) * 4;
+            img.data[o] = r;
+            img.data[o + 1] = gg;
+            img.data[o + 2] = b;
+            img.data[o + 3] = 255;
+          }
+        }
+      }
+      g.putImageData(img, 0, 0);
+    }
+  } else {
+    const r = s / 2;
+    const grad = g.createRadialGradient(r, r, 0, r, r, r);
+    const [cr, cg, cb] = hexRgb(color);
+    const h = Math.min(0.99, Math.max(0, hardness));
+    grad.addColorStop(0, `rgba(${cr},${cg},${cb},1)`);
+    grad.addColorStop(h, `rgba(${cr},${cg},${cb},1)`);
+    grad.addColorStop(1, `rgba(${cr},${cg},${cb},0)`);
+    g.fillStyle = grad;
+    g.fillRect(0, 0, s, s);
+  }
+  if (dabCache.size > 60) dabCache.clear();
+  dabCache.set(key, c);
+  return c;
+}
+
+/** Falloff weight of a dab at distance d from its centre (radius r, hardness h). */
+const falloff = (d, r, h) => (d >= r ? 0 : d <= r * h ? 1 : 1 - (d - r * h) / Math.max(1e-6, r * (1 - h)));
+
+// ---------------------------------------------------------------- strokes (brush, pencil, eraser, mask, clone, heal)
+
+/**
+ * A paint stroke on the active layer (or its mask). Dabs accumulate in a buffer so the stroke's
+ * opacity caps like Photoshop's; the layer = pre-stroke pixels + buffer, clipped to the selection.
+ */
+class Stroke {
+  constructor(E, mode, o) {
+    const doc = E.doc;
+    this.E = E;
+    this.mode = mode; // paint | erase | clone | heal
+    this.o = o;
+    this.layer = doc.active;
+    this.before = doc.capture();
+    this.onMask = !!(E.editMask && this.layer.mask);
+    if (this.onMask) {
+      this.base = this.layer.mask.canvas;
+      this.g = doc.editMask(this.layer);
+      this.ox = this.layer.mask.x;
+      this.oy = this.layer.mask.y;
+    } else {
+      this.g = doc.editPixels(this.layer, { x: 0, y: 0, w: doc.width, h: doc.height });
+      // pre-stroke pixels at the (possibly grown) canvas size
+      this.base = cloneCanvas(this.layer.canvas);
+      this.ox = this.layer.x;
+      this.oy = this.layer.y;
+    }
+    const tc = this.g.canvas;
+    this.buf = makeCanvas(tc.width, tc.height);
+    this.bg = this.buf.getContext('2d');
+    this.sel = doc.selection?.canvas || null;
+    this.last = null;
+    this.rest = 0;
+    this.dirty = null;
+    if (mode === 'clone') {
+      this.src = o.sampleAll ? doc.flatten() : E.layerAsDocCanvas(this.layer, this.base);
+      this.srcOff = o.cloneOffset;
+    }
+  }
+
+  color() {
+    if (this.onMask) return this.mode === 'erase' ? '#ffffff' : (E_lum(this.o.color) >= 128 ? '#ffffff' : '#000000');
+    return this.o.color;
+  }
+
+  to(p, pressure = 1) {
+    const size = Math.max(1, this.o.size * (this.o.pressureSize ? Math.max(0.1, pressure) : 1));
+    if (!this.last) {
+      this.stamp(p.x, p.y, size);
+      this.last = p;
+      return;
+    }
+    const step = Math.max(1, size * (this.o.spacing ?? 0.15));
+    let d = dist(this.last, p);
+    let t = this.rest;
+    const dx = (p.x - this.last.x) / (d || 1);
+    const dy = (p.y - this.last.y) / (d || 1);
+    while (t + step <= d) {
+      t += step;
+      this.stamp(this.last.x + dx * t, this.last.y + dy * t, size);
+    }
+    this.rest = t - d;
+    if (this.rest < -step) this.rest = 0;
+    d = 0;
+    this.last = p;
+    this.flush();
+  }
+
+  stamp(x, y, size) {
+    const lx = x - this.ox;
+    const ly = y - this.oy;
+    const r = size / 2;
+    const rect = { x: Math.floor(lx - r) - 1, y: Math.floor(ly - r) - 1, w: Math.ceil(size) + 3, h: Math.ceil(size) + 3 };
+    const g = this.bg;
+    g.globalAlpha = this.o.flow ?? 1;
+    if (this.mode === 'clone') {
+      const s = Math.ceil(size);
+      const t = makeCanvas(s, s);
+      const tg = t.getContext('2d');
+      tg.drawImage(this.src, -(x + this.srcOff.x - s / 2), -(y + this.srcOff.y - s / 2));
+      tg.globalCompositeOperation = 'destination-in';
+      tg.drawImage(dab(size, this.o.hardness, '#000'), 0, 0, s, s);
+      g.drawImage(t, lx - s / 2, ly - s / 2);
+    } else {
+      const col = this.mode === 'paint' ? this.color() : '#000000';
+      g.drawImage(dab(size, this.o.hardness, col, !!this.o.hard), Math.round((lx - size / 2) * (this.o.hard ? 1 : 100)) / (this.o.hard ? 1 : 100), this.o.hard ? Math.round(ly - size / 2) : ly - size / 2, Math.ceil(size), Math.ceil(size));
+    }
+    g.globalAlpha = 1;
+    if (this.sel) {
+      g.save();
+      g.beginPath();
+      g.rect(rect.x, rect.y, rect.w, rect.h);
+      g.clip();
+      g.globalCompositeOperation = 'destination-in';
+      g.drawImage(this.sel, -this.ox, -this.oy);
+      g.restore();
+    }
+    this.dirty = this.dirty ? union(this.dirty, rect) : rect;
+  }
+
+  /** Redraw the changed area of the target: pre-stroke pixels + stroke buffer. */
+  flush() {
+    const r = this.dirty;
+    if (!r) return;
+    this.dirty = null;
+    const g = this.g;
+    const tc = g.canvas;
+    const x = Math.max(0, r.x);
+    const y = Math.max(0, r.y);
+    const w = Math.min(tc.width, r.x + r.w) - x;
+    const h = Math.min(tc.height, r.y + r.h) - y;
+    if (w <= 0 || h <= 0) return;
+    g.save();
+    g.beginPath();
+    g.rect(x, y, w, h);
+    g.clip();
+    g.globalCompositeOperation = 'copy';
+    g.drawImage(this.base, 0, 0);
+    g.globalCompositeOperation = 'source-over';
+    g.globalAlpha = this.o.opacity ?? 1;
+    if (this.mode === 'heal') {
+      // show the area being healed
+      g.globalAlpha = 0.35;
+      g.globalCompositeOperation = 'source-atop';
+      g.drawImage(this.buf, 0, 0);
+    } else if (this.onMask) {
+      const reveal = this.mode === 'erase' || E_lum(this.o.color) >= 128;
+      g.globalCompositeOperation = reveal ? 'source-over' : 'destination-out';
+      g.drawImage(this.buf, 0, 0);
+    } else {
+      g.globalCompositeOperation = this.mode === 'erase' ? 'destination-out' : this.layer.lockAlpha ? 'source-atop' : 'source-over';
+      g.drawImage(this.buf, 0, 0);
+    }
+    g.restore();
+    this.layer._styled = null;
+    this.E.doc.touch(this.layer);
+    this.E.redraw();
+  }
+
+  end() {
+    this.flush();
+    if (this.mode === 'heal') heal(this);
+    this.E.commit(this.o.label || '브러시', this.before);
+  }
+}
+
+function E_lum(hex) {
+  const [r, g, b] = hexRgb(hex);
+  return 0.299 * r + 0.587 * g + 0.114 * b;
+}
+
+function union(a, b) {
+  const x = Math.min(a.x, b.x);
+  const y = Math.min(a.y, b.y);
+  return { x, y, w: Math.max(a.x + a.w, b.x + b.w) - x, h: Math.max(a.y + a.h, b.y + b.h) - y };
+}
+
+/** Spot healing: fill the painted area from its surroundings (diffusion, coarse to fine). */
+function heal(st) {
+  const g = st.g;
+  const tc = g.canvas;
+  const bd = st.buf.getContext('2d').getImageData(0, 0, tc.width, tc.height).data;
+  let x0 = tc.width;
+  let y0 = tc.height;
+  let x1 = -1;
+  let y1 = -1;
+  for (let y = 0; y < tc.height; y++) {
+    for (let x = 0; x < tc.width; x++) {
+      if (bd[(y * tc.width + x) * 4 + 3] > 20) {
+        if (x < x0) x0 = x;
+        if (x > x1) x1 = x;
+        if (y < y0) y0 = y;
+        if (y > y1) y1 = y;
+      }
+    }
+  }
+  if (x1 < 0) return;
+  const m = 6;
+  x0 = Math.max(0, x0 - m);
+  y0 = Math.max(0, y0 - m);
+  x1 = Math.min(tc.width - 1, x1 + m);
+  y1 = Math.min(tc.height - 1, y1 + m);
+  const w = x1 - x0 + 1;
+  const h = y1 - y0 + 1;
+  const bg = st.base.getContext('2d');
+  const img = bg.getImageData(x0, y0, w, h);
+  const d = img.data;
+  const hole = new Uint8Array(w * h);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (bd[((y + y0) * tc.width + x + x0) * 4 + 3] > 20) hole[y * w + x] = 1;
+  const f = new Float32Array(w * h * 4);
+  for (let i = 0; i < d.length; i++) f[i] = d[i];
+  // initial guess: average colour of the ring around the hole
+  let sum = [0, 0, 0, 0];
+  let cnt = 0;
+  for (let i = 0; i < w * h; i++) {
+    if (hole[i]) continue;
+    for (let k = 0; k < 4; k++) sum[k] += f[i * 4 + k];
+    cnt++;
+  }
+  sum = sum.map((v) => v / Math.max(1, cnt));
+  for (let i = 0; i < w * h; i++) if (hole[i]) for (let k = 0; k < 4; k++) f[i * 4 + k] = sum[k];
+  const iters = Math.min(600, 40 + Math.max(w, h) * 4);
+  for (let it = 0; it < iters; it++) {
+    for (let y = 1; y < h - 1; y++) {
+      for (let x = 1; x < w - 1; x++) {
+        const i = y * w + x;
+        if (!hole[i]) continue;
+        for (let k = 0; k < 4; k++) f[i * 4 + k] = (f[(i - 1) * 4 + k] + f[(i + 1) * 4 + k] + f[(i - w) * 4 + k] + f[(i + w) * 4 + k]) / 4;
+      }
+    }
+  }
+  // a little texture back (noise matched to the surroundings' variation)
+  for (let i = 0; i < w * h; i++) {
+    if (!hole[i]) continue;
+    const n = (Math.random() - 0.5) * 6;
+    for (let k = 0; k < 3; k++) d[i * 4 + k] = f[i * 4 + k] + n;
+    d[i * 4 + 3] = f[i * 4 + 3];
+  }
+  g.save();
+  g.globalCompositeOperation = 'copy';
+  g.drawImage(st.base, 0, 0);
+  g.restore();
+  g.putImageData(img, x0, y0);
+  st.E.doc.touch(st.layer);
+  st.E.redraw();
+}
+
+// ---------------------------------------------------------------- retouch brushes (blur, sharpen, smudge, dodge, burn, push)
+
+class Retouch {
+  constructor(E, kind, o) {
+    this.E = E;
+    this.kind = kind;
+    this.o = o;
+    this.layer = E.doc.active;
+    this.before = E.doc.capture();
+    this.g = E.doc.editPixels(this.layer, { x: 0, y: 0, w: E.doc.width, h: E.doc.height });
+    this.last = null;
+    this.carry = null;
+  }
+
+  to(p) {
+    if (!this.last) {
+      this.last = p;
+      if (this.kind !== 'smudge' && this.kind !== 'push') this.apply(p, { x: 0, y: 0 });
+      return;
+    }
+    const step = Math.max(1, this.o.size * 0.2);
+    const d = dist(this.last, p);
+    const n = Math.max(1, Math.floor(d / step));
+    for (let i = 1; i <= n; i++) {
+      const q = { x: this.last.x + ((p.x - this.last.x) * i) / n, y: this.last.y + ((p.y - this.last.y) * i) / n };
+      const prev = { x: this.last.x + ((p.x - this.last.x) * (i - 1)) / n, y: this.last.y + ((p.y - this.last.y) * (i - 1)) / n };
+      this.apply(q, { x: q.x - prev.x, y: q.y - prev.y });
+    }
+    this.last = p;
+    this.layer._styled = null;
+    this.E.doc.touch(this.layer);
+    this.E.redraw();
+  }
+
+  apply(p, mv) {
+    const g = this.g;
+    const r = this.o.size / 2;
+    const cx = p.x - this.layer.x;
+    const cy = p.y - this.layer.y;
+    const pad = this.kind === 'push' ? Math.ceil(Math.hypot(mv.x, mv.y) * 2) + 2 : 2;
+    const x0 = Math.max(0, Math.floor(cx - r - pad));
+    const y0 = Math.max(0, Math.floor(cy - r - pad));
+    const x1 = Math.min(g.canvas.width, Math.ceil(cx + r + pad));
+    const y1 = Math.min(g.canvas.height, Math.ceil(cy + r + pad));
+    const w = x1 - x0;
+    const h = y1 - y0;
+    if (w <= 2 || h <= 2) return;
+    const img = g.getImageData(x0, y0, w, h);
+    const d = img.data;
+    const src = new Uint8ClampedArray(d);
+    const k = (this.o.strength ?? 50) / 100;
+    const hard = this.o.hardness ?? 0.5;
+    const sel = this.E.doc.selection ? this.E.selAlpha(x0 + this.layer.x, y0 + this.layer.y, w, h) : null;
+    for (let y = 1; y < h - 1; y++) {
+      for (let x = 1; x < w - 1; x++) {
+        let wgt = falloff(Math.hypot(x0 + x + 0.5 - cx, y0 + y + 0.5 - cy), r, hard) * k;
+        if (sel) wgt *= sel[y * w + x] / 255;
+        if (wgt <= 0) continue;
+        const o = (y * w + x) * 4;
+        if (this.kind === 'blur' || this.kind === 'sharpen') {
+          for (let c = 0; c < 4; c++) {
+            const avg = (src[o + c] * 4 + src[o - 4 + c] + src[o + 4 + c] + src[o - w * 4 + c] + src[o + w * 4 + c] + (src[o - w * 4 - 4 + c] + src[o - w * 4 + 4 + c] + src[o + w * 4 - 4 + c] + src[o + w * 4 + 4 + c]) * 0.5) / 10;
+            const v = this.kind === 'blur' ? avg : src[o + c] + (src[o + c] - avg) * 1.5;
+            d[o + c] = src[o + c] + (v - src[o + c]) * wgt * (this.kind === 'sharpen' ? 0.6 : 1);
+          }
+        } else if (this.kind === 'dodge' || this.kind === 'burn') {
+          for (let c = 0; c < 3; c++) {
+            const v = src[o + c];
+            d[o + c] = this.kind === 'dodge' ? v + (255 - v) * wgt * 0.25 : v - v * wgt * 0.25;
+          }
+        } else if (this.kind === 'smudge' || this.kind === 'push') {
+          // sample from behind the brush movement
+          const sx = Math.round(x - mv.x * (this.kind === 'push' ? 1 : 1));
+          const sy = Math.round(y - mv.y * (this.kind === 'push' ? 1 : 1));
+          if (sx < 0 || sy < 0 || sx >= w || sy >= h) continue;
+          const so = (sy * w + sx) * 4;
+          for (let c = 0; c < 4; c++) d[o + c] = src[o + c] + (src[so + c] - src[o + c]) * wgt;
+        }
+      }
+    }
+    g.putImageData(img, x0, y0);
+  }
+
+  end() {
+    this.E.commit(this.o.label, this.before);
+  }
+}
+
+// ---------------------------------------------------------------- floating pixels (move a selection / free transform)
+
+/** Lift the selected pixels of the active raster layer into a float (removed from the layer). */
+export function liftSelection(E) {
+  const doc = E.doc;
+  const l = doc.active;
+  if (!doc.selection || l.kind !== 'raster' || !l.canvas) return null;
+  const c = makeCanvas(doc.width, doc.height);
+  const g = c.getContext('2d');
+  g.drawImage(l.canvas, l.x, l.y);
+  g.globalCompositeOperation = 'destination-in';
+  g.drawImage(doc.selection.canvas, 0, 0);
+  const lg = doc.editPixels(l);
+  lg.save();
+  lg.globalCompositeOperation = 'destination-out';
+  lg.drawImage(doc.selection.canvas, -l.x, -l.y);
+  lg.restore();
+  const b = SEL.alphaBounds(c) || { x: 0, y: 0, w: 1, h: 1 };
+  const t = makeCanvas(b.w, b.h);
+  t.getContext('2d').drawImage(c, -b.x, -b.y);
+  return { canvas: t, x: b.x, y: b.y, layerId: l.id };
+}
+
+export function dropFloat(E, f) {
+  const doc = E.doc;
+  const l = doc.layer(f.layerId);
+  if (!l) return;
+  const g = doc.editPixels(l, { x: f.x, y: f.y, w: f.canvas.width, h: f.canvas.height });
+  g.drawImage(f.canvas, f.x - l.x, f.y - l.y);
+  l._styled = null;
+}
+
+// ---------------------------------------------------------------- tool definitions
+
+const BRUSH_OPTS = [
+  ['size', '크기', 'range', 1, 500, 30],
+  ['hardness', '경도', 'range', 0, 100, 70, '%'],
+  ['opacity', '불투명도', 'range', 1, 100, 100, '%'],
+  ['flow', '흐름', 'range', 1, 100, 100, '%'],
+  ['pressureSize', '펜 압력 → 크기', 'bool', null, null, true],
+];
+
+function brushOpts(o, E, extra = {}) {
+  return { size: o.size, hardness: (o.hardness ?? 70) / 100, opacity: (o.opacity ?? 100) / 100, flow: (o.flow ?? 100) / 100, pressureSize: o.pressureSize, color: E.fg, ...extra };
+}
+
+function needRaster(E, what = '이 도구') {
+  const l = E.doc.active;
+  if (!l) return false;
+  if (l.locked) {
+    E.toast('잠긴 레이어입니다 (레이어 패널에서 잠금 해제)');
+    return false;
+  }
+  if (E.editMask && l.mask) return true;
+  if (l.kind !== 'raster') {
+    E.toast(`${what}는 일반(이미지) 레이어에서 씁니다. 레이어 ▸ 래스터화로 바꾸거나 새 레이어를 만드세요.`);
+    return false;
+  }
+  return true;
+}
+
+function pickColor(E, p, toBg) {
+  const c = E.composite();
+  const x = Math.floor(p.x);
+  const y = Math.floor(p.y);
+  if (x < 0 || y < 0 || x >= c.width || y >= c.height) return;
+  const s = E.opts('eyedropper').sample || 1;
+  const r = Math.floor(s / 2);
+  const d = c.getContext('2d').getImageData(Math.max(0, x - r), Math.max(0, y - r), s, s).data;
+  let rr = 0;
+  let gg = 0;
+  let bb = 0;
+  let n = 0;
+  for (let i = 0; i < d.length; i += 4) {
+    rr += d[i];
+    gg += d[i + 1];
+    bb += d[i + 2];
+    n++;
+  }
+  E.setColor(rgbHex(rr / n, gg / n, bb / n), toBg);
+}
+
+/** Selection mode from options + modifier keys. */
+function selMode(E, e, toolId) {
+  if (e.shiftKey && e.altKey) return 'inter';
+  if (e.shiftKey) return 'add';
+  if (e.altKey) return 'sub';
+  return E.opts(toolId).mode || 'new';
+}
+
+const SEL_MODE_OPT = ['mode', '선택 방식', 'select', null, null, 'new', [['new', '새 선택'], ['add', '더하기 (Shift)'], ['sub', '빼기 (Alt)'], ['inter', '교차']]];
+
+function marquee(id, name, key, icon, shape) {
+  return {
+    id, name, key, icon, group: 'select', cursor: 'crosshair',
+    options: [SEL_MODE_OPT, ['feather', '페더 (px)', 'range', 0, 200, 0], ['fixed', '비율', 'select', null, null, 'free', [['free', '자유'], ['1:1', '1:1'], ['4:3', '4:3'], ['16:9', '16:9'], ['9:16', '9:16']]]],
+    down(E, p, e) {
+      const s = E.doc.selection;
+      // drag inside the selection (no modifier) moves the outline
+      if (s && !e.shiftKey && !e.altKey && E.selAt(p) > 0) {
+        this.d = { moveSel: true, a: p, b: p };
+        return;
+      }
+      this.d = { a: p, b: p, mode: selMode(E, e, id) };
+    },
+    move(E, p, e) {
+      if (!this.d) return;
+      let b = p;
+      if (!this.d.moveSel) {
+        const fx = E.opts(id).fixed;
+        const ratio = e.shiftKey && this.d.mode === 'new' ? 1 : fx === 'free' ? 0 : fx.split(':').reduce((a, c) => a / c);
+        if (ratio) {
+          const w = p.x - this.d.a.x;
+          const h = p.y - this.d.a.y;
+          const sw = Math.abs(w);
+          const sh = Math.abs(h);
+          const W = Math.max(sw, sh * ratio);
+          b = { x: this.d.a.x + Math.sign(w || 1) * W, y: this.d.a.y + Math.sign(h || 1) * (W / ratio) };
+        }
+        if (e.altKey && this.d.mode === 'new') {
+          // Alt while dragging a new selection: draw from the centre
+          b = { x: p.x, y: p.y, fromCenter: true };
+        }
+      }
+      this.d.b = b;
+      E.overlay();
+    },
+    up(E) {
+      const d = this.d;
+      this.d = null;
+      if (!d) return;
+      const before = E.doc.capture();
+      if (d.moveSel) {
+        const dx = Math.round(d.b.x - d.a.x);
+        const dy = Math.round(d.b.y - d.a.y);
+        if (!dx && !dy) return;
+        const c = makeCanvas(E.doc.width, E.doc.height);
+        c.getContext('2d').drawImage(E.doc.selection.canvas, dx, dy);
+        E.doc.selection = { canvas: c };
+        E.commit('선택 영역 이동', before);
+        return;
+      }
+      const r = rectOf(d);
+      if (r.w < 2 || r.h < 2) {
+        if (d.mode === 'new' && E.doc.selection) {
+          E.doc.selection = null;
+          E.commit('선택 해제', before);
+        }
+        E.overlay();
+        return;
+      }
+      const m = SEL.shapeMask(E.doc, shape(r.x, r.y, r.w, r.h), E.opts(id).feather || 0);
+      E.doc.selection = SEL.combine(E.doc, m, d.mode);
+      E.commit(`${name}`, before);
+    },
+    overlay(E, g) {
+      const d = this.d;
+      if (!d) return;
+      if (d.moveSel) {
+        E.drawSelOffset(g, d.b.x - d.a.x, d.b.y - d.a.y);
+        return;
+      }
+      const r = rectOf(d);
+      const [x, y] = E.toScreen(r.x, r.y);
+      const w = r.w * E.view.zoom;
+      const h = r.h * E.view.zoom;
+      g.save();
+      g.setLineDash([4, 4]);
+      g.strokeStyle = '#fff';
+      g.beginPath();
+      if (id === 'ellipse') g.ellipse(x + w / 2, y + h / 2, w / 2, h / 2, 0, 0, Math.PI * 2);
+      else g.rect(x + 0.5, y + 0.5, w, h);
+      g.stroke();
+      g.lineDashOffset = 4;
+      g.strokeStyle = '#000';
+      g.stroke();
+      g.restore();
+    },
+  };
+}
+
+function rectOf(d) {
+  if (d.b.fromCenter) {
+    const w = Math.abs(d.b.x - d.a.x);
+    const h = Math.abs(d.b.y - d.a.y);
+    return { x: d.a.x - w, y: d.a.y - h, w: w * 2, h: h * 2 };
+  }
+  return { x: Math.min(d.a.x, d.b.x), y: Math.min(d.a.y, d.b.y), w: Math.abs(d.b.x - d.a.x), h: Math.abs(d.b.y - d.a.y) };
+}
+
+function strokeTool(id, name, key, icon, mode, extra = {}) {
+  return {
+    id, name, key, icon, group: extra.group || 'paint', cursor: 'brush',
+    options: extra.options || BRUSH_OPTS,
+    down(E, p, e) {
+      if (e.altKey && mode === 'paint') {
+        pickColor(E, p, false);
+        return;
+      }
+      if (mode === 'clone' && e.altKey) {
+        this.source = p;
+        E.toast('복제 원본을 정했습니다. 이제 칠할 곳을 끌어 보세요.');
+        E.overlay();
+        return;
+      }
+      if (mode === 'clone' && !this.source) {
+        E.toast('먼저 Alt(휴대폰은 "원본 정하기" 버튼)를 누른 채 복제할 곳을 누르세요');
+        return;
+      }
+      if (!needRaster(E, name)) return;
+      const o = E.opts(id);
+      const bo = brushOpts(o, E, { hard: extra.hard, label: name, sampleAll: !!o.sampleAll });
+      if (mode === 'clone') {
+        if (!this.aligned || !o.aligned) this.offset = { x: this.source.x - p.x, y: this.source.y - p.y };
+        this.aligned = true;
+        bo.cloneOffset = this.offset;
+      }
+      if (extra.hardness100) bo.hardness = 1;
+      this.st = new Stroke(E, mode, bo);
+      this.st.to(p, e.pressure || 1);
+      this.st.flush();
+    },
+    move(E, p, e) {
+      if (this.st) this.st.to(p, e.pointerType === 'pen' ? e.pressure : 1);
+    },
+    up() {
+      if (this.st) this.st.end();
+      this.st = null;
+    },
+    cancel(E) {
+      if (!this.st) return;
+      E.doc.restore(this.st.before);
+      this.st = null;
+      E.redraw();
+    },
+    overlay(E, g) {
+      if (mode === 'clone' && this.source) {
+        const [x, y] = E.toScreen(this.source.x, this.source.y);
+        g.strokeStyle = '#fff';
+        g.beginPath();
+        g.moveTo(x - 8, y);
+        g.lineTo(x + 8, y);
+        g.moveTo(x, y - 8);
+        g.lineTo(x, y + 8);
+        g.stroke();
+      }
+    },
+    setSourceHere(E) {
+      this.source = { ...E.lastPoint };
+    },
+  };
+}
+
+function retouchTool(id, name, key, icon, kind) {
+  return {
+    id, name, key, icon, group: 'retouch', cursor: 'brush',
+    options: [['size', '크기', 'range', 1, 500, 60], ['strength', '강도', 'range', 1, 100, 50, '%'], ['hardness', '경도', 'range', 0, 100, 40, '%']],
+    down(E, p) {
+      if (!needRaster(E, name)) return;
+      if (E.editMask) {
+        E.toast('마스크가 아니라 레이어 내용을 고칩니다 (레이어 축소판을 누르세요)');
+        return;
+      }
+      const o = E.opts(id);
+      this.r = new Retouch(E, kind, { size: o.size, strength: o.strength, hardness: (o.hardness ?? 40) / 100, label: name });
+      this.r.to(p);
+      E.redraw();
+    },
+    move(E, p) {
+      this.r?.to(p);
+    },
+    up() {
+      this.r?.end();
+      this.r = null;
+    },
+    cancel(E) {
+      if (!this.r) return;
+      E.doc.restore(this.r.before);
+      this.r = null;
+      E.redraw();
+    },
+  };
+}
+
+export const TOOLS = [
+  // ---- move
+  {
+    id: 'move', name: '이동', key: 'V', icon: 'move', group: 'move', cursor: 'move',
+    options: [['autoSelect', '클릭한 레이어 자동 선택', 'bool', null, null, false]],
+    down(E, p) {
+      const doc = E.doc;
+      if (E.opts('move').autoSelect) {
+        const hit = E.layerAt(p);
+        if (hit) E.selectLayer(hit.id);
+      }
+      const l = doc.active;
+      if (!l || l.kind === 'adjust') return;
+      if (l.locked) {
+        E.toast('잠긴 레이어입니다');
+        return;
+      }
+      const before = doc.capture();
+      let float = null;
+      if (doc.selection && l.kind === 'raster') float = liftSelection(E);
+      this.d = { a: p, before, float, x0: l.x, y0: l.y, mx: l.mask?.x, my: l.mask?.y, sel: doc.selection };
+      E.float = float;
+      E.redraw();
+    },
+    move(E, p, e) {
+      const d = this.d;
+      if (!d) return;
+      let dx = p.x - d.a.x;
+      let dy = p.y - d.a.y;
+      if (e.shiftKey) {
+        if (Math.abs(dx) > Math.abs(dy)) dy = 0;
+        else dx = 0;
+      }
+      dx = Math.round(dx);
+      dy = Math.round(dy);
+      const l = E.doc.active;
+      if (d.float) {
+        E.float = { ...d.float, x: d.float.x + dx, y: d.float.y + dy };
+        d.offset = { dx, dy };
+      } else {
+        l.x = d.x0 + dx;
+        l.y = d.y0 + dy;
+        if (l.mask && l.mask.linked !== false) {
+          l.mask = { ...l.mask, x: d.mx + dx, y: d.my + dy };
+        }
+        l._styled = null;
+        E.doc.touch(l);
+      }
+      E.redraw();
+    },
+    up(E) {
+      const d = this.d;
+      this.d = null;
+      if (!d) return;
+      if (d.float) {
+        const off = d.offset || { dx: 0, dy: 0 };
+        dropFloat(E, E.float || d.float);
+        E.float = null;
+        if (d.sel && (off.dx || off.dy)) {
+          const c = makeCanvas(E.doc.width, E.doc.height);
+          c.getContext('2d').drawImage(d.sel.canvas, off.dx, off.dy);
+          E.doc.selection = { canvas: c };
+        }
+      }
+      E.doc.touch(E.doc.active);
+      E.commit('이동', d.before);
+    },
+    cancel(E) {
+      if (!this.d) return;
+      E.float = null;
+      E.doc.restore(this.d.before);
+      this.d = null;
+      E.redraw();
+    },
+  },
+  // ---- selections
+  marquee('rect', '사각형 선택 윤곽', 'M', 'selRect', SEL.rectPath),
+  marquee('ellipse', '원형 선택 윤곽', 'M', 'selEllipse', SEL.ellipsePath),
+  {
+    id: 'lasso', name: '올가미', key: 'L', icon: 'lasso', group: 'select', cursor: 'crosshair',
+    options: [SEL_MODE_OPT, ['polygon', '다각형 (클릭으로 점 찍기)', 'bool', null, null, false], ['feather', '페더 (px)', 'range', 0, 200, 0]],
+    down(E, p, e) {
+      const poly = E.opts('lasso').polygon;
+      if (poly && this.d) {
+        // close when clicking near the first point
+        if (dist(p, this.d.pts[0]) * E.view.zoom < 10 && this.d.pts.length > 2) {
+          this.finish(E);
+          return;
+        }
+        this.d.pts.push(p);
+        E.overlay();
+        return;
+      }
+      this.d = { pts: [p], mode: selMode(E, e, 'lasso'), poly };
+    },
+    move(E, p) {
+      if (!this.d) return;
+      if (this.d.poly) this.d.hover = p;
+      else this.d.pts.push(p);
+      E.overlay();
+    },
+    hover(E, p) {
+      if (this.d?.poly) {
+        this.d.hover = p;
+        E.overlay();
+      }
+    },
+    up(E) {
+      if (this.d && !this.d.poly) this.finish(E);
+    },
+    dblclick(E) {
+      if (this.d?.poly) this.finish(E);
+    },
+    onKey(E, e) {
+      if (!this.d?.poly) return false;
+      if (e.key === 'Enter') this.finish(E);
+      else if (e.key === 'Escape') {
+        this.d = null;
+        E.overlay();
+      } else return false;
+      return true;
+    },
+    finish(E) {
+      const d = this.d;
+      this.d = null;
+      if (!d || d.pts.length < 3) {
+        E.overlay();
+        return;
+      }
+      const before = E.doc.capture();
+      E.doc.selection = SEL.combine(E.doc, SEL.shapeMask(E.doc, SEL.polyPath(d.pts.map((q) => [q.x, q.y])), E.opts('lasso').feather || 0), d.mode);
+      E.commit('올가미', before);
+    },
+    overlay(E, g) {
+      const d = this.d;
+      if (!d) return;
+      g.save();
+      g.strokeStyle = '#fff';
+      g.setLineDash([4, 4]);
+      g.beginPath();
+      [...d.pts, ...(d.hover ? [d.hover] : [])].forEach((q, i) => {
+        const [x, y] = E.toScreen(q.x, q.y);
+        if (i) g.lineTo(x, y);
+        else g.moveTo(x, y);
+      });
+      g.stroke();
+      g.restore();
+    },
+  },
+  {
+    id: 'wand', name: '자동 선택 (마술봉)', key: 'W', icon: 'wand', group: 'select', cursor: 'crosshair',
+    options: [SEL_MODE_OPT, ['tolerance', '허용치', 'range', 0, 255, 32], ['contiguous', '인접', 'bool', null, null, true], ['sampleAll', '모든 레이어 샘플링', 'bool', null, null, false]],
+    down(E, p, e) {
+      const o = E.opts('wand');
+      const src = o.sampleAll ? E.composite() : E.layerAsDocCanvas(E.doc.active);
+      const m = SEL.magicWand(E.doc, src, p.x, p.y, { tolerance: o.tolerance, contiguous: o.contiguous });
+      if (!m) return;
+      const before = E.doc.capture();
+      E.doc.selection = SEL.combine(E.doc, m, selMode(E, e, 'wand'));
+      E.commit('자동 선택', before);
+    },
+  },
+  // ---- crop
+  {
+    id: 'crop', name: '자르기', key: 'C', icon: 'crop', group: 'crop', cursor: 'crosshair',
+    options: [['ratio', '비율', 'select', null, null, 'free', [['free', '자유'], ['1:1', '1:1'], ['4:3', '4:3'], ['3:2', '3:2'], ['16:9', '16:9'], ['9:16', '9:16'], ['4:5', '4:5']]], ['deletePixels', '잘린 픽셀 삭제', 'bool', null, null, false]],
+    activate(E) {
+      // the whole picture to start with; dragging inside it draws a new box (like Photoshop)
+      this.r = { x: 0, y: 0, w: E.doc.width, h: E.doc.height };
+      this.fresh = true;
+      E.overlay();
+    },
+    deactivate() {
+      this.r = null;
+    },
+    down(E, p) {
+      const r = this.r || { x: 0, y: 0, w: E.doc.width, h: E.doc.height };
+      const h = this.handleAt(E, p, r);
+      this.d = { a: p, r0: { ...r }, h: h || (inside(p, r) && !this.fresh ? 'move' : 'new') };
+      this.fresh = false;
+      if (this.d.h === 'new') this.r = { x: p.x, y: p.y, w: 0, h: 0 };
+    },
+    move(E, p, e) {
+      const d = this.d;
+      if (!d) return;
+      const dx = p.x - d.a.x;
+      const dy = p.y - d.a.y;
+      let r = { ...d.r0 };
+      if (d.h === 'move') {
+        r.x += dx;
+        r.y += dy;
+      } else if (d.h === 'new') r = { x: Math.min(d.a.x, p.x), y: Math.min(d.a.y, p.y), w: Math.abs(p.x - d.a.x), h: Math.abs(p.y - d.a.y) };
+      else {
+        if (d.h.includes('l')) {
+          r.x += dx;
+          r.w -= dx;
+        }
+        if (d.h.includes('r')) r.w += dx;
+        if (d.h.includes('t')) {
+          r.y += dy;
+          r.h -= dy;
+        }
+        if (d.h.includes('b')) r.h += dy;
+      }
+      const ratio = E.opts('crop').ratio;
+      const k = e.shiftKey ? d.r0.w / Math.max(1, d.r0.h) : ratio === 'free' ? 0 : ratio.split(':').reduce((a, c) => a / c);
+      if (k && d.h !== 'move') r.h = Math.abs(r.w) / k;
+      if (r.w < 0) {
+        r.x += r.w;
+        r.w = -r.w;
+      }
+      if (r.h < 0) {
+        r.y += r.h;
+        r.h = -r.h;
+      }
+      this.r = r;
+      E.overlay();
+    },
+    up(E) {
+      // a click without dragging brings the whole-picture box back
+      if (this.d?.h === 'new' && this.r && (this.r.w < 2 || this.r.h < 2)) this.activate(E);
+      this.d = null;
+    },
+    dblclick(E) {
+      this.apply(E);
+    },
+    onKey(E, e) {
+      if (e.key === 'Enter') this.apply(E);
+      else if (e.key === 'Escape') this.activate(E);
+      else return false;
+      return true;
+    },
+    apply(E) {
+      const r = this.r;
+      if (!r || r.w < 1 || r.h < 1) return;
+      if (Math.round(r.x) === 0 && Math.round(r.y) === 0 && Math.round(r.w) === E.doc.width && Math.round(r.h) === E.doc.height) return;
+      E.cropTo({ x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.w), h: Math.round(r.h) }, E.opts('crop').deletePixels);
+      this.activate(E);
+    },
+    handleAt(E, p, r) {
+      const tol = 10 / E.view.zoom;
+      const near = (x, y) => Math.abs(p.x - x) < tol && Math.abs(p.y - y) < tol;
+      const hs = { tl: [r.x, r.y], tr: [r.x + r.w, r.y], bl: [r.x, r.y + r.h], br: [r.x + r.w, r.y + r.h], t: [r.x + r.w / 2, r.y], b: [r.x + r.w / 2, r.y + r.h], l: [r.x, r.y + r.h / 2], r: [r.x + r.w, r.y + r.h / 2] };
+      return Object.keys(hs).find((k) => near(...hs[k])) || null;
+    },
+    overlay(E, g) {
+      const r = this.r;
+      if (!r) return;
+      const [x, y] = E.toScreen(r.x, r.y);
+      const w = r.w * E.view.zoom;
+      const h = r.h * E.view.zoom;
+      g.save();
+      g.fillStyle = 'rgba(0,0,0,0.5)';
+      g.beginPath();
+      g.rect(0, 0, g.canvas.width, g.canvas.height);
+      g.rect(x, y, w, h);
+      g.fill('evenodd');
+      g.strokeStyle = '#fff';
+      g.lineWidth = 1;
+      g.strokeRect(x + 0.5, y + 0.5, w, h);
+      g.strokeStyle = 'rgba(255,255,255,0.4)';
+      for (const k of [1, 2]) {
+        g.beginPath();
+        g.moveTo(x + (w * k) / 3, y);
+        g.lineTo(x + (w * k) / 3, y + h);
+        g.moveTo(x, y + (h * k) / 3);
+        g.lineTo(x + w, y + (h * k) / 3);
+        g.stroke();
+      }
+      g.fillStyle = '#fff';
+      for (const [hx, hy] of [[0, 0], [1, 0], [0, 1], [1, 1], [0.5, 0], [0.5, 1], [0, 0.5], [1, 0.5]]) g.fillRect(x + w * hx - 4, y + h * hy - 4, 8, 8);
+      g.font = '12px sans-serif';
+      g.fillText(`${Math.round(r.w)} × ${Math.round(r.h)}  (Enter 또는 두 번 눌러 자르기)`, x + 4, y - 6 > 12 ? y - 6 : y + 16);
+      g.restore();
+    },
+  },
+  // ---- eyedropper
+  {
+    id: 'eyedropper', name: '스포이드', key: 'I', icon: 'eyedropper', group: 'crop', cursor: 'crosshair',
+    options: [['sample', '샘플 크기', 'select', null, null, 1, [[1, '1 픽셀'], [3, '3×3 평균'], [5, '5×5 평균']]]],
+    down(E, p, e) {
+      pickColor(E, p, e.altKey);
+      this.on = !e.altKey;
+    },
+    move(E, p) {
+      if (this.on) pickColor(E, p, false);
+    },
+    up() {
+      this.on = false;
+    },
+  },
+  // ---- painting
+  strokeTool('heal', '스팟 복구 브러시', 'J', 'heal', 'heal', { group: 'retouch', options: [['size', '크기', 'range', 1, 300, 30], ['hardness', '경도', 'range', 0, 100, 60, '%']] }),
+  strokeTool('brush', '브러시', 'B', 'brush', 'paint'),
+  strokeTool('pencil', '연필', 'B', 'pencil', 'paint', { hard: true, hardness100: true, options: [['size', '크기', 'range', 1, 200, 2], ['opacity', '불투명도', 'range', 1, 100, 100, '%']] }),
+  strokeTool('clone', '복제 도장', 'S', 'stamp', 'clone', { group: 'retouch', options: [...BRUSH_OPTS.slice(0, 4), ['aligned', '정렬 (끊어 칠해도 같은 간격)', 'bool', null, null, true], ['sampleAll', '모든 레이어 샘플링', 'bool', null, null, false]] }),
+  strokeTool('eraser', '지우개', 'E', 'eraser', 'erase'),
+  // ---- fills
+  {
+    id: 'bucket', name: '페인트 통', key: 'G', icon: 'bucket', group: 'fill', cursor: 'crosshair',
+    options: [['tolerance', '허용치', 'range', 0, 255, 32], ['contiguous', '인접', 'bool', null, null, true], ['sampleAll', '모든 레이어 샘플링', 'bool', null, null, false], ['opacity', '불투명도', 'range', 1, 100, 100, '%']],
+    down(E, p, e) {
+      if (e.altKey) {
+        pickColor(E, p, false);
+        return;
+      }
+      if (!needRaster(E, '페인트 통')) return;
+      const o = E.opts('bucket');
+      const doc = E.doc;
+      const l = doc.active;
+      const src = o.sampleAll ? E.composite() : E.layerAsDocCanvas(l);
+      const m = SEL.magicWand(doc, src, p.x, p.y, { tolerance: o.tolerance, contiguous: o.contiguous });
+      if (!m) return;
+      const before = doc.capture();
+      const mg = m.getContext('2d');
+      mg.globalCompositeOperation = 'source-in';
+      mg.fillStyle = E.fg;
+      mg.fillRect(0, 0, m.width, m.height);
+      if (doc.selection) {
+        mg.globalCompositeOperation = 'destination-in';
+        mg.drawImage(doc.selection.canvas, 0, 0);
+      }
+      const g = doc.editPixels(l);
+      g.globalAlpha = (o.opacity ?? 100) / 100;
+      if (l.lockAlpha) g.globalCompositeOperation = 'source-atop';
+      g.drawImage(m, -l.x, -l.y);
+      g.globalAlpha = 1;
+      g.globalCompositeOperation = 'source-over';
+      l._styled = null;
+      E.commit('페인트 통', before);
+    },
+  },
+  {
+    id: 'gradient', name: '그레이디언트', key: 'G', icon: 'gradient', group: 'fill', cursor: 'crosshair',
+    options: [['type', '종류', 'select', null, null, 'linear', [['linear', '선형'], ['radial', '방사형'], ['reflected', '반사']]], ['to', '끝 색', 'select', null, null, 'bg', [['bg', '전경색 → 배경색'], ['clear', '전경색 → 투명']]], ['opacity', '불투명도', 'range', 1, 100, 100, '%']],
+    down(E, p) {
+      if (!needRaster(E, '그레이디언트')) return;
+      const l = E.doc.active;
+      this.d = { a: p, b: p, before: E.doc.capture() };
+      E.doc.editPixels(l);
+      this.d.base = cloneCanvas(l.canvas);
+    },
+    move(E, p) {
+      if (!this.d) return;
+      this.d.b = p;
+      this.paint(E);
+    },
+    up(E) {
+      if (!this.d) return;
+      if (dist(this.d.a, this.d.b) > 1) {
+        this.paint(E);
+        E.commit('그레이디언트', this.d.before);
+      } else E.doc.restore(this.d.before);
+      this.d = null;
+      E.redraw();
+    },
+    paint(E) {
+      const { a, b, base } = this.d;
+      const doc = E.doc;
+      const l = doc.active;
+      const o = E.opts('gradient');
+      const gc = makeCanvas(doc.width, doc.height);
+      const gg = gc.getContext('2d');
+      const len = Math.max(1, dist(a, b));
+      const grad = o.type === 'linear' ? gg.createLinearGradient(a.x, a.y, b.x, b.y) : gg.createRadialGradient(a.x, a.y, 0, a.x, a.y, len);
+      const end = o.to === 'clear' ? `${E.fg}00` : E.bg;
+      if (o.type === 'reflected') {
+        const g2 = gg.createLinearGradient(a.x - (b.x - a.x), a.y - (b.y - a.y), b.x, b.y);
+        g2.addColorStop(0, end);
+        g2.addColorStop(0.5, E.fg);
+        g2.addColorStop(1, end);
+        gg.fillStyle = g2;
+      } else {
+        grad.addColorStop(0, E.fg);
+        grad.addColorStop(1, end);
+        gg.fillStyle = grad;
+      }
+      gg.fillRect(0, 0, gc.width, gc.height);
+      if (doc.selection) {
+        gg.globalCompositeOperation = 'destination-in';
+        gg.drawImage(doc.selection.canvas, 0, 0);
+      }
+      const g = l.canvas.getContext('2d');
+      g.save();
+      g.globalCompositeOperation = 'copy';
+      g.drawImage(base, 0, 0);
+      g.globalCompositeOperation = l.lockAlpha ? 'source-atop' : 'source-over';
+      g.globalAlpha = (o.opacity ?? 100) / 100;
+      g.drawImage(gc, -l.x, -l.y);
+      g.restore();
+      l._styled = null;
+      doc.touch(l);
+      E.redraw();
+    },
+    overlay(E, g) {
+      if (!this.d) return;
+      const [x1, y1] = E.toScreen(this.d.a.x, this.d.a.y);
+      const [x2, y2] = E.toScreen(this.d.b.x, this.d.b.y);
+      g.strokeStyle = '#fff';
+      g.lineWidth = 2;
+      g.beginPath();
+      g.moveTo(x1, y1);
+      g.lineTo(x2, y2);
+      g.stroke();
+    },
+  },
+  // ---- retouch
+  retouchTool('blur', '흐림 효과 브러시', null, 'drop', 'blur'),
+  retouchTool('sharpen', '선명 효과 브러시', null, 'sharpenTool', 'sharpen'),
+  retouchTool('smudge', '손가락 (문지르기)', null, 'smudge', 'smudge'),
+  retouchTool('push', '픽셀 유동화 (밀기)', null, 'push', 'push'),
+  retouchTool('dodge', '닷지 (밝게)', 'O', 'dodge', 'dodge'),
+  retouchTool('burn', '번 (어둡게)', 'O', 'burn', 'burn'),
+  // ---- text
+  {
+    id: 'text', name: '수평 문자', key: 'T', icon: 'text', group: 'type', cursor: 'text',
+    options: [['font', '글꼴', 'font', null, null, 'Noto Sans KR'], ['size', '크기 (px)', 'number', 4, 2000, 72], ['bold', '굵게', 'bool', null, null, true], ['italic', '기울임', 'bool', null, null, false], ['align', '정렬', 'select', null, null, 'left', [['left', '왼쪽'], ['center', '가운데'], ['right', '오른쪽']]]],
+    down(E, p) {
+      const hit = E.layerAt(p, (l) => l.kind === 'text');
+      if (hit) {
+        E.selectLayer(hit.id);
+        E.editText(hit);
+        return;
+      }
+      const o = E.opts('text');
+      const before = E.doc.capture();
+      const l = newLayer('text', { name: '텍스트', text: { content: '', font: o.font, size: o.size, color: E.fg, bold: o.bold, italic: o.italic, align: o.align, lineHeight: 1.2, letterSpacing: 0 } });
+      l.x = Math.round(p.x);
+      l.y = Math.round(p.y - o.size * 0.9);
+      E.addLayer(l);
+      E.editText(l, before);
+    },
+  },
+  // ---- shapes
+  {
+    id: 'shape', name: '모양', key: 'U', icon: 'shape', group: 'type', cursor: 'crosshair',
+    options: [['type', '모양', 'select', null, null, 'rect', SHAPES], ['fill', '채우기', 'select', null, null, 'fg', [['fg', '전경색'], ['bg', '배경색'], ['none', '없음']]], ['strokeWidth', '선 두께', 'range', 0, 100, 0], ['radius', '모서리 반경', 'range', 0, 300, 24]],
+    down(E, p, e) {
+      if (e.altKey) {
+        pickColor(E, p, false);
+        return;
+      }
+      this.d = { a: p, b: p };
+    },
+    move(E, p, e) {
+      if (!this.d) return;
+      let b = p;
+      if (e.shiftKey) {
+        const s = Math.max(Math.abs(p.x - this.d.a.x), Math.abs(p.y - this.d.a.y));
+        b = { x: this.d.a.x + Math.sign(p.x - this.d.a.x || 1) * s, y: this.d.a.y + Math.sign(p.y - this.d.a.y || 1) * s };
+      }
+      this.d.b = b;
+      E.overlay();
+    },
+    up(E) {
+      const d = this.d;
+      this.d = null;
+      if (!d) return;
+      const r = rectOf(d);
+      const o = E.opts('shape');
+      if (r.w < 3 && r.h < 3) {
+        E.overlay();
+        return;
+      }
+      const before = E.doc.capture();
+      const fill = o.fill === 'none' ? null : o.fill === 'bg' ? E.bg : E.fg;
+      const isLine = o.type === 'line';
+      const l = newLayer('shape', {
+        name: SHAPES.find((s) => s[0] === o.type)?.[1] || '모양',
+        shape: { type: o.type, w: Math.max(1, Math.round(r.w)), h: Math.max(isLine ? Math.max(2, o.strokeWidth || 6) : 1, Math.round(isLine ? Math.max(2, o.strokeWidth || 6) : r.h)), fill, stroke: o.strokeWidth > 0 || isLine ? (fill === E.fg ? E.bg : E.fg) : null, strokeWidth: isLine ? Math.max(2, o.strokeWidth || 6) : o.strokeWidth, radius: o.radius },
+      });
+      l.x = Math.round(r.x);
+      l.y = Math.round(isLine ? d.a.y - l.shape.h / 2 : r.y);
+      if (isLine) {
+        // a line follows the drag direction
+        const ang = (Math.atan2(d.b.y - d.a.y, d.b.x - d.a.x) * 180) / Math.PI;
+        l.shape.w = Math.max(2, Math.round(dist(d.a, d.b)));
+        l.rotation = Math.round(ang * 10) / 10;
+        l.x = Math.round((d.a.x + d.b.x) / 2 - l.shape.w / 2);
+        l.y = Math.round((d.a.y + d.b.y) / 2 - l.shape.h / 2);
+      }
+      E.addLayer(l);
+      E.commit('모양', before);
+    },
+    overlay(E, g) {
+      if (!this.d) return;
+      const r = rectOf(this.d);
+      const [x, y] = E.toScreen(r.x, r.y);
+      g.strokeStyle = '#4aa3ff';
+      g.setLineDash([4, 3]);
+      if (E.opts('shape').type === 'line') {
+        const [x1, y1] = E.toScreen(this.d.a.x, this.d.a.y);
+        const [x2, y2] = E.toScreen(this.d.b.x, this.d.b.y);
+        g.beginPath();
+        g.moveTo(x1, y1);
+        g.lineTo(x2, y2);
+        g.stroke();
+      } else g.strokeRect(x + 0.5, y + 0.5, r.w * E.view.zoom, r.h * E.view.zoom);
+      g.setLineDash([]);
+    },
+  },
+  // ---- navigation
+  {
+    id: 'hand', name: '손 (화면 이동)', key: 'H', icon: 'hand', group: 'view', cursor: 'grab',
+    options: [],
+    down(E, p, e) {
+      this.d = { sx: e.clientX, sy: e.clientY, vx: E.view.x, vy: E.view.y };
+    },
+    move(E, p, e) {
+      if (!this.d) return;
+      E.view.auto = false;
+      E.view.x = this.d.vx + (e.clientX - this.d.sx);
+      E.view.y = this.d.vy + (e.clientY - this.d.sy);
+      E.viewChanged();
+    },
+    up() {
+      this.d = null;
+    },
+  },
+  {
+    id: 'zoom', name: '돋보기', key: 'Z', icon: 'zoomIn', group: 'view', cursor: 'zoom-in',
+    options: [],
+    down(E, p, e) {
+      E.zoomAt(e.altKey ? 1 / 1.5 : 1.5, e.clientX, e.clientY);
+    },
+  },
+];
+
+export const TOOL_BY_ID = Object.fromEntries(TOOLS.map((t) => [t.id, t]));
+
+/** Toolbar groups (like Photoshop's tool slots), in order. */
+export const TOOL_GROUPS = [
+  ['move'], ['rect', 'ellipse'], ['lasso'], ['wand'], ['crop'], ['eyedropper'], ['heal'], ['brush', 'pencil'], ['clone'], ['eraser'],
+  ['gradient', 'bucket'], ['blur', 'sharpen', 'smudge', 'push'], ['dodge', 'burn'], ['text'], ['shape'], ['hand'], ['zoom'],
+];
+
+const inside = (p, r) => p.x >= r.x && p.y >= r.y && p.x <= r.x + r.w && p.y <= r.y + r.h;
+
+// ---------------------------------------------------------------- free transform
+
+/**
+ * Free transform of the active layer (or the selected pixels): drag inside to move, corners/edges to
+ * scale (Shift: free aspect), outside to rotate (Shift: 15° steps). Enter applies, Esc cancels.
+ */
+export class FreeTransform {
+  constructor(E) {
+    this.E = E;
+    const doc = E.doc;
+    const l = doc.active;
+    this.layer = l;
+    this.before = doc.capture();
+    this.vector = l.kind === 'text' || l.kind === 'shape';
+    if (this.vector) {
+      const b = l.kind === 'text' ? textBox(l) : { w: l.shape.w, h: l.shape.h };
+      this.w = b.w;
+      this.h = b.h;
+      this.cx = l.x + b.w / 2;
+      this.cy = l.y + b.h / 2;
+      this.rot = l.rotation || 0;
+      this.orig = { text: l.text && { ...l.text }, shape: l.shape && { ...l.shape } };
+    } else {
+      let src;
+      if (doc.selection) src = liftSelection(E);
+      else {
+        const ob = doc.opaqueBounds(l);
+        if (!ob) throw new Error('레이어가 비어 있습니다');
+        const c = makeCanvas(ob.w, ob.h);
+        c.getContext('2d').drawImage(l.canvas, l.x - ob.x, l.y - ob.y);
+        doc.editPixels(l);
+        l.canvas.getContext('2d').clearRect(0, 0, l.canvas.width, l.canvas.height);
+        src = { canvas: c, x: ob.x, y: ob.y, layerId: l.id };
+      }
+      this.src = src;
+      this.w = src.canvas.width;
+      this.h = src.canvas.height;
+      this.cx = src.x + this.w / 2;
+      this.cy = src.y + this.h / 2;
+      this.rot = 0;
+    }
+    this.sx = 1;
+    this.sy = 1;
+    this.update();
+  }
+
+  corners() {
+    const a = (this.rot * Math.PI) / 180;
+    const hw = (this.w * this.sx) / 2;
+    const hh = (this.h * this.sy) / 2;
+    return [[-hw, -hh], [hw, -hh], [hw, hh], [-hw, hh]].map(([x, y]) => [this.cx + x * Math.cos(a) - y * Math.sin(a), this.cy + x * Math.sin(a) + y * Math.cos(a)]);
+  }
+
+  /** Show the current transform (vector props, or a transformed float for pixels). */
+  update() {
+    const E = this.E;
+    if (this.vector) {
+      const l = this.layer;
+      if (l.kind === 'text') {
+        l.text = { ...l.text, size: Math.max(1, Math.round(this.orig.text.size * Math.abs(this.sy) * 10) / 10) };
+        const b = textBox(l);
+        l.x = Math.round(this.cx - b.w / 2);
+        l.y = Math.round(this.cy - b.h / 2);
+      } else {
+        l.shape = { ...l.shape, w: Math.max(1, Math.round(this.orig.shape.w * Math.abs(this.sx))), h: Math.max(1, Math.round(this.orig.shape.h * Math.abs(this.sy))) };
+        l.x = Math.round(this.cx - l.shape.w / 2);
+        l.y = Math.round(this.cy - l.shape.h / 2);
+      }
+      l.rotation = Math.round(this.rot * 10) / 10;
+      E.doc.touch(l);
+    } else {
+      const cs = this.corners();
+      const xs = cs.map((c) => c[0]);
+      const ys = cs.map((c) => c[1]);
+      const x0 = Math.floor(Math.min(...xs));
+      const y0 = Math.floor(Math.min(...ys));
+      const c = makeCanvas(Math.ceil(Math.max(...xs)) - x0 + 1, Math.ceil(Math.max(...ys)) - y0 + 1);
+      const g = c.getContext('2d');
+      g.imageSmoothingQuality = 'high';
+      g.translate(this.cx - x0, this.cy - y0);
+      g.rotate((this.rot * Math.PI) / 180);
+      g.scale(this.sx, this.sy);
+      g.drawImage(this.src.canvas, -this.w / 2, -this.h / 2);
+      E.float = { canvas: c, x: x0, y: y0, layerId: this.layer.id };
+    }
+    E.redraw();
+  }
+
+  hit(p) {
+    const E = this.E;
+    const tol = 9 / E.view.zoom;
+    const cs = this.corners();
+    const mids = cs.map((c, i) => [(c[0] + cs[(i + 1) % 4][0]) / 2, (c[1] + cs[(i + 1) % 4][1]) / 2]);
+    const names = ['tl', 'tr', 'br', 'bl'];
+    const midNames = ['t', 'r', 'b', 'l'];
+    for (let i = 0; i < 4; i++) if (Math.hypot(p.x - cs[i][0], p.y - cs[i][1]) < tol) return names[i];
+    for (let i = 0; i < 4; i++) if (Math.hypot(p.x - mids[i][0], p.y - mids[i][1]) < tol) return midNames[i];
+    if (pointInPoly(p, cs)) return 'move';
+    return 'rotate';
+  }
+
+  down(p) {
+    this.d = { h: this.hit(p), a: p, cx: this.cx, cy: this.cy, sx: this.sx, sy: this.sy, rot: this.rot };
+  }
+
+  move(p, e) {
+    const d = this.d;
+    if (!d) return;
+    if (d.h === 'move') {
+      this.cx = d.cx + p.x - d.a.x;
+      this.cy = d.cy + p.y - d.a.y;
+    } else if (d.h === 'rotate') {
+      const a0 = Math.atan2(d.a.y - d.cy, d.a.x - d.cx);
+      const a1 = Math.atan2(p.y - d.cy, p.x - d.cx);
+      let r = d.rot + ((a1 - a0) * 180) / Math.PI;
+      if (e.shiftKey) r = Math.round(r / 15) * 15;
+      this.rot = r;
+    } else {
+      // scale about the centre, measured in the box's own (rotated) axes
+      const a = (-d.rot * Math.PI) / 180;
+      const loc = (q) => [(q.x - d.cx) * Math.cos(a) - (q.y - d.cy) * Math.sin(a), (q.x - d.cx) * Math.sin(a) + (q.y - d.cy) * Math.cos(a)];
+      const [ax, ay] = loc(d.a);
+      const [bx, by] = loc(p);
+      let kx = d.h.includes('l') || d.h.includes('r') ? bx / (ax || 1) : 1;
+      let ky = d.h.includes('t') || d.h.includes('b') ? by / (ay || 1) : 1;
+      const corner = d.h.length === 2;
+      if (corner && !e.shiftKey) {
+        // corners keep the proportions (Shift frees them), like recent Photoshop
+        const k = Math.abs(kx) > Math.abs(ky) ? kx : ky;
+        kx = k;
+        ky = k;
+      }
+      if (this.vector && this.layer.kind === 'text') {
+        const k = corner ? (Math.abs(kx) > Math.abs(ky) ? kx : ky) : d.h === 't' || d.h === 'b' ? ky : kx;
+        kx = k;
+        ky = k;
+      }
+      this.sx = d.sx * kx;
+      this.sy = d.sy * ky;
+    }
+    this.update();
+  }
+
+  up() {
+    this.d = null;
+  }
+
+  apply() {
+    const E = this.E;
+    if (!this.vector && E.float) {
+      dropFloat(E, E.float);
+      E.float = null;
+      if (E.doc.selection) {
+        // the selection follows the pixels
+        const cs = this.corners();
+        E.doc.selection = { canvas: SEL.shapeMask(E.doc, SEL.polyPath(cs)) };
+      }
+    }
+    E.doc.touch(this.layer);
+    E.commit('자유 변형', this.before);
+  }
+
+  cancel() {
+    const E = this.E;
+    E.float = null;
+    E.doc.restore(this.before);
+    E.redraw();
+  }
+
+  overlay(g) {
+    const E = this.E;
+    const cs = this.corners().map(([x, y]) => E.toScreen(x, y));
+    g.save();
+    g.strokeStyle = '#4aa3ff';
+    g.lineWidth = 1;
+    g.beginPath();
+    cs.forEach(([x, y], i) => (i ? g.lineTo(x, y) : g.moveTo(x, y)));
+    g.closePath();
+    g.stroke();
+    g.fillStyle = '#fff';
+    g.strokeStyle = '#1d6fd1';
+    const pts = [...cs, ...cs.map((c, i) => [(c[0] + cs[(i + 1) % 4][0]) / 2, (c[1] + cs[(i + 1) % 4][1]) / 2])];
+    for (const [x, y] of pts) {
+      g.fillRect(x - 4, y - 4, 8, 8);
+      g.strokeRect(x - 4.5, y - 4.5, 9, 9);
+    }
+    const [cx, cy] = E.toScreen(this.cx, this.cy);
+    g.beginPath();
+    g.arc(cx, cy, 4, 0, Math.PI * 2);
+    g.stroke();
+    g.font = '12px sans-serif';
+    g.fillStyle = '#fff';
+    g.fillText(`${Math.round(this.w * Math.abs(this.sx))} × ${Math.round(this.h * Math.abs(this.sy))}  ${Math.round(this.rot)}°  · Enter 적용 · Esc 취소`, Math.min(...cs.map((c) => c[0])), Math.min(...cs.map((c) => c[1])) - 8);
+    g.restore();
+  }
+}
+
+function pointInPoly(p, pts) {
+  let inside2 = false;
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    const [xi, yi] = pts[i];
+    const [xj, yj] = pts[j];
+    if (yi > p.y !== yj > p.y && p.x < ((xj - xi) * (p.y - yi)) / (yj - yi) + xi) inside2 = !inside2;
+  }
+  return inside2;
+}
+
+export { boxCorners, FONT_CATEGORIES };

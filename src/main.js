@@ -24,6 +24,7 @@ import { initMobile } from './ui/mobile.js';
 import { formatTimecode } from './util.js';
 import { loadSampleProject } from './sample.js';
 import { ensureProjectFonts } from './fonts.js';
+import { appMode, setMode, initialMode, photoEditor } from './mode.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -98,12 +99,17 @@ function installFileDrop() {
   window.addEventListener('dragover', (e) => {
     if (hasFiles(e)) e.preventDefault();
   });
+  window.addEventListener('dragenter', () => {
+    overlay.textContent = appMode.isPhoto() ? '여기에 놓으면 사진 편집에서 엽니다 (Shift: 새 레이어로)' : '여기에 놓으면 파일을 가져옵니다';
+  }, true);
   window.addEventListener('drop', (e) => {
     depth = 0;
     overlay.hidden = true;
     if (!hasFiles(e)) return;
     e.preventDefault();
-    media.importFiles([...e.dataTransfer.files]);
+    const files = [...e.dataTransfer.files];
+    if (appMode.isPhoto()) photoEditor().then((P) => (P.doc && e.shiftKey ? P.cmd.placeFiles(files) : P.openFiles(files)));
+    else media.importFiles(files);
   });
   // panels that handle drops themselves stop propagation; hide the overlay for them too
   window.addEventListener('drop', () => { depth = 0; overlay.hidden = true; }, true);
@@ -139,11 +145,17 @@ async function boot() {
     openGuideDialog();
   }
   playback.requestRender();
+  appMode.on((m) => {
+    if (m === 'photo') playback.stop();
+    else playback.requestRender();
+    window.dispatchEvent(new Event('resize'));
+  });
+  if (initialMode() === 'photo') await setMode('photo');
   window.addEventListener('error', (e) => toast(`오류: ${e.message}`));
   window.addEventListener('unhandledrejection', (e) => console.warn('unhandled', e.reason));
 }
 
 // exposed for debugging and automated tests
-window.montage = { store, edit, media, playback, commands };
+window.montage = { store, edit, media, playback, commands, appMode, setMode };
 
 boot();

@@ -15,6 +15,7 @@ import { pickFiles } from './project-panel.js';
 import { importFiles, mediaStatus } from '../media.js';
 import { openSpeedDialog } from './dialogs.js';
 import { duplicateClips } from '../features.js';
+import { appMode, setMode } from '../mode.js';
 
 // narrow windows, and touch phones held sideways (wide but very short)
 const MQ = '(max-width: 760px), (pointer: coarse) and (max-height: 540px)';
@@ -38,14 +39,18 @@ export function initMobile() {
   let big = false;
 
   // ---------------------------------------------------------------- top bar
-  const undoBtn = h('button.m-icon', { 'aria-label': '실행 취소', title: '실행 취소', onclick: () => store.undo() }, icon('undo', 20));
-  const redoBtn = h('button.m-icon', { 'aria-label': '다시 실행', title: '다시 실행', onclick: () => store.redo() }, icon('redo', 20));
+  // in photo mode the same bar drives the photo editor
+  const photo = () => (appMode.isPhoto() ? appMode.P : null);
+  const undoBtn = h('button.m-icon', { 'aria-label': '실행 취소', title: '실행 취소', onclick: () => (photo() ? photo().undo() : store.undo()) }, icon('undo', 20));
+  const redoBtn = h('button.m-icon', { 'aria-label': '다시 실행', title: '다시 실행', onclick: () => (photo() ? photo().redo() : store.redo()) }, icon('redo', 20));
   const title = h('span.m-title');
+  const modeBtns = [['video', '영상'], ['photo', '사진']].map(([id, label]) => h('button.m-mode', { 'data-mode': id, 'aria-pressed': 'false', onclick: () => setMode(id) }, label));
   const top = h('header.m-top',
     h('button.m-icon', { 'aria-label': '메뉴', title: '메뉴', onclick: openMenuSheet }, icon('menu', 22)),
+    h('div.m-modes', { role: 'group', 'aria-label': '편집기 바꾸기' }, modeBtns),
     title, undoBtn, redoBtn,
-    h('button.m-icon', { 'aria-label': '도움말', title: '시작 가이드', onclick: () => c.guide() }, icon('help', 20)),
-    h('button.primary.m-export', { onclick: () => c.exportMedia() }, '내보내기'));
+    h('button.m-icon.m-help', { 'aria-label': '도움말', title: '시작 가이드', onclick: () => c.guide() }, icon('help', 20)),
+    h('button.primary.m-export', { onclick: () => (photo() ? photo().exportDialog() : c.exportMedia()) }, '내보내기'));
   app.prepend(top);
 
   // ---------------------------------------------------------------- sheet heads
@@ -268,11 +273,29 @@ export function initMobile() {
 
   // ---------------------------------------------------------------- state
   const refresh = () => {
-    title.textContent = store.project.name;
-    undoBtn.disabled = !store.undoStack.length;
-    redoBtn.disabled = !store.redoStack.length;
+    const P = photo();
+    title.textContent = P ? P.doc?.name || '사진 편집' : store.project.name;
+    undoBtn.disabled = P ? !P.doc?.history.undoStack.length : !store.undoStack.length;
+    redoBtn.disabled = P ? !P.doc?.history.redoStack.length : !store.redoStack.length;
+    for (const b of modeBtns) {
+      const on = b.dataset.mode === appMode.current;
+      b.classList.toggle('on', on);
+      b.setAttribute('aria-pressed', String(on));
+    }
     document.body.classList.toggle('m-has-sel', store.selection.clips.size > 0);
   };
+  let photoHooked = false;
+  appMode.on(() => {
+    closeSheet();
+    menuSheet?.remove();
+    menuSheet = null;
+    if (appMode.P && !photoHooked) {
+      photoHooked = true;
+      appMode.P.on('history', refresh);
+      appMode.P.on('doc', refresh);
+    }
+    refresh();
+  });
   store.on('change', refresh);
   store.on('history', refresh);
   store.on('selection', refresh);
@@ -290,6 +313,6 @@ export function initMobile() {
   mq.addEventListener('change', apply);
   land.addEventListener('change', apply);
   apply();
-  Object.assign(mobileApi, { openSheet, openQuick, closeSheet });
+  Object.assign(mobileApi, { openSheet, openQuick, closeSheet, listSheet });
   playback.on('state', refresh);
 }

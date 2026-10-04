@@ -508,6 +508,12 @@ export async function sampleFrames(seq, times, { maxSide = 384, quality = 0.7, o
 }
 
 export async function exportFrame(t = store.ui.playhead) {
+  const canvas = await exportFrameCanvas(t);
+  return new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+}
+
+/** The sequence frame at time t, full size, as a canvas (also used to open a frame in the photo editor). */
+export async function exportFrameCanvas(t = store.ui.playhead) {
   const seq = store.seq;
   const canvas = document.createElement('canvas');
   canvas.width = seq.width;
@@ -520,7 +526,7 @@ export async function exportFrame(t = store.ui.playhead) {
   } finally {
     await provider.close();
   }
-  return new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+  return canvas;
 }
 
 // ---------------------------------------------------------------- GIF
