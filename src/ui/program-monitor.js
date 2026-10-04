@@ -323,6 +323,14 @@ export function createProgramMonitor() {
     if (g) drawMask(ctx, g);
   }
 
+  // recording off but the object already moves: its whole motion was shifted (say so once per drag)
+  let shiftNoted = false;
+  function noteShift(r) {
+    if (r !== 'shifted' || shiftNoted) return;
+    shiftNoted = true;
+    toast('키프레임 기록이 꺼져 있어 새 키프레임 없이 움직임 전체를 함께 옮겼습니다. 이 위치에 키프레임을 만들려면 ◆ 기록을 켜세요.');
+  }
+
   /** Dashed path of the clip's position over time, with ◆ at its keyframes (the current one bigger). */
   function drawMotionPath(ctx, c) {
     const path = motionPath(c);
@@ -533,6 +541,7 @@ export function createProgramMonitor() {
     const m = evalEffect(motion, store.ui.playhead - c.start);
     const [cx, cy] = seqToScreen([m.posX, m.posY]);
     view.setPointerCapture(e.pointerId);
+    shiftNoted = false;
     store.begin(mode === 'move' ? '위치 이동 (모션)' : mode === 'scale' ? '크기 조절 (모션)' : '회전 (모션)');
     handleDrag = {
       mode, clipId: c.id, fxId: motion.id, x0: px, y0: py, m0: m, cx, cy,
@@ -583,7 +592,10 @@ export function createProgramMonitor() {
     if (!c) return;
     const motion = c.effects.find((fx) => fx.type === 'motion');
     if (!motion) return;
-    if (!handleDrag) store.begin('크기·회전 (두 손가락)');
+    if (!handleDrag) {
+      shiftNoted = false;
+      store.begin('크기·회전 (두 손가락)');
+    }
     const [a, b] = [...touches.values()];
     handleDrag = {
       mode: 'pinch', clipId: c.id, fxId: motion.id, m0: evalEffect(motion, store.ui.playhead - c.start),
@@ -602,10 +614,10 @@ export function createProgramMonitor() {
     const k = Math.hypot(a.x - b.x, a.y - b.y) / d.d0;
     let rot = d.m0.rotation + ((Math.atan2(b.y - a.y, b.x - a.x) - d.a0) * 180) / Math.PI;
     if (Math.abs(rot - Math.round(rot / 90) * 90) < 4) rot = Math.round(rot / 90) * 90; // snap to straight angles
-    edit.rawSetParam(c, fx, 'scale', Math.round(clamp(d.m0.scale * k, 1, 2000) * 10) / 10);
-    edit.rawSetParam(c, fx, 'rotation', Math.round(rot * 10) / 10);
-    edit.rawSetParam(c, fx, 'posX', Math.round((d.m0.posX + ((a.x + b.x) / 2 - d.mx0) / fr.s) * 10) / 10);
-    edit.rawSetParam(c, fx, 'posY', Math.round((d.m0.posY + ((a.y + b.y) / 2 - d.my0) / fr.s) * 10) / 10);
+    noteShift(edit.rawSetParam(c, fx, 'scale', Math.round(clamp(d.m0.scale * k, 1, 2000) * 10) / 10, { direct: true }));
+    noteShift(edit.rawSetParam(c, fx, 'rotation', Math.round(rot * 10) / 10, { direct: true }));
+    noteShift(edit.rawSetParam(c, fx, 'posX', Math.round((d.m0.posX + ((a.x + b.x) / 2 - d.mx0) / fr.s) * 10) / 10, { direct: true }));
+    noteShift(edit.rawSetParam(c, fx, 'posY', Math.round((d.m0.posY + ((a.y + b.y) / 2 - d.my0) / fr.s) * 10) / 10, { direct: true }));
     store.changed();
   }
 
@@ -647,15 +659,15 @@ export function createProgramMonitor() {
         if (Math.abs(nx - s.width / 2) * fr.s < 6) nx = s.width / 2;
         if (Math.abs(ny - s.height / 2) * fr.s < 6) ny = s.height / 2;
       }
-      edit.rawSetParam(c, fx, 'posX', Math.round(nx * 10) / 10);
-      edit.rawSetParam(c, fx, 'posY', Math.round(ny * 10) / 10);
+      noteShift(edit.rawSetParam(c, fx, 'posX', Math.round(nx * 10) / 10, { direct: true }));
+      noteShift(edit.rawSetParam(c, fx, 'posY', Math.round(ny * 10) / 10, { direct: true }));
     } else if (d.mode === 'scale') {
       const dist = Math.hypot(px - d.cx, py - d.cy);
-      edit.rawSetParam(c, fx, 'scale', Math.round(clamp((d.m0.scale * dist) / d.d0, 0, 2000) * 10) / 10);
+      noteShift(edit.rawSetParam(c, fx, 'scale', Math.round(clamp((d.m0.scale * dist) / d.d0, 0, 2000) * 10) / 10, { direct: true }));
     } else {
       let a = d.m0.rotation + ((Math.atan2(py - d.cy, px - d.cx) - d.a0) * 180) / Math.PI;
       if (e.shiftKey) a = Math.round(a / 15) * 15;
-      edit.rawSetParam(c, fx, 'rotation', Math.round(a * 10) / 10);
+      noteShift(edit.rawSetParam(c, fx, 'rotation', Math.round(a * 10) / 10, { direct: true }));
     }
     store.changed();
   });

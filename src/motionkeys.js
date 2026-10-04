@@ -6,22 +6,11 @@ import { store } from './store.js';
 import { clipEnd, evalParam, isAnimated, setParamValue, keyframeDefaults } from './model.js';
 import { clamp } from './util.js';
 
-const PREF = 'montage.autoKey';
 export const KEY_PARAMS = [['motion', 'posX'], ['motion', 'posY'], ['motion', 'scale'], ['motion', 'rotation'], ['opacity', 'opacity']];
 
-try {
-  store.ui.autoKey = localStorage.getItem(PREF) === '1';
-} catch {
-  /* storage unavailable */
-}
-
+// recording always starts off (it is not remembered between visits, so it cannot be left on by accident)
 export function setAutoKey(on) {
   store.ui.autoKey = !!on;
-  try {
-    localStorage.setItem(PREF, on ? '1' : '0');
-  } catch {
-    /* storage unavailable */
-  }
   store.emit('autokey');
   store.emit('toast', on ? '키프레임 기록 켬: 움직이거나 크기·회전·불투명도를 바꾸면 재생헤드 위치에 키프레임이 생깁니다' : '키프레임 기록 끔');
 }

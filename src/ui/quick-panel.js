@@ -140,7 +140,7 @@ export function createQuickPanel() {
             store.begin(`${label} 바꾸기`);
             editing = true;
           }
-          edit.rawSetParam(c, fx, key, v);
+          if (edit.rawSetParam(c, fx, key, v, { direct: true }) === 'shifted' && done) toast('키프레임 기록이 꺼져 있어 새 키프레임 없이 움직임 전체를 바꿨습니다');
           store.changed();
           if (done) {
             store.commit();

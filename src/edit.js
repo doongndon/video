@@ -4,7 +4,7 @@
 import { store } from './store.js';
 import { uid, EPS, clamp, snapFrame, deepClone } from './util.js';
 import {
-  setParamValue, isAnimated, keyframeDefaults, mediaTimeAt, contentTime, sourceOut, remapSpeedAt, createClip, createTrack, clipEnd, clipsOnTrack, linkedClips, getTrack, videoTracks, audioTracks,
+  setParamValue, isAnimated, keyframeDefaults, evalParam, mediaTimeAt, contentTime, sourceOut, remapSpeedAt, createClip, createTrack, clipEnd, clipsOnTrack, linkedClips, getTrack, videoTracks, audioTracks,
   sequenceDuration, prevAdjacent, nextAdjacent, shiftClipKeyframes, scaleClipKeyframes, renameTracks,
   clampTransitionDuration, trackKindForClip, DEFAULT_STILL_DURATION, createEffect, isTimed,
   addSequenceToProject, createSequence, sequenceContains, sequenceMediaId,
@@ -759,23 +759,48 @@ export function setTransitionDuration(clipId, edge, d) {
 
 const AUTO_KEY_FX = new Set(['motion', 'opacity']);
 
+const PARAM_LIMITS = { opacity: [0, 100], scale: [0, 100000] };
+
 /**
  * Write a param at the playhead (keyframing aware). Raw: caller wraps in a transaction/begin.
- * With "키프레임 기록" on, a still motion/opacity value starts animating: the old value is kept as a
- * keyframe at the clip start and the new one is keyed at the playhead, so moving the playhead and
- * then dragging an object makes it travel there.
+ *
+ * Motion/opacity follow the "키프레임 기록" switch:
+ *  - recording on: still values start animating (the old value stays as a keyframe at the clip
+ *    start, the new one is keyed at the playhead); animated values get a keyframe at the playhead;
+ *  - recording off and `direct` (the object moved on the monitor or with the quick sliders): no
+ *    keyframe is ever added. A keyframe at the playhead is adjusted; elsewhere the whole animation
+ *    shifts by the change, keeping its shape.
+ * Otherwise (Effect Controls with recording off) the stopwatch decides, as in Premiere.
+ * Returns 'shifted' when a whole animation was shifted.
  */
-export function rawSetParam(clip, fx, key, value) {
+export function rawSetParam(clip, fx, key, value, { direct = false } = {}) {
   const p = fx.params[key];
-  if (!p) return;
+  if (!p) return undefined;
   const t = clamp(store.ui.playhead - clip.start, 0, clip.duration);
-  if (store.ui.autoKey && !isAnimated(p) && AUTO_KEY_FX.has(fx.type) && typeof value === 'number' && typeof p.value === 'number') {
+  const keyable = AUTO_KEY_FX.has(fx.type) && typeof value === 'number' && typeof p.value === 'number';
+  // recording on: every change keys (Effect Controls too)
+  if (keyable && store.ui.autoKey && !isAnimated(p)) {
     const ease = keyframeDefaults.ease;
     p.kf = t > fd() / 2 ? [{ t: 0, v: p.value, ease }, { t, v: value, ease }] : [{ t, v: value, ease }];
     p.value = value;
-    return;
+    return undefined;
+  }
+  // recording off, object moved directly: never add a keyframe
+  if (keyable && direct && !store.ui.autoKey && isAnimated(p)) {
+    const here = p.kf.find((k) => Math.abs(k.t - t) < fd() / 2);
+    if (here) {
+      here.v = value;
+      p.value = value;
+      return undefined;
+    }
+    const delta = value - evalParam(p, t);
+    const [lo, hi] = PARAM_LIMITS[key] || [-Infinity, Infinity];
+    for (const k of p.kf) k.v = clamp(k.v + delta, lo, hi);
+    p.value = value;
+    return 'shifted';
   }
   setParamValue(p, value, t, fd());
+  return undefined;
 }
 
 export function addEffect(clipIds, type) {
