@@ -780,8 +780,10 @@ export function buildHistoryPanel(P) {
     el.replaceChildren();
     if (!doc) return;
     const hist = doc.history;
-    const items = [h(`button.ph-hrow${hist.undoStack.length === 0 ? '.on' : ''}`, { onclick: () => { hist.jumpTo(-1); P.afterHistory(); } }, `📄 ${doc.name} (처음)`)];
-    hist.undoStack.forEach((e, i) => items.push(h(`button.ph-hrow${i === hist.undoStack.length - 1 ? '.on' : ''}`, { onclick: () => { hist.jumpTo(i); P.afterHistory(); } }, e.label)));
+    // the brush mark picks the state the history brush paints back
+    const src = (e) => h(`button.ph-hsrc${(doc._histSrc || null) === e ? '.on' : ''}`, { title: '작업 내역 브러시의 원본으로', 'aria-label': '작업 내역 브러시 원본', onclick: () => { doc._histSrc = e; render(); } }, icon('historyBrush', 14));
+    const items = [h('div.ph-hline', src(null), h(`button.ph-hrow${hist.undoStack.length === 0 ? '.on' : ''}`, { onclick: () => { hist.jumpTo(-1); P.afterHistory(); } }, `${doc.name} (처음)`))];
+    hist.undoStack.forEach((e, i) => items.push(h('div.ph-hline', src(e), h(`button.ph-hrow${i === hist.undoStack.length - 1 ? '.on' : ''}`, { onclick: () => { hist.jumpTo(i); P.afterHistory(); } }, e.label))));
     [...hist.redoStack].reverse().forEach((e, i) => items.push(h('button.ph-hrow.redo', { onclick: () => { for (let k = 0; k <= i; k++) hist.redo(); P.afterHistory(); } }, e.label)));
     el.append(...items);
     el.querySelector('.on')?.scrollIntoView({ block: 'nearest' });

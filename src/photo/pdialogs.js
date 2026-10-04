@@ -747,7 +747,7 @@ function resolveGradient(g, P) {
 // ---------------------------------------------------------------- fill / stroke
 
 export function fillDialog(P) {
-  const what = sel([['fg', '전경색'], ['bg', '배경색'], ['custom', '색상…'], ['#808080', '50% 회색'], ['#ffffff', '흰색'], ['#000000', '검정']], 'fg');
+  const what = sel([['fg', '전경색'], ['bg', '배경색'], ['custom', '색상…'], ['content', '내용 인식 (주변으로 채움)'], ['#808080', '50% 회색'], ['#ffffff', '흰색'], ['#000000', '검정']], 'fg');
   const color = h('input', { type: 'color', value: P.fg });
   const op = num(100, 1, 100, 1, '70px');
   openModal({
@@ -756,6 +756,7 @@ export function fillDialog(P) {
     body: [formRow('내용', what, color), formRow('불투명도 (%)', op), h('div.note', P.doc.selection ? '선택 영역을 채웁니다.' : '선택 영역이 없어 레이어 전체를 채웁니다.')],
     buttons: [{ label: '취소' }, {
       label: '확인', primary: true, action: () => {
+        if (what.value === 'content') return P.cmd.contentAwareFill();
         const c = what.value === 'fg' ? P.fg : what.value === 'bg' ? P.bg : what.value === 'custom' ? color.value : what.value;
         P.fill(c, +op.value / 100);
       },

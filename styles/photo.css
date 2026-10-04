@@ -125,6 +125,11 @@ label.ph-prow > span:first-child { min-width: calc(76px * var(--ui-scale)); }
 .ph-hrow { text-align: left; background: none; border: 1px solid transparent; border-radius: 4px; min-height: 0; height: calc(28px * var(--ui-scale)); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text-dim); }
 .ph-hrow.on { background: var(--sel); color: var(--text); }
 .ph-hrow.redo { opacity: 0.5; font-style: italic; }
+.ph-hline { display: flex; align-items: center; gap: 2px; }
+.ph-hline .ph-hrow { flex: 1; min-width: 0; }
+.ph-hsrc { flex: none; width: calc(24px * var(--ui-scale)); height: calc(24px * var(--ui-scale)); min-height: 0; padding: 0; display: grid; place-items: center; background: none; border: 1px solid transparent; border-radius: 4px; color: var(--text-dim); opacity: 0.35; }
+.ph-hsrc:hover { opacity: 0.8; }
+.ph-hsrc.on { opacity: 1; color: var(--accent, #4aa3ff); border-color: currentColor; }
 
 /* ---------------------------------------------------------------- dialogs */
 .ph-anchor { display: grid; grid-template-columns: repeat(3, 30px); gap: 3px; }

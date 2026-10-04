@@ -17,6 +17,7 @@ import { newText } from './type.js';
 import { nearestOnPath } from './paths.js';
 import { installPathTools } from './pathtools.js';
 import { installSelectionTools, buildChannelsPanel } from './seltools.js';
+import { installBrushTools } from './brushes.js';
 import { mixIntoMask } from './selectx.js';
 import { buildPathsPanel, buildCharacterPanel, installTypeCommands, warpTextDialog } from './panels2.js';
 import * as PT from './paths.js';
@@ -1093,6 +1094,7 @@ export function createPhotoEditor(root) {
   installLayerCommands(P);
   installPathTools(P);
   installSelectionTools(P);
+  installBrushTools(P);
   installTypeCommands(P, PT);
   P.emit('tool', P.tool);
   P.emit('channels');
@@ -1786,6 +1788,7 @@ function buildMenus(P) {
       { label: '지우기 (선택 영역)', key: 'Delete', disabled: no(), action: () => C.clear() },
       '-',
       { label: '칠…', key: 'Shift+F5', disabled: no(), action: () => D.fillDialog(P) },
+      { label: '내용 인식 채우기 (선택 영역을 주변으로)', disabled: no() || !P.doc?.selection, action: () => C.contentAwareFill() },
       { label: '획 (선택 영역 테두리)…', disabled: no(), action: () => D.strokeDialog(P) },
       '-',
       { label: '자유 변형', key: `${mod}T`, disabled: no(), action: () => C.freeTransform() },
@@ -1804,6 +1807,8 @@ function buildMenus(P) {
         { label: '가로로 뒤집기', action: () => C.transformLayer('flipH') },
         { label: '세로로 뒤집기', action: () => C.transformLayer('flipV') },
       ] },
+      '-',
+      { label: '브러시 사전 설정 정의… (선택 영역의 어두운 부분)', disabled: no(), action: () => C.defineBrush() },
     ],
     '이미지': () => [
       { label: '조정', disabled: no(), submenu: adjustItems },

@@ -449,7 +449,7 @@ export function brushOpts(o, E, extra = {}) {
   return { size: o.size, hardness: (o.hardness ?? 70) / 100, opacity: (o.opacity ?? 100) / 100, flow: (o.flow ?? 100) / 100, pressureSize: o.pressureSize, color: E.fg, ...extra };
 }
 
-function needRaster(E, what = '이 도구') {
+export function needRaster(E, what = '이 도구') {
   const mt = E.maskTarget?.();
   if (mt && mt.kind !== 'layer') return true;
   const l = E.doc.active;
