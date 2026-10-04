@@ -5,7 +5,7 @@ import { runtime, mediaEvents, importFiles, createSyntheticMedia, removeMedia, a
 import * as edit from '../edit.js';
 import { relinkFromFiles } from '../persist.js';
 import { h, formatTimecode, formatShort, formatBytes, modKey } from '../util.js';
-import { showMenu, openModal, promptDialog, loadPref, savePref, toast, dnd } from './common.js';
+import { showMenu, openModal, promptDialog, confirmDialog, loadPref, savePref, toast, dnd } from './common.js';
 import { openColorMatteDialog } from './dialogs.js';
 
 export function pickFiles({ accept = 'video/*,audio/*,image/*', multiple = true } = {}) {
@@ -98,10 +98,10 @@ export function createProjectPanel() {
     ];
   }
 
-  function clearSelected() {
+  async function clearSelected() {
     const ids = [...store.ui.selectedMedia];
-    const used = Object.values(store.seq.clips).filter((c) => ids.includes(c.mediaId)).length;
-    if (used && !confirm(`${used} clip(s) in the sequence use this media and will be removed. Continue?`)) return;
+    const used = Object.values(store.project.sequences).flatMap((sq) => Object.values(sq.clips)).filter((c) => ids.includes(c.mediaId)).length;
+    if (used && !(await confirmDialog('Clear Media', `${used} clip(s) in your sequences use this media and will be removed too.`))) return;
     removeMedia(ids);
     store.ui.selectedMedia.clear();
   }

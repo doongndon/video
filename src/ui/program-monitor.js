@@ -62,8 +62,7 @@ export function createProgramMonitor() {
   async function saveFrame() {
     const blob = await exportFrame();
     const name = `${store.seq.name || 'frame'}_${formatTimecode(store.ui.playhead, store.seq.fps).replace(/:/g, '-')}.png`;
-    downloadBlob(blob, name);
-    toast(`Saved ${name}`);
+    if (await downloadBlob(blob, name)) toast(`Saved ${name}`);
   }
 
   function renderScale() {

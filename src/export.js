@@ -16,7 +16,7 @@ export const FORMATS = {
   mp4: { label: 'MP4 (H.264 / AAC)', ext: 'mp4', video: ['avc', 'hevc', 'vp9', 'av1'], audio: ['aac', 'opus'] },
   webm: { label: 'WebM (VP9 / Opus)', ext: 'webm', video: ['vp9', 'vp8', 'av1'], audio: ['opus', 'vorbis'] },
   wav: { label: 'WAV (audio only)', ext: 'wav', audioOnly: true },
-  png: { label: 'PNG sequence frame (current frame)', ext: 'png', still: true },
+  png: { label: 'PNG (current frame)', ext: 'png', still: true },
 };
 
 /** Resolve the export range. which: 'all' | 'inout' */

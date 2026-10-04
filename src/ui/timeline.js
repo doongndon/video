@@ -70,7 +70,7 @@ export function createTimeline() {
   const zoomSlider = h('input', { type: 'range', min: 0, max: 1000, step: 1, title: 'Zoom' });
   const durEl = h('span', { style: { color: 'var(--text-faint)' } });
   const bottom = h('div.tl-bottom', h('span', '−'), zoomSlider, h('span', '+'), h('span.grow', { style: { flex: 1 } }), durEl);
-  const root = h('div.timeline', seqTabs, top, main, h('div', { style: { paddingLeft: '172px' } }, hscroll), bottom);
+  const root = h('div.timeline', seqTabs, top, main, h('div.tl-hscroll-wrap', hscroll), bottom);
 
   const staticCanvas = document.createElement('canvas');
 

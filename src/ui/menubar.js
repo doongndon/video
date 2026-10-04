@@ -146,6 +146,7 @@ export function createMenubar(el) {
     ],
     Help: () => [
       { label: 'Keyboard Shortcuts', key: 'F1', action: c.shortcuts },
+      { label: 'Load Sample Project', action: c.loadSample },
       { label: 'About Montage', action: c.about },
     ],
   };

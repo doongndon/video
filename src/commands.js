@@ -9,6 +9,7 @@ import { saveProjectFile, openProjectFile, clearSession, relinkFromFiles, setAut
 import { createProject, clipEnd, clipsOnTrack, editPoints, sequenceDuration, videoTracks, mediaTimeAt, isTimed } from './model.js';
 import { snapFrame, EPS } from './util.js';
 import { sourceApi } from './ui/source-monitor.js';
+import { loadSampleProject } from './sample.js';
 import { programApi } from './ui/program-monitor.js';
 import { timelineApi } from './ui/timeline.js';
 import { pickFiles, importDialog } from './ui/project-panel.js';
@@ -258,6 +259,18 @@ export const commands = {
     location.reload();
   },
   shortcuts: () => openShortcutsDialog(),
+  loadSample: async () => {
+    if (store.project.mediaOrder.length > 1 || Object.keys(seq().clips).length) {
+      if (!(await confirmDialog('Load Sample Project', 'Replace the current project with the sample project? Save a project file first if you need this one.'))) return;
+    }
+    setAutosave(false);
+    await clearSession();
+    for (const rt of runtime.values()) if (rt.url) URL.revokeObjectURL(rt.url);
+    runtime.clear();
+    playback.resetMedia();
+    setAutosave(true);
+    await loadSampleProject();
+  },
   about: () => openAboutDialog(),
 };
 

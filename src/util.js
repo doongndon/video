@@ -118,7 +118,38 @@ export function debounce(fn, ms) {
   return wrapped;
 }
 
-export function downloadBlob(blob, filename) {
+let downloadsCap;
+/** The hosted viewer's save capability, when the editor runs as a published artifact. */
+function hostDownloads() {
+  if (downloadsCap === undefined) {
+    downloadsCap = typeof window !== 'undefined' && window.claude?.use
+      ? window.claude.use('downloads').catch(() => null)
+      : Promise.resolve(null);
+  }
+  return downloadsCap;
+}
+
+/**
+ * Save a generated file. Uses the host's save prompt when available, otherwise a download link.
+ * Resolves true when the file was handed over; failures are reported through a 'montage:toast' event.
+ */
+export async function downloadBlob(blob, filename) {
+  const host = await hostDownloads();
+  if (host) {
+    try {
+      await host.save({ filename, data: blob });
+      return true;
+    } catch (err) {
+      const msg = {
+        declined: 'Save cancelled',
+        rejected_extension: `This viewer cannot save .${filename.split('.').pop()} files`,
+        extension_not_enabled: `This viewer cannot save .${filename.split('.').pop()} files`,
+        rate_limited: 'A save prompt is already open',
+      }[err?.code] || `Could not save ${filename}`;
+      window.dispatchEvent(new CustomEvent('montage:toast', { detail: msg }));
+      return false;
+    }
+  }
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
@@ -127,6 +158,7 @@ export function downloadBlob(blob, filename) {
   a.click();
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 30_000);
+  return true;
 }
 
 export const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);

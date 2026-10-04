@@ -229,10 +229,12 @@ export function openExportDialog() {
               });
             }
             const name = `${fileName.value || 'export'}.${f.ext}`;
-            downloadBlob(result.blob, name);
             bar.style.width = '100%';
-            status.textContent = `Saved ${name} · ${formatBytes(result.blob.size)} · ${result.info}`;
-            toast(`Exported ${name}`);
+            status.textContent = `Rendered ${name} · ${formatBytes(result.blob.size)} · ${result.info}`;
+            if (await downloadBlob(result.blob, name)) {
+              status.textContent = `Saved ${name} · ${formatBytes(result.blob.size)} · ${result.info}`;
+              toast(`Exported ${name}`);
+            }
           } catch (err) {
             console.error(err);
             status.textContent = `Export failed: ${err.message || err}`;
@@ -377,8 +379,9 @@ export function exportSrt() {
     const text = c.effects.find((e) => e.type === 'text').params.content.value;
     return `${i + 1}\n${fmtSrtTime(c.start)} --> ${fmtSrtTime(clipEnd(c))}\n${text}\n`;
   }).join('\n');
-  downloadBlob(new Blob([body], { type: 'text/plain' }), `${s.name || 'captions'}.srt`);
-  toast(`Exported ${clips.length} captions from ${best.t.name}`);
+  downloadBlob(new Blob([body], { type: 'text/plain' }), `${s.name || 'captions'}.srt`).then((ok) => {
+    if (ok) toast(`Exported ${clips.length} captions from ${best.t.name}`);
+  });
 }
 
 // ---------------------------------------------------------------- shortcuts

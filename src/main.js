@@ -18,6 +18,7 @@ import {
   createEffectsPanel, createMarkersPanel, createHistoryPanel, createMixerPanel, createScopesPanel, createMeters, createTools, TOOLS,
 } from './ui/panels.js';
 import { formatTimecode } from './util.js';
+import { loadSampleProject } from './sample.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -102,9 +103,18 @@ async function boot() {
   installShortcuts();
   installFileDrop();
   store.on('toast', toast);
+  window.addEventListener('montage:toast', (e) => toast(e.detail));
   const restored = await restoreSession();
   initAutosave();
   if (restored) toast('Restored your last session');
+  else if (!/[?&]blank\b/.test(location.search)) {
+    try {
+      await loadSampleProject();
+      toast('Opened a sample project. File ▸ New Project starts a blank one.');
+    } catch (err) {
+      console.warn('sample project failed', err);
+    }
+  }
   playback.requestRender();
   window.addEventListener('error', (e) => toast(`Error: ${e.message}`));
   window.addEventListener('unhandledrejection', (e) => console.warn('unhandled', e.reason));
