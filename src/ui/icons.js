@@ -87,6 +87,7 @@ const P = {
   redo: '<path d="M10.5 4l3 3-3 3M13.5 7H6a3.5 3.5 0 0 0 0 7h2"/>',
   zoomIn: '<circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5 14 14M5 7h4M7 5v4"/>',
   zoomOut: '<circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5 14 14M5 7h4"/>',
+  book: '<path d="M2.5 3.5c2-.8 3.8-.6 5.5.8 1.7-1.4 3.5-1.6 5.5-.8v9c-2-.8-3.8-.6-5.5.8-1.7-1.4-3.5-1.6-5.5-.8zM8 4.3v9"/>',
   help: '<circle cx="8" cy="8" r="6"/><path d="M6.3 6.2A1.8 1.8 0 1 1 8 8.3V9.5M8 11.5v.3"/>',
   wand: '<path d="M3 13 10.5 5.5M9.5 4.5l2 2M11 2v1.5M13.5 4.5H15M13 2l-1 1M2.5 4.5l1 1"/>',
   multicam: '<rect x="2" y="2.5" width="5.5" height="4.5"/><rect x="8.5" y="2.5" width="5.5" height="4.5"/><rect x="2" y="9" width="5.5" height="4.5"/><rect x="8.5" y="9" width="5.5" height="4.5"/>',

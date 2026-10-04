@@ -9,6 +9,10 @@ import { LABEL_COLORS } from '../model.js';
 import { TEMPLATES } from '../templates.js';
 import { WORKSPACES } from './workspaces.js';
 import { appMode, setMode } from '../mode.js';
+import { icon } from './icons.js';
+
+/** Open the manual (loaded the first time), at a page that fits the editor on screen. */
+export const openManual = (id = appMode.isPhoto() ? 'p-start' : null) => import('../docs/viewer.js').then((m) => m.openDocs(id));
 
 const mod = isMac ? '⌘' : 'Ctrl+';
 
@@ -198,6 +202,7 @@ export function createMenubar(el) {
       { label: '레이아웃 초기화', action: c.resetLayout },
     ],
     '도움말': () => [
+      { label: '설명서 (모든 기능)', action: () => openManual() },
       { label: '시작 가이드', action: c.guide },
       { label: '단축키 목록', key: 'F1', action: c.shortcuts },
       { label: '샘플 프로젝트 열기', action: c.loadSample },
@@ -244,7 +249,8 @@ export function createMenubar(el) {
   const saved = h('span.saved');
   const guideBtn = h('button', { onclick: () => (appMode.isPhoto() ? appMode.P.menus['도움말']()[0].action() : c.guide()), title: '처음 쓰는 분을 위한 안내', style: { marginLeft: '8px' } }, '시작 가이드');
   const exportBtn = h('button.primary', { onclick: () => (appMode.isPhoto() ? appMode.P.exportDialog() : c.exportMedia()), style: { marginLeft: '6px' } }, '내보내기');
-  el.append(h('span.spacer'), name, saved, guideBtn, exportBtn);
+  const docsBtn = h('button.docs-open-btn', { onclick: () => openManual(), title: '모든 기능 설명서', 'aria-label': '설명서', style: { marginLeft: '8px' } }, icon('book', 16), h('span', '설명서'));
+  el.append(h('span.spacer'), name, saved, docsBtn, guideBtn, exportBtn);
   const refresh = () => {
     const P = appMode.isPhoto() ? appMode.P : null;
     name.textContent = P ? (P.doc ? `${P.doc.name} · ${P.doc.width}×${P.doc.height}` : '사진 편집') : store.project.name;

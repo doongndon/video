@@ -977,14 +977,14 @@ export function createPhotoEditor(root) {
     if (!mod && P.doc && TOOL_BY_ID[P.tool].onKey?.(P, e) === true) return done();
     const map = {
       KeyZ: () => (mod ? (e.shiftKey ? P.redo() : P.undo()) : P.setTool('zoom')),
-      KeyY: () => mod && P.redo(),
+      KeyY: () => (mod ? P.redo() : P.setTool('historyBrush')),
       KeyA: () => (mod && e.altKey ? P.cmd.selectAllLayers() : mod ? P.cmd.selectAll() : cycle(['pathSelect', 'directSelect'], e.shiftKey)),
       KeyP: () => (mod ? null : cycle(['pen', 'freePen'], e.shiftKey)),
       KeyD: () => (mod ? (e.shiftKey ? P.cmd.reselect() : P.cmd.deselect()) : P.defaultColors()),
-      KeyI: () => (mod ? (e.shiftKey ? P.cmd.inverse() : D.adjustDialog(P, 'invert')) : P.setTool('eyedropper')),
+      KeyI: () => (mod ? (e.shiftKey ? P.cmd.inverse() : D.adjustDialog(P, 'invert')) : cycle(['eyedropper', 'sampler', 'ruler', 'note', 'count'], e.shiftKey)),
       KeyT: () => (mod && e.shiftKey ? P.cmd.transformAgain() : mod ? P.cmd.freeTransform() : cycle(['text', 'verticalText', 'textMask', 'verticalTextMask'], e.shiftKey)),
-      KeyJ: () => (mod && e.shiftKey ? P.cmd.layerVia(true) : mod ? P.cmd.duplicateLayer() : P.setTool('heal')),
-      KeyE: () => (mod && e.shiftKey && e.altKey ? P.cmd.stampVisible() : mod ? (e.shiftKey ? P.cmd.mergeVisible() : P.cmd.mergeDown()) : P.setTool('eraser')),
+      KeyJ: () => (mod && e.shiftKey ? P.cmd.layerVia(true) : mod ? P.cmd.duplicateLayer() : cycle(['heal', 'healBrush', 'patch', 'contentMove', 'remove', 'redEye'], e.shiftKey)),
+      KeyE: () => (mod && e.shiftKey && e.altKey ? P.cmd.stampVisible() : mod ? (e.shiftKey ? P.cmd.mergeVisible() : P.cmd.mergeDown()) : cycle(['eraser', 'bgEraser', 'magicEraser'], e.shiftKey)),
       KeyN: () => (mod && e.shiftKey ? P.cmd.newLayer() : mod ? D.newDocDialog(P) : null),
       KeyO: () => (mod ? P.cmd.open() : P.setTool(P.tool === 'dodge' ? 'burn' : 'dodge')),
       KeyS: () => (mod ? P.cmd.saveProject() : P.setTool('clone')),
@@ -994,7 +994,7 @@ export function createPhotoEditor(root) {
       KeyM: () => (mod ? D.adjustDialog(P, 'curves') : P.setTool(e.shiftKey ? (P.tool === 'rect' ? 'ellipse' : 'rect') : P.tool === 'ellipse' ? 'ellipse' : 'rect')),
       KeyL: () => (mod ? D.adjustDialog(P, 'levels') : cycle(['lasso', 'polyLasso', 'magLasso'], e.shiftKey)),
       KeyU: () => (mod ? (e.shiftKey ? D.adjustDialog(P, 'desaturate') : D.adjustDialog(P, 'hueSat')) : P.setTool('shape')),
-      KeyB: () => (mod ? D.adjustDialog(P, 'colorBalance') : P.setTool(e.shiftKey ? (P.tool === 'brush' ? 'pencil' : 'brush') : P.tool === 'pencil' ? 'pencil' : 'brush')),
+      KeyB: () => (mod ? D.adjustDialog(P, 'colorBalance') : cycle(['brush', 'pencil', 'colorReplace', 'mixer'], e.shiftKey)),
       KeyG: () => (mod ? (e.altKey ? P.cmd.toggleClip() : e.shiftKey ? P.cmd.ungroup() : P.cmd.groupLayers()) : P.setTool(e.shiftKey ? (P.tool === 'gradient' ? 'bucket' : 'gradient') : P.tool === 'bucket' ? 'bucket' : 'gradient')),
       KeyF: () => (mod ? D.repeatFilter(P) : null),
       KeyW: () => (mod ? null : cycle(['objSel', 'quickSel', 'wand'], e.shiftKey)),
@@ -1880,6 +1880,7 @@ function buildMenus(P) {
       { label: '패스', action: () => P.showPanel('paths') },
     ],
     '도움말': () => [
+      { label: '설명서 (모든 기능)', action: () => import('../docs/viewer.js').then((m) => m.openDocs('p-start')) },
       { label: '사진 편집 단축키', action: () => photoShortcuts() },
     ],
   };
@@ -1888,8 +1889,8 @@ function buildMenus(P) {
 function photoShortcuts() {
   import('../ui/common.js').then(({ openModal }) => {
     const rows = [
-      ['V', '이동'], ['M / Shift+M', '사각형 · 원형 선택'], ['L', '올가미'], ['W', '자동 선택(마술봉)'], ['C', '자르기'], ['I', '스포이드'],
-      ['J', '스팟 복구'], ['B / Shift+B', '브러시 · 연필'], ['S', '복제 도장 (Alt+클릭으로 원본)'], ['E', '지우개'], ['G / Shift+G', '그레이디언트 · 페인트 통'],
+      ['V', '이동'], ['M / Shift+M', '사각형 · 원형 선택'], ['L', '올가미'], ['W', '자동 선택(마술봉)'], ['C', '자르기'], ['I / Shift+I', '스포이드 · 색상 샘플러 · 눈금자 · 메모 · 카운트'],
+      ['J / Shift+J', '복구 도구들 (스팟 복구 · 복구 · 패치 · 내용 인식 이동 · 제거 · 적목)'], ['B / Shift+B', '브러시 · 연필 · 색상 대체 · 혼합 브러시'], ['Y', '작업 내역 브러시'], ['S', '복제 도장 (Alt+클릭으로 원본)'], ['E / Shift+E', '지우개 · 배경 지우개 · 자동 지우개'], ['G / Shift+G', '그레이디언트 · 페인트 통'],
       ['O', '닷지 · 번'], ['R', '흐림 브러시'], ['T', '문자'], ['U', '모양'], ['H / Space 누른 채 끌기', '화면 이동'], ['Z', '돋보기'],
       ['[ / ]', '브러시 크기'], ['Shift+[ / ]', '브러시 경도'], ['1~9, 0', '불투명도 10~90%, 100%'], ['X / D', '색 바꾸기 / 기본 색'],
       ['Ctrl+Z / Ctrl+Shift+Z', '실행 취소 / 다시 실행'], ['Ctrl+A / Ctrl+D / Ctrl+Shift+I', '모두 선택 / 해제 / 반전'],

@@ -151,6 +151,7 @@ async function boot() {
     window.dispatchEvent(new Event('resize'));
   });
   if (initialMode() === 'photo') await setMode('photo');
+  if (location.hash.startsWith('#docs')) import('./docs/viewer.js').then((m) => m.openFromHash());
   window.addEventListener('error', (e) => toast(`오류: ${e.message}`));
   window.addEventListener('unhandledrejection', (e) => console.warn('unhandled', e.reason));
 }
