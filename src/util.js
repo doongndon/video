@@ -141,11 +141,11 @@ export async function downloadBlob(blob, filename) {
       return true;
     } catch (err) {
       const msg = {
-        declined: 'Save cancelled',
-        rejected_extension: `This viewer cannot save .${filename.split('.').pop()} files`,
-        extension_not_enabled: `This viewer cannot save .${filename.split('.').pop()} files`,
-        rate_limited: 'A save prompt is already open',
-      }[err?.code] || `Could not save ${filename}`;
+        declined: '저장을 취소했습니다',
+        rejected_extension: `이 보기 화면에서는 .${filename.split('.').pop()} 파일을 저장할 수 없습니다`,
+        extension_not_enabled: `이 보기 화면에서는 .${filename.split('.').pop()} 파일을 저장할 수 없습니다`,
+        rate_limited: '저장 확인 창이 이미 열려 있습니다',
+      }[err?.code] || `${filename} 파일을 저장하지 못했습니다`;
       window.dispatchEvent(new CustomEvent('montage:toast', { detail: msg }));
       return false;
     }

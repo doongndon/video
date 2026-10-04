@@ -7,17 +7,32 @@ import { playback, audioTransitionGain } from './playback.js';
 import { Compositor } from './compositor.js';
 import { createFrameReader, decodeAudioRange, getRuntime, mediaStatus, mediaUrl } from './media.js';
 import {
-  audioTracks, clipEnd, clipsOnTrack, evalEffect, mediaTimeAt, sequenceDuration, transitionExtents, videoTracks,
+  audioTracks, clipEnd, clipsOnTrack, evalEffect, mediaTimeAt, sequenceDuration, transitionExtents, videoTracks, hasSpeedRamp,
 } from './model.js';
 import { clamp, dbToGain, once } from './util.js';
-import { createChain } from './audio-fx.js';
+import { createChain, loadAudioWorklets } from './audio-fx.js';
+import { retimeAudio } from './timestretch.js';
+import { encodeGif } from './gif.js';
 
 export const FORMATS = {
-  mp4: { label: 'MP4 (H.264 / AAC)', ext: 'mp4', video: ['avc', 'hevc', 'vp9', 'av1'], audio: ['aac', 'opus'] },
-  webm: { label: 'WebM (VP9 / Opus)', ext: 'webm', video: ['vp9', 'vp8', 'av1'], audio: ['opus', 'vorbis'] },
-  wav: { label: 'WAV (audio only)', ext: 'wav', audioOnly: true },
-  png: { label: 'PNG (current frame)', ext: 'png', still: true },
+  mp4: { label: 'MP4 (H.264 / AAC) — 가장 널리 쓰임', ext: 'mp4', video: ['avc', 'hevc', 'vp9', 'av1'], audio: ['aac', 'opus'] },
+  webm: { label: 'WebM (VP9 / Opus) — 웹용', ext: 'webm', video: ['vp9', 'vp8', 'av1'], audio: ['opus', 'vorbis'] },
+  gif: { label: 'GIF (움직이는 이미지, 소리 없음)', ext: 'gif', gif: true },
+  wav: { label: 'WAV (소리만)', ext: 'wav', audioOnly: true },
+  png: { label: 'PNG (현재 프레임 한 장)', ext: 'png', still: true },
 };
+
+/** Export presets shown at the top of the export dialog. */
+export const EXPORT_PRESETS = [
+  { id: 'youtube', name: '유튜브 1080p', desc: 'MP4 · 고화질', format: 'mp4', scale: 1, quality: 'high', fps: null },
+  { id: 'youtube4k', name: '유튜브 4K', desc: 'MP4 · 2배 업스케일/원본 4K', format: 'mp4', scale: 'uhd', quality: 'very-high', fps: null },
+  { id: 'shorts', name: '쇼츠·릴스·틱톡', desc: 'MP4 · 세로 9:16 시퀀스용', format: 'mp4', scale: 1, quality: 'high', fps: null, vertical: true },
+  { id: 'master', name: '최고 화질 보관용', desc: 'MP4 · 매우 높음', format: 'mp4', scale: 1, quality: 'very-high', fps: null },
+  { id: 'small', name: '작은 파일 (공유용)', desc: 'MP4 · 절반 크기 · 중간 화질', format: 'mp4', scale: 0.5, quality: 'medium', fps: null },
+  { id: 'web', name: '웹용 WebM', desc: 'VP9 · 고화질', format: 'webm', scale: 1, quality: 'high', fps: null },
+  { id: 'gif', name: '움짤 (GIF)', desc: '480px · 12fps', format: 'gif', scale: 'gif', quality: 'medium', fps: 12 },
+  { id: 'audio', name: '소리만 (WAV)', desc: '48kHz 16bit', format: 'wav', scale: 1, quality: 'high', fps: null },
+];
 
 /** Resolve the export range. which: 'all' | 'inout' */
 export function exportRange(which) {
@@ -44,6 +59,10 @@ class ExportProvider {
     return store.project.sequences[id];
   }
 
+  lut(id) {
+    return getRuntime(id).lut || null;
+  }
+
   image(id) {
     const rt = getRuntime(id);
     if (!rt.image) return { offline: true };
@@ -57,11 +76,13 @@ class ExportProvider {
   }
 
   /** Decode the exact frame of every visible video clip (recursing into nested sequences). */
-  async prepare(seq, t, prefix = '', depth = 0) {
+  async prepare(seq, t, prefix = '', depth = 0, angle = null) {
     if (depth === 0) this.frames.clear();
     if (depth > 8) return;
-    for (const tr of videoTracks(seq)) {
-      if (tr.hidden) continue;
+    const vts = videoTracks(seq);
+    for (const [i, tr] of vts.entries()) {
+      // a multicam source only shows its active angle (hidden flags do not apply there)
+      if (angle != null ? i !== angle - 1 : tr.hidden) continue;
       for (const clip of clipsOnTrack(seq, tr.id)) {
         if ((clip.kind !== 'video' && clip.kind !== 'nest') || clip.enabled === false || mediaStatus(clip.mediaId) !== 'ready') continue;
         const { lead, tail } = transitionExtents(seq, clip);
@@ -71,7 +92,7 @@ class ExportProvider {
         const mt = clamp(mediaTimeAt(clip, t), 0, maxT);
         if (clip.kind === 'nest') {
           const inner = store.project.sequences[m.sequenceId];
-          if (inner) await this.prepare(inner, mt, `${prefix}${clip.id}/`, depth + 1);
+          if (inner) await this.prepare(inner, mt, `${prefix}${clip.id}/`, depth + 1, clip.multicam && inner.multicam ? clip.multicam.angle : null);
           continue;
         }
         const key = prefix + clip.id;
@@ -158,6 +179,7 @@ class ExportProvider {
 export async function renderAudioMix(seq, start, end, sampleRate = 48000, onProgress = () => {}, depth = 0) {
   const length = Math.max(1, Math.ceil((end - start) * sampleRate));
   const ctx = new OfflineAudioContext(2, length, sampleRate);
+  try { await loadAudioWorklets(ctx); } catch { /* noise gate passes audio through */ }
   const master = ctx.createGain();
   master.gain.value = dbToGain(seq.masterVolume || 0);
   master.connect(ctx.destination);
@@ -178,29 +200,35 @@ export async function renderAudioMix(seq, start, end, sampleRate = 48000, onProg
     let from = Math.max(clip.start - lead, start);
     let to = Math.min(clipEnd(clip) + tail, end);
     if (to <= from) continue;
-    // media span consumed between [from, to)
-    let m0 = mediaTimeAt(clip, clip.reverse ? to : from);
-    let m1 = mediaTimeAt(clip, clip.reverse ? from : to);
+    // media span consumed between [from, to) — mediaTimeAt covers speed, speed ramps and reverse
+    const mA = mediaTimeAt(clip, from);
+    const mB = mediaTimeAt(clip, to);
     const mdur = m.duration || Infinity;
-    if (m0 < 0) {
-      if (!clip.reverse) from += -m0 / clip.speed;
-      else to -= -m0 / clip.speed;
-      m0 = 0;
-    }
-    if (m1 > mdur) {
-      if (!clip.reverse) to -= (m1 - mdur) / clip.speed;
-      else from += (m1 - mdur) / clip.speed;
-      m1 = mdur;
-    }
-    if (to <= from || m1 <= m0) continue;
-    const buffer = m.kind === 'sequence'
-      ? (depth < 8 && store.project.sequences[m.sequenceId] ? await renderAudioMix(store.project.sequences[m.sequenceId], m0, m1, sampleRate, () => {}, depth + 1) : null)
-      : await decodeAudioRange(clip.mediaId, m0, m1);
+    const lo = Math.max(0, Math.min(mA, mB));
+    const hi = Math.min(mdur, Math.max(mA, mB));
+    if (hi - lo < 1e-4) continue;
+    const pad = 0.1;
+    const srcStart = Math.max(0, lo - pad);
+    const srcEnd = Math.min(mdur, hi + pad);
+    const source = m.kind === 'sequence'
+      ? (depth < 8 && store.project.sequences[m.sequenceId] ? await renderAudioMix(store.project.sequences[m.sequenceId], srcStart, srcEnd, sampleRate, () => {}, depth + 1) : null)
+      : await decodeAudioRange(clip.mediaId, srcStart, srcEnd);
     done++;
     onProgress(done / jobs.length);
-    if (!buffer) continue;
-    if (clip.reverse) for (let c = 0; c < buffer.numberOfChannels; c++) buffer.getChannelData(c).reverse();
-
+    if (!source) continue;
+    let buffer;
+    const plain = clip.speed === 1 && !clip.reverse && !hasSpeedRamp(clip);
+    if (plain) {
+      buffer = source;
+    } else {
+      if (clip.reverse) for (let c = 0; c < source.numberOfChannels; c++) source.getChannelData(c).reverse();
+      const srcLen = source.length / source.sampleRate;
+      const posAt = (tOut) => {
+        const mt = mediaTimeAt(clip, from + tOut);
+        return clip.reverse ? srcLen - (mt - srcStart) : mt - srcStart;
+      };
+      buffer = retimeAudio(source, posAt, to - from, { maintainPitch: clip.maintainPitch !== false });
+    }
     let bus = buses.get(tr.id);
     if (!bus) {
       const g = ctx.createGain();
@@ -213,7 +241,6 @@ export async function renderAudioMix(seq, start, end, sampleRate = 48000, onProg
     }
     const src = ctx.createBufferSource();
     src.buffer = buffer;
-    src.playbackRate.value = clip.speed;
     const gain = ctx.createGain();
     const pan = ctx.createStereoPanner();
     const chain = createChain(ctx, clip);
@@ -248,7 +275,17 @@ export async function renderAudioMix(seq, start, end, sampleRate = 48000, onProg
       src.connect(gain).connect(chain.input);
       chain.output.connect(pan).connect(bus);
     } else src.connect(gain).connect(pan).connect(bus);
-    src.start(Math.max(0, from - start), 0, (to - from) * clip.speed);
+    if (plain) {
+      // a transition handle can start before the media does: start later instead of shifting audio
+      let offset = mA - srcStart;
+      let when = from - start;
+      if (offset < 0) {
+        when -= offset;
+        offset = 0;
+      }
+      const dur = to - start - when;
+      if (dur > 0) src.start(Math.max(0, when), offset, dur);
+    } else src.start(Math.max(0, from - start), 0, to - from);
   }
   return ctx.startRendering();
 }
@@ -314,35 +351,36 @@ export async function exportSequence(opts) {
   const seq = store.seq;
   const fmt = FORMATS[opts.format];
   const { start, end } = opts.range;
-  if (end - start <= 0) throw new Error('Nothing to export — the range is empty.');
+  if (end - start <= 0) throw new Error('내보낼 구간이 비어 있습니다. 타임라인에 클립이 있는지, 시작/끝 표시가 올바른지 확인하세요.');
   const token = opts.token || { cancelled: false };
   const progress = opts.onProgress || (() => {});
   playback.suspend(true);
   try {
     await preloadFonts(seq);
     if (fmt.audioOnly) {
-      progress(0, 'Mixing audio');
-      const mix = await renderAudioMix(seq, start, end, 48000, (f) => progress(f * 0.9, 'Mixing audio'));
-      progress(1, 'Done');
-      return { blob: encodeWav(mix), info: 'PCM 16-bit 48 kHz stereo' };
+      progress(0, '오디오 믹싱 중');
+      const mix = await renderAudioMix(seq, start, end, 48000, (f) => progress(f * 0.9, '오디오 믹싱 중'));
+      progress(1, '완료');
+      return { blob: encodeWav(mix), info: 'PCM 16비트 · 48 kHz · 스테레오' };
     }
 
     const outW = Math.max(2, Math.round((seq.width * opts.scale) / 2) * 2);
     const outH = Math.max(2, Math.round((seq.height * opts.scale) / 2) * 2);
     const fps = opts.fps || seq.fps;
+    if (fmt.gif) return await exportGifFrames(seq, start, end, outW, outH, fps, token, progress);
     const quality = new MB.Quality(opts.quality || 'high');
 
     const videoCodec = await MB.getFirstEncodableVideoCodec(fmt.video, { width: outW, height: outH, frameRate: fps, quality });
-    if (!videoCodec) throw new Error(`This browser cannot encode ${fmt.label} video. Try the other format or Chrome/Edge.`);
+    if (!videoCodec) throw new Error(`이 브라우저는 ${fmt.label.split(' —')[0]} 영상을 만들 수 없습니다. 다른 형식을 고르거나 최신 Chrome/Edge를 사용하세요.`);
     const wantAudio = opts.audio !== false && Object.values(seq.clips).some((c) => c.kind === 'audio');
     const audioCodec = wantAudio ? await MB.getFirstEncodableAudioCodec(fmt.audio, { numberOfChannels: 2, sampleRate: 48000, quality }) : null;
 
     let mix = null;
     if (audioCodec) {
-      progress(0, 'Mixing audio');
-      mix = await renderAudioMix(seq, start, end, 48000, (f) => progress(f * 0.05, 'Mixing audio'));
+      progress(0, '오디오 믹싱 중');
+      mix = await renderAudioMix(seq, start, end, 48000, (f) => progress(f * 0.05, '오디오 믹싱 중'));
     }
-    if (token.cancelled) throw new Error('Export cancelled');
+    if (token.cancelled) throw new Error('내보내기를 취소했습니다');
 
     const canvas = document.createElement('canvas');
     canvas.width = outW;
@@ -370,7 +408,7 @@ export async function exportSequence(opts) {
     const started = performance.now();
     try {
       for (let i = 0; i < total; i++) {
-        if (token.cancelled) throw new Error('Export cancelled');
+        if (token.cancelled) throw new Error('내보내기를 취소했습니다');
         const t = start + i / fps;
         await provider.prepare(seq, t);
         compositor.render(ctx, seq, t, provider, { scale: outW / seq.width });
@@ -386,12 +424,12 @@ export async function exportSequence(opts) {
         if (i % 3 === 0 || i === total - 1) {
           const elapsed = (performance.now() - started) / 1000;
           const eta = (elapsed / (i + 1)) * (total - i - 1);
-          progress(0.05 + 0.93 * ((i + 1) / total), `Frame ${i + 1} / ${total} · ${Math.ceil(eta)} s left`);
+          progress(0.05 + 0.93 * ((i + 1) / total), `프레임 ${i + 1} / ${total} · 약 ${Math.ceil(eta)}초 남음`);
           await new Promise((r) => setTimeout(r, 0));
         }
       }
       if (audioSource && mix && audioPos < mix.length) await audioSource.add(sliceBuffer(mix, audioPos, mix.length));
-      progress(0.99, 'Finalizing');
+      progress(0.99, '파일 마무리 중');
       await output.finalize();
     } catch (err) {
       try { await output.cancel(); } catch { /* ignore */ }
@@ -400,7 +438,7 @@ export async function exportSequence(opts) {
       await provider.close();
     }
     const blob = new Blob([output.target.buffer], { type: opts.format === 'mp4' ? 'video/mp4' : 'video/webm' });
-    progress(1, 'Done');
+    progress(1, '완료');
     return { blob, info: `${outW}×${outH} @ ${fps} fps · ${videoCodec.toUpperCase()}${audioCodec ? ' + ' + audioCodec.toUpperCase() : ''}` };
   } finally {
     playback.suspend(false);
@@ -423,4 +461,37 @@ export async function exportFrame(t = store.ui.playhead) {
     await provider.close();
   }
   return new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+}
+
+// ---------------------------------------------------------------- GIF
+
+async function exportGifFrames(seq, start, end, outW, outH, fps, token, progress) {
+  const canvas = document.createElement('canvas');
+  canvas.width = outW;
+  canvas.height = outH;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  const compositor = new Compositor();
+  const provider = new ExportProvider(outW);
+  const frames = [];
+  const total = Math.max(1, Math.round((end - start) * fps));
+  try {
+    for (let i = 0; i < total; i++) {
+      if (token.cancelled) throw new Error('내보내기를 취소했습니다');
+      const t = start + i / fps;
+      await provider.prepare(seq, t);
+      compositor.render(ctx, seq, t, provider, { scale: outW / seq.width });
+      frames.push(ctx.getImageData(0, 0, outW, outH).data.slice());
+      if (i % 3 === 0) {
+        progress(0.7 * ((i + 1) / total), `프레임 ${i + 1} / ${total}`);
+        await new Promise((r) => setTimeout(r, 0));
+      }
+    }
+  } finally {
+    await provider.close();
+  }
+  progress(0.75, '색상표 만들고 압축하는 중');
+  await new Promise((r) => setTimeout(r, 0));
+  const blob = await encodeGif(frames, outW, outH, fps, (f) => progress(0.75 + 0.24 * f, 'GIF 압축 중'));
+  progress(1, '완료');
+  return { blob, info: `${outW}×${outH} · ${fps}fps · ${total}프레임` };
 }

@@ -119,7 +119,13 @@ export function installShortcuts() {
       case 'F1': run = c.shortcuts; break;
       case 'Slash': if (shift) run = c.shortcuts; break;
       case 'Escape': run = c.deselectAll; break;
-      default: break;
+      default:
+        // multicam angles: 1-9 (top row or keypad)
+        if (!mod && !alt && !shift && /^(Digit|Numpad)[1-9]$/.test(code)) {
+          const n = Number(code.slice(-1));
+          run = () => c.switchAngle(n);
+        }
+        break;
     }
     if (!run && !mod && !alt && !shift && TOOL_KEYS[code]) run = () => store.setTool(TOOL_KEYS[code]);
     if (!run) return;

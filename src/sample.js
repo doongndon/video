@@ -46,7 +46,7 @@ async function synthMusic(seconds = 12, sampleRate = 44100) {
     osc.stop(k * 3 + 3);
   }
   const buf = await ctx.startRendering();
-  return new File([encodeWav(buf)], 'Sample Music.wav', { type: 'audio/wav' });
+  return new File([encodeWav(buf)], '샘플 음악.wav', { type: 'audio/wav' });
 }
 
 function setParam(clip, fxType, key, value, kf) {
@@ -57,15 +57,15 @@ function setParam(clip, fxType, key, value, kf) {
 }
 
 export async function loadSampleProject() {
-  store.loadProject(createProject('Sample Project'));
+  store.loadProject(createProject('샘플 프로젝트'));
   const s = store.seq;
-  s.name = 'Sample Sequence';
+  s.name = '샘플 시퀀스';
   const [v1, v2, v3] = videoTracks(s);
   const [a1] = audioTracks(s);
 
-  const blue = createSyntheticMedia('color', { name: 'Night Blue', color: '#14284b' });
-  const dusk = createSyntheticMedia('color', { name: 'Dusk', color: '#5b2a4a' });
-  const adj = createSyntheticMedia('adjustment', { name: 'Adjustment Layer' });
+  const blue = createSyntheticMedia('color', { name: '밤하늘 파랑', color: '#14284b' });
+  const dusk = createSyntheticMedia('color', { name: '노을', color: '#5b2a4a' });
+  const adj = createSyntheticMedia('adjustment', { name: '조정 레이어' });
 
   let musicId = null;
   try {
@@ -84,7 +84,7 @@ export async function loadSampleProject() {
   const bar = edit.addShapeClip('rectangle', { start: 1.5 });
   const dot = edit.addShapeClip('ellipse', { start: 7 });
 
-  store.transact('Sample layout', () => {
+  store.transact('샘플 배치', () => {
     const c = (id) => s.clips[id];
     // title: scales up while fading in, dissolves out
     c(title).duration = 5;
@@ -123,8 +123,8 @@ export async function loadSampleProject() {
     setParam(c(dot), 'motion', 'scale', 100, [[0, 60], [4.5, 120]]);
     c(dot).transIn = { type: 'crossDissolve', duration: 1 };
     for (const id of [title, subtitle]) c(id).trackId = v3.id;
-    s.markers.push({ id: 'mk_sample1', time: 0.5, name: 'Title', color: '#4ade80', comment: '' });
-    s.markers.push({ id: 'mk_sample2', time: 6, name: 'Scene 2', color: '#fb923c', comment: '' });
+    s.markers.push({ id: 'mk_sample1', time: 0.5, name: '제목', color: '#4ade80', comment: '' });
+    s.markers.push({ id: 'mk_sample2', time: 6, name: '장면 2', color: '#fb923c', comment: '' });
   });
 
   // a vignette + grain adjustment layer over everything
@@ -133,8 +133,8 @@ export async function loadSampleProject() {
   const adjClip = Object.values(store.seq.clips).find((c) => c.mediaId === adj);
   edit.addEffect([adjClip.id], 'vignette');
   edit.addEffect([adjClip.id], 'filmGrain');
-  store.transact('Sample grain', () => {
-    const g = adjClip.effects.find((e) => e.type === 'filmGrain');
+  store.transact('샘플 그레인', () => {
+    const g = store.seq.clips[adjClip.id]?.effects.find((e) => e.type === 'filmGrain');
     if (g) g.params.amount.value = 18;
   });
 

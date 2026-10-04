@@ -4,12 +4,12 @@
 import { store } from './store.js';
 import { uid, EPS, clamp, snapFrame, deepClone } from './util.js';
 import {
-  setParamValue, createClip, createTrack, clipEnd, clipsOnTrack, linkedClips, getTrack, videoTracks, audioTracks,
+  setParamValue, mediaTimeAt, contentTime, sourceOut, remapSpeedAt, createClip, createTrack, clipEnd, clipsOnTrack, linkedClips, getTrack, videoTracks, audioTracks,
   sequenceDuration, prevAdjacent, nextAdjacent, shiftClipKeyframes, scaleClipKeyframes, renameTracks,
   clampTransitionDuration, trackKindForClip, DEFAULT_STILL_DURATION, createEffect, isTimed,
   addSequenceToProject, createSequence, sequenceContains, sequenceMediaId,
 } from './model.js';
-import { DEFAULT_AUDIO_TRANSITION, DEFAULT_VIDEO_TRANSITION, TRANSITIONS, EFFECTS } from './effects.js';
+import { DEFAULT_AUDIO_TRANSITION, DEFAULT_VIDEO_TRANSITION, TRANSITIONS, EFFECTS, effectFitsClip } from './effects.js';
 
 const seq = () => store.seq;
 const media = (id) => store.project.media[id];
@@ -17,6 +17,18 @@ const fd = () => 1 / seq().fps;
 const q = (t) => snapFrame(t, seq().fps);
 
 // ---------------------------------------------------------------- raw helpers
+
+/** In point of the part of clip `c` that starts `cut` seconds into it (speed, remap, reverse aware). */
+function inPointAfterCut(c, cut) {
+  if (c.hold) return c.inPoint;
+  if (c.reverse) return c.inPoint; // reversed: inPoint is the media time at the clip's end
+  return mediaTimeAt(c, c.start + cut);
+}
+
+/** In point of the left part of a reversed clip cut `cut` seconds in (its end now shows later media). */
+function reverseLeftInPoint(c, cut) {
+  return c.inPoint + contentTime(c, c.duration) - contentTime(c, cut);
+}
 
 function cloneClip(c, overrides = {}) {
   const copy = deepClone(c);
@@ -41,20 +53,22 @@ export function rawClearRange(trackId, t0, t1, exceptIds = new Set()) {
       const cut = t1 - c.start;
       right.start = t1;
       right.duration = ce - t1;
-      right.inPoint = c.inPoint + cut * c.speed;
+      right.inPoint = inPointAfterCut(c, cut);
       shiftClipKeyframes(right, -cut);
       right.transIn = null;
+      if (c.reverse) c.inPoint = reverseLeftInPoint(c, t0 - c.start);
       c.duration = t0 - c.start;
       c.transOut = null;
       s.clips[right.id] = right;
     } else if (c.start < t0) {
+      if (c.reverse) c.inPoint = reverseLeftInPoint(c, t0 - c.start);
       c.duration = t0 - c.start;
       c.transOut = null;
     } else {
       const cut = t1 - c.start;
+      c.inPoint = inPointAfterCut(c, cut);
       c.start = t1;
       c.duration = ce - t1;
-      c.inPoint += cut * c.speed;
       shiftClipKeyframes(c, -cut);
       c.transIn = null;
     }
@@ -97,9 +111,10 @@ export function rawSplit(c, t) {
   const cut = t - c.start;
   right.start = t;
   right.duration = clipEnd(c) - t;
-  right.inPoint = c.hold ? c.inPoint : c.inPoint + cut * c.speed;
+  right.inPoint = inPointAfterCut(c, cut);
   right.transIn = null;
   shiftClipKeyframes(right, -cut);
+  if (c.reverse) c.inPoint = reverseLeftInPoint(c, cut);
   c.duration = cut;
   c.transOut = null;
   s.clips[right.id] = right;
@@ -162,9 +177,13 @@ export function withLinked(ids) {
 export function placeMedia(mediaId, opts) {
   const m = media(mediaId);
   if (!m) return [];
+  if (m.kind === 'lut') {
+    store.toast('LUT 파일은 타임라인에 놓지 않습니다. 클립을 선택한 뒤 프로젝트 패널에서 LUT를 오른쪽 클릭 ▸ 선택한 클립에 LUT 적용을 누르세요.');
+    return [];
+  }
   const s = seq();
   if (m.kind === 'sequence' && sequenceContains(store.project, m.sequenceId, s.id)) {
-    store.toast('A sequence cannot be nested inside itself');
+    store.toast('시퀀스를 자기 자신 안에 중첩할 수 없습니다');
     return [];
   }
   const mode = opts.mode || 'overwrite';
@@ -179,12 +198,12 @@ export function placeMedia(mediaId, opts) {
   const vTrack = wantVideo ? getTrack(s, opts.vTrackId) || targetTrack('video') : null;
   const aTrack = wantAudio ? getTrack(s, opts.aTrackId) || targetTrack('audio') : null;
   if ((vTrack && vTrack.locked) || (aTrack && aTrack.locked)) {
-    store.toast('Target track is locked');
+    store.toast('대상 트랙이 잠겨 있습니다');
     return [];
   }
   if (!vTrack && !aTrack) return [];
 
-  return store.transact(mode === 'insert' ? 'Insert' : 'Overwrite', () => {
+  return store.transact(mode === 'insert' ? '삽입' : '덮어쓰기', () => {
     const linkId = vTrack && aTrack ? uid('link') : null;
     const trackIds = [vTrack?.id, aTrack?.id].filter(Boolean);
     if (mode === 'insert') {
@@ -224,14 +243,14 @@ export function addTextClip({ start = store.ui.playhead, x, y, content } = {}) {
   const dur = DEFAULT_STILL_DURATION;
   const tracks = videoTracks(s).filter((t) => !t.locked);
   let track = tracks.find((t, i) => i > 0 && !clipsOnTrack(s, t.id).some((c) => c.start < start + dur && clipEnd(c) > start));
-  return store.transact('New Text', () => {
+  return store.transact('새 텍스트', () => {
     if (!track) {
       track = createTrack('video', videoTracks(s).length);
       const lastVideoIdx = s.tracks.findLastIndex((t) => t.kind === 'video');
       s.tracks.splice(lastVideoIdx + 1, 0, track);
       renameTracks(s);
     }
-    const c = createClip(s, { kind: 'text', trackId: track.id, name: 'Text', start, duration: dur });
+    const c = createClip(s, { kind: 'text', trackId: track.id, name: content ? String(content).split('\n')[0].slice(0, 40) : '텍스트', start, duration: dur });
     const motion = c.effects.find((e) => e.type === 'motion');
     if (x != null) motion.params.posX.value = Math.round(x);
     if (y != null) motion.params.posY.value = Math.round(y);
@@ -249,14 +268,14 @@ export function addShapeClip(shape = 'rectangle', { start = store.ui.playhead } 
   const dur = DEFAULT_STILL_DURATION;
   const tracks = videoTracks(s).filter((t) => !t.locked);
   let track = tracks.find((t, i) => i > 0 && !clipsOnTrack(s, t.id).some((c) => c.start < start + dur && clipEnd(c) > start));
-  return store.transact('New Shape', () => {
+  return store.transact('새 도형', () => {
     if (!track) {
       track = createTrack('video', videoTracks(s).length);
       const lastVideoIdx = s.tracks.findLastIndex((t) => t.kind === 'video');
       s.tracks.splice(lastVideoIdx + 1, 0, track);
       renameTracks(s);
     }
-    const c = createClip(s, { kind: 'shape', trackId: track.id, name: shape[0].toUpperCase() + shape.slice(1), start, duration: dur });
+    const c = createClip(s, { kind: 'shape', trackId: track.id, name: { rectangle: '사각형', ellipse: '타원', triangle: '삼각형', line: '선' }[shape] || '도형', start, duration: dur });
     const fx = c.effects.find((e) => e.type === 'shape');
     fx.params.shape.value = shape;
     if (shape === 'ellipse') {
@@ -280,7 +299,7 @@ export function deleteSelection({ ripple = false } = {}) {
   const sel = store.selection;
   if (sel.transition) {
     const c = s.clips[sel.transition.clipId];
-    store.transact('Clear Transition', () => {
+    store.transact('전환 지우기', () => {
       if (c) c[sel.transition.edge === 'in' ? 'transIn' : 'transOut'] = null;
       store.selection.transition = null;
     });
@@ -292,14 +311,14 @@ export function deleteSelection({ ripple = false } = {}) {
     // close the gap on every unlocked track that is empty across it (keeps tracks in sync)
     const empty = unlockedTrackIds().filter((id) => !clipsOnTrack(s, id).some((c) => c.start < end - EPS && clipEnd(c) > start + EPS));
     if (!empty.includes(trackId)) return;
-    store.transact('Ripple Delete Gap', () => rawRipple(empty, end - EPS, -(end - start)));
+    store.transact('빈자리 잔물결 삭제', () => rawRipple(empty, end - EPS, -(end - start)));
     store.selection.gap = null;
     store.emit('selection');
     return;
   }
   const ids = [...withLinked(sel.clips)].filter((id) => s.clips[id] && !isLocked(s.clips[id].trackId));
   if (!ids.length) return;
-  store.transact(ripple ? 'Ripple Delete' : 'Clear', () => {
+  store.transact(ripple ? '잔물결 삭제' : '지우기', () => {
     const removed = ids.map((id) => s.clips[id]);
     for (const c of removed) delete s.clips[c.id];
     if (ripple) {
@@ -331,12 +350,12 @@ function mergeSpans(spans) {
 export function liftExtract(extract) {
   const s = seq();
   if (s.inPoint == null || s.outPoint == null || s.outPoint <= s.inPoint) {
-    store.toast('Set sequence In and Out points first (I / O)');
+    store.toast('먼저 시퀀스 시작/끝을 표시하세요 (I / O 키)');
     return;
   }
   const tracks = s.tracks.filter((t) => t.targeted && !t.locked).map((t) => t.id);
   const all = unlockedTrackIds();
-  store.transact(extract ? 'Extract' : 'Lift', () => {
+  store.transact(extract ? '추출' : '들어올리기', () => {
     rawClearRangeMulti(extract ? all : tracks, s.inPoint, s.outPoint);
     if (extract) rawRipple(all, s.outPoint, -(s.outPoint - s.inPoint));
     if (extract) {
@@ -364,7 +383,7 @@ export function addEdit({ allTracks = false, t = store.ui.playhead, clipIds = nu
   }
   targets = [...withLinked(targets.map((c) => c.id))].map((id) => s.clips[id]).filter((c) => c && !isLocked(c.trackId) && c.start < t - EPS && clipEnd(c) > t + EPS);
   if (!targets.length) return;
-  store.transact('Add Edit', () => {
+  store.transact('편집점 추가', () => {
     const groups = new Map();
     for (const c of targets) {
       const key = c.linkId || c.id;
@@ -448,17 +467,24 @@ export function trimLimits(c, edge, { ripple = false, rolling = false } = {}) {
   let min = -Infinity;
   let max = Infinity;
   const f = fd();
+  // seconds of source per timeline second at the clip's head and tail
+  const rateIn = Math.max(1e-3, c.speed * remapSpeedAt(c, 0));
+  const rateOut = Math.max(1e-3, c.speed * remapSpeedAt(c, c.duration));
+  const srcOut = sourceOut(c);
   if (edge === 'in') {
     max = c.duration - f; // keep at least one frame
-    if (bounded) min = Math.max(min, -c.inPoint / c.speed);
-    min = Math.max(min, -c.start);
+    if (bounded) {
+      // extending the head reveals earlier media (or later media for reversed clips)
+      min = Math.max(min, c.reverse ? -(m.duration - (c.inPoint + contentTime(c, c.duration))) / rateIn : -c.inPoint / rateIn);
+    }
+    if (!ripple) min = Math.max(min, -c.start);
     if (!ripple && !rolling) {
       const prev = clipsOnTrack(s, c.trackId).filter((x) => x.id !== c.id && clipEnd(x) <= c.start + EPS).pop();
       if (prev) min = Math.max(min, prev ? clipEnd(prev) - c.start : min);
     }
   } else {
     min = -(c.duration - f);
-    if (bounded) max = Math.min(max, (m.duration - c.inPoint) / c.speed - c.duration);
+    if (bounded) max = Math.min(max, c.reverse ? c.inPoint / rateOut : (m.duration - srcOut) / rateOut);
     if (!ripple && !rolling) {
       const next = clipsOnTrack(s, c.trackId).find((x) => x.id !== c.id && x.start >= clipEnd(c) - EPS);
       if (next) max = Math.min(max, next.start - clipEnd(c));
@@ -470,11 +496,12 @@ export function trimLimits(c, edge, { ripple = false, rolling = false } = {}) {
 
 export function rawTrimEdge(c, edge, delta) {
   if (edge === 'in') {
+    if (!c.hold && !c.reverse) c.inPoint = mediaTimeAt(c, c.start + delta);
     c.start += delta;
     c.duration -= delta;
-    if (!c.hold) c.inPoint += delta * c.speed;
     shiftClipKeyframes(c, -delta);
   } else {
+    if (c.reverse && !c.hold) c.inPoint += contentTime(c, c.duration) - contentTime(c, c.duration + delta);
     c.duration += delta;
   }
   if (c.transIn) c.transIn.duration = Math.min(c.transIn.duration, c.duration);
@@ -509,7 +536,7 @@ export function rippleTrimToPlayhead(which) {
   if (!under.length) return;
   const all = [...withLinked(under.map((c) => c.id))].map((id) => s.clips[id]);
   const affectedTracks = [...new Set(all.map((c) => c.trackId))];
-  store.transact(which === 'prev' ? 'Ripple Trim Previous Edit' : 'Ripple Trim Next Edit', () => {
+  store.transact(which === 'prev' ? '앞쪽 잔물결 트림' : '뒤쪽 잔물결 트림', () => {
     if (which === 'prev') {
       const delta = Math.min(...all.map((c) => t - c.start));
       for (const c of all) rawTrimEdge(c, 'in', delta);
@@ -527,23 +554,25 @@ export function rippleTrimToPlayhead(which) {
 
 // ---------------------------------------------------------------- clip properties
 
-export function setSpeed(ids, { speed, duration, ripple = false, hold = false, reverse = false }) {
+export function setSpeed(ids, { speed, duration, ripple = false, hold, reverse, maintainPitch }) {
   const s = seq();
-  store.transact('Speed/Duration', () => {
+  store.transact('속도/지속 시간', () => {
     for (const id of ids) {
       const c = s.clips[id];
       if (!c) continue;
       const oldDur = c.duration;
       if (isTimed(c)) {
+        // frame hold only applies to pictures; linked audio keeps playing normally
+        if (hold != null) c.hold = !!hold && c.kind === 'video';
+        if (reverse != null) c.reverse = !!reverse;
+        if (maintainPitch != null) c.maintainPitch = !!maintainPitch;
         const newSpeed = speed ?? c.speed;
         let newDur = duration ?? (c.duration * c.speed) / newSpeed;
         const m = media(c.mediaId);
-        if (m && Number.isFinite(m.duration) && !hold) newDur = Math.min(newDur, (m.duration - c.inPoint) / newSpeed);
+        if (m && Number.isFinite(m.duration) && !c.hold) newDur = Math.min(newDur, (m.duration - c.inPoint) / newSpeed);
         scaleClipKeyframes(c, newDur / c.duration);
         c.speed = newSpeed;
         c.duration = Math.max(fd(), q(newDur));
-        c.hold = hold;
-        c.reverse = reverse;
       } else if (duration) {
         c.duration = Math.max(fd(), q(duration));
       }
@@ -556,14 +585,25 @@ export function setSpeed(ids, { speed, duration, ripple = false, hold = false, r
   });
 }
 
+/** Toggle reverse playback per clip, keeping each clip's own speed. */
+export function toggleReverse(ids) {
+  const s = seq();
+  const clips = ids.map((id) => s.clips[id]).filter((c) => c && isTimed(c));
+  if (!clips.length) return;
+  const to = !clips[0].reverse;
+  store.transact('역재생', () => {
+    for (const c of clips) setSpeed([c.id], { speed: c.speed, reverse: to });
+  });
+}
+
 /** Add Frame Hold: split at the playhead and freeze the frame there for the rest of the clip. */
 export function addFrameHold(c, t = store.ui.playhead) {
   if (c.kind !== 'video') return;
-  store.transact('Add Frame Hold', () => {
+  store.transact('프레임 고정', () => {
     const at = q(t);
     const target = at > c.start + EPS ? rawSplit(c, at) || c : c;
     target.hold = true;
-    target.name = `${c.name} (Hold)`;
+    target.name = `${c.name} (고정)`;
   });
 }
 
@@ -571,12 +611,12 @@ export function addFrameHold(c, t = store.ui.playhead) {
 export function normalizeAudio(ids, peakFn, targetDb = -1) {
   const s = seq();
   let changed = 0;
-  store.transact('Normalize Audio', () => {
+  store.transact('오디오 노멀라이즈', () => {
     for (const id of ids) {
       const c = s.clips[id];
       if (!c || c.kind !== 'audio') continue;
       const a = c.inPoint;
-      const b = c.inPoint + c.duration * c.speed;
+      const b = sourceOut(c);
       const peak = peakFn(c.mediaId, Math.min(a, b), Math.max(a, b));
       if (!peak) continue;
       const vol = c.effects.find((e) => e.type === 'volume');
@@ -597,7 +637,7 @@ export function normalizeAudio(ids, peakFn, targetDb = -1) {
 /** Apply cuts at the given sequence times to one clip (and its linked partners). */
 export function cutClipAt(clipId, times) {
   const s = seq();
-  store.transact('Scene Edit Detection', () => {
+  store.transact('장면 전환 감지', () => {
     for (const t of [...times].sort((a, b) => b - a)) {
       const c = Object.values(s.clips).find((x) => (x.id === clipId || (s.clips[clipId]?.linkId && x.linkId === s.clips[clipId].linkId)) && x.start < t - EPS && clipEnd(x) > t + EPS);
       if (!c) continue;
@@ -608,7 +648,7 @@ export function cutClipAt(clipId, times) {
 
 export function setEnabled(ids, enabled) {
   const s = seq();
-  store.transact(enabled ? 'Enable' : 'Disable', () => {
+  store.transact(enabled ? '클립 사용' : '클립 사용 안 함', () => {
     for (const id of withLinked(ids)) if (s.clips[id]) s.clips[id].enabled = enabled ?? !s.clips[id].enabled;
   });
 }
@@ -617,7 +657,7 @@ export function linkClips(ids) {
   const s = seq();
   const clips = ids.map((id) => s.clips[id]).filter(Boolean);
   if (clips.length < 2) return;
-  store.transact('Link', () => {
+  store.transact('연결', () => {
     const l = uid('link');
     for (const c of clips) c.linkId = l;
   });
@@ -625,13 +665,13 @@ export function linkClips(ids) {
 
 export function unlinkClips(ids) {
   const s = seq();
-  store.transact('Unlink', () => {
+  store.transact('연결 해제', () => {
     for (const id of withLinked(ids)) if (s.clips[id]) s.clips[id].linkId = null;
   });
 }
 
 export function renameClip(id, name) {
-  store.transact('Rename', () => {
+  store.transact('이름 바꾸기', () => {
     const c = seq().clips[id];
     if (c) c.name = name;
   });
@@ -646,10 +686,10 @@ export function applyTransition(clipId, edge, type, duration = 1) {
   if (!c) return;
   const def = TRANSITIONS[type];
   if (!def || (def.kind === 'audio') !== (c.kind === 'audio')) {
-    store.toast(`${def?.name || 'Transition'} can only be applied to ${def?.kind} clips`);
+    store.toast(`${def?.name || '이 전환'}은(는) ${def?.kind === 'audio' ? '오디오' : '영상'} 클립에만 적용할 수 있습니다`);
     return;
   }
-  store.transact(`Apply ${def.name}`, () => {
+  store.transact(`${def.name} 적용`, () => {
     if (edge === 'out') {
       const next = nextAdjacent(s, c);
       if (next) {
@@ -676,7 +716,7 @@ export function applyDefaultTransitions({ video = true, audio = true } = {}) {
     const d = clampTransitionDuration(s, c, edge, 1);
     c[edge === 'in' ? 'transIn' : 'transOut'] = { type, duration: q(d) || fd() };
   };
-  store.transact('Apply Default Transitions', () => {
+  store.transact('기본 전환 적용', () => {
     if (sel.length) {
       for (const c of sel) {
         apply(c, 'in');
@@ -721,25 +761,24 @@ export function rawSetParam(clip, fx, key, value) {
 export function addEffect(clipIds, type) {
   const s = seq();
   const def = EFFECTS[type];
-  store.transact(`Add ${def.name}`, () => {
+  store.transact(`${def.name} 추가`, () => {
     for (const id of clipIds) {
       const c = s.clips[id];
-      if (!c) continue;
-      if ((def.kind === 'audio') !== (c.kind === 'audio')) continue;
+      if (!c || !effectFitsClip(type, c.kind)) continue;
       c.effects.push(createEffect(type, s));
     }
   });
 }
 
 export function removeEffect(clipId, fxId) {
-  store.transact('Remove Effect', () => {
+  store.transact('효과 제거', () => {
     const c = seq().clips[clipId];
     if (c) c.effects = c.effects.filter((e) => e.id !== fxId || EFFECTS[e.type].fixed);
   });
 }
 
 export function moveEffect(clipId, fxId, dir) {
-  store.transact('Reorder Effect', () => {
+  store.transact('효과 순서 변경', () => {
     const c = seq().clips[clipId];
     const i = c.effects.findIndex((e) => e.id === fxId);
     const j = i + dir;
@@ -750,7 +789,7 @@ export function moveEffect(clipId, fxId, dir) {
 
 export function resetEffect(clipId, fxId) {
   const s = seq();
-  store.transact('Reset Effect', () => {
+  store.transact('효과 초기화', () => {
     const c = s.clips[clipId];
     const fx = c?.effects.find((e) => e.id === fxId);
     if (!fx) return;
@@ -759,18 +798,68 @@ export function resetEffect(clipId, fxId) {
   });
 }
 
+/** Keep the time remapping of linked clips (video + its audio) identical. Raw: caller wraps. */
+export function rawSyncLinkedRemap(clipId) {
+  const s = seq();
+  const c = s.clips[clipId];
+  const src = c?.effects.find((e) => e.type === 'timeRemap');
+  if (!src) return;
+  for (const o of linkedClips(s, c)) {
+    if (o.id === c.id) continue;
+    const dst = o.effects.find((e) => e.type === 'timeRemap');
+    if (!dst) continue;
+    dst.enabled = src.enabled;
+    dst.params.speed = deepClone(src.params.speed);
+  }
+}
+
+/** Apply a saved effect preset ({type, enabled, params}) to clips. Returns the number of clips changed. */
+export function applyEffectPreset(clipIds, preset) {
+  const s = seq();
+  const def = EFFECTS[preset.type];
+  if (!def) return 0;
+  let n = 0;
+  store.transact(`프리셋 적용: ${preset.name}`, () => {
+    for (const id of clipIds) {
+      const c = s.clips[id];
+      if (!c || !effectFitsClip(preset.type, c.kind)) continue;
+      let fx = def.fixed ? c.effects.find((e) => e.type === preset.type) : null;
+      if (def.fixed && !fx) continue;
+      if (!fx) {
+        fx = createEffect(preset.type, s);
+        c.effects.push(fx);
+      }
+      for (const [k, p] of Object.entries(preset.params || {})) {
+        if (fx.params[k]) fx.params[k] = deepClone(p);
+      }
+      fx.enabled = preset.enabled !== false;
+      if (preset.type === 'timeRemap') rawSyncLinkedRemap(c.id);
+      n++;
+    }
+  });
+  return n;
+}
+
 /** Copy effects from one clip to others (Paste Attributes). */
 export function pasteAttributes(sourceClip, targetIds) {
   const s = seq();
-  store.transact('Paste Attributes', () => {
+  // fixed effects that carry "look" rather than content are replaced; added effects are appended
+  const REPLACEABLE = new Set(['motion', 'opacity', 'timeRemap', 'volume', 'panner']);
+  store.transact('특성 붙여넣기', () => {
     for (const id of targetIds) {
       const c = s.clips[id];
-      if (!c || (c.kind === 'audio') !== (sourceClip.kind === 'audio')) continue;
-      const keepFixed = c.effects.filter((e) => EFFECTS[e.type].fixed && !sourceClip.effects.some((x) => x.type === e.type));
-      c.effects = [...keepFixed, ...deepClone(sourceClip.effects).filter((e) => !EFFECTS[e.type].fixed || c.effects.some((x) => x.type === e.type))];
-      for (const fx of c.effects) fx.id = uid('fx');
-      // keep fixed effects first
-      c.effects.sort((a, b) => (EFFECTS[b.type].fixed ? 1 : 0) - (EFFECTS[a.type].fixed ? 1 : 0));
+      if (!c || id === sourceClip.id || (c.kind === 'audio') !== (sourceClip.kind === 'audio')) continue;
+      const src = deepClone(sourceClip.effects);
+      c.effects = c.effects.map((e) => {
+        if (!REPLACEABLE.has(e.type)) return e;
+        const m = src.find((x) => x.type === e.type);
+        return m ? { ...m, id: e.id } : e;
+      });
+      for (const e of src) {
+        if (EFFECTS[e.type]?.fixed || !effectFitsClip(e.type, c.kind)) continue;
+        c.effects.push({ ...e, id: uid('fx') });
+      }
+      rawSyncLinkedRemap(c.id);
     }
   });
 }
@@ -785,7 +874,7 @@ export function copySelection(cut = false) {
   const base = Math.min(...clips.map((c) => c.start));
   store.ui.clipboard = { clips, base };
   if (cut) deleteSelection();
-  store.toast(`${cut ? 'Cut' : 'Copied'} ${clips.length} clip(s)`);
+  store.toast(`클립 ${clips.length}개를 ${cut ? '잘라냈습니다' : '복사했습니다'}`);
 }
 
 export function paste({ insert = false } = {}) {
@@ -799,7 +888,7 @@ export function paste({ insert = false } = {}) {
   const aIdx = audioTracks(s).indexOf(at);
   const minV = Math.min(...cb.clips.filter((c) => c.kind !== 'audio').map((c) => videoTracks(s).findIndex((x) => x.id === c.trackId)).filter((i) => i >= 0), Infinity);
   const minA = Math.min(...cb.clips.filter((c) => c.kind === 'audio').map((c) => audioTracks(s).findIndex((x) => x.id === c.trackId)).filter((i) => i >= 0), Infinity);
-  store.transact(insert ? 'Paste Insert' : 'Paste', () => {
+  store.transact(insert ? '삽입하며 붙여넣기' : '붙여넣기', () => {
     const linkMap = new Map();
     const created = [];
     const span = Math.max(...cb.clips.map((c) => clipEnd(c))) - cb.base;
@@ -835,10 +924,10 @@ export function paste({ insert = false } = {}) {
 export function newSequence({ name, width, height, fps } = {}) {
   const cur = seq();
   const s = createSequence({
-    name: name || `Sequence ${String(Object.keys(store.project.sequences).length + 1).padStart(2, '0')}`,
+    name: name || `시퀀스 ${String(Object.keys(store.project.sequences).length + 1).padStart(2, '0')}`,
     width: width || cur.width, height: height || cur.height, fps: fps || cur.fps,
   });
-  store.transact('New Sequence', () => addSequenceToProject(store.project, s));
+  store.transact('새 시퀀스', () => addSequenceToProject(store.project, s));
   store.openSequence(s.id);
   return s.id;
 }
@@ -848,7 +937,7 @@ export function duplicateSequence(id = seq().id) {
   if (!src) return null;
   const copy = deepClone(src);
   copy.id = uid('seq');
-  copy.name = `${src.name} Copy`;
+  copy.name = `${src.name} 복사본`;
   // fresh ids, preserving links and track references
   const trackMap = new Map();
   for (const t of copy.tracks) {
@@ -870,18 +959,18 @@ export function duplicateSequence(id = seq().id) {
   }
   copy.clips = clips;
   for (const mk of copy.markers) mk.id = uid('mk');
-  store.transact('Duplicate Sequence', () => addSequenceToProject(store.project, copy));
+  store.transact('시퀀스 복제', () => addSequenceToProject(store.project, copy));
   return copy.id;
 }
 
 export function deleteSequence(id) {
   const p = store.project;
   if (Object.keys(p.sequences).length <= 1) {
-    store.toast('A project needs at least one sequence');
+    store.toast('프로젝트에는 시퀀스가 하나 이상 있어야 합니다');
     return;
   }
   const mid = sequenceMediaId(id);
-  store.transact('Delete Sequence', () => {
+  store.transact('시퀀스 삭제', () => {
     for (const other of Object.values(p.sequences)) {
       for (const c of Object.values(other.clips)) if (c.mediaId === mid) delete other.clips[c.id];
     }
@@ -901,7 +990,7 @@ export function nestSelection(name) {
   const s = seq();
   const ids = [...withLinked(store.selection.clips)].filter((id) => s.clips[id] && !isLocked(s.clips[id].trackId));
   if (!ids.length) {
-    store.toast('Select clips to nest');
+    store.toast('중첩할 클립을 선택하세요');
     return null;
   }
   const clips = ids.map((id) => s.clips[id]);
@@ -914,7 +1003,7 @@ export function nestSelection(name) {
   const minV = usedV.length ? Math.min(...usedV) : 0;
   const minA = usedA.length ? Math.min(...usedA) : 0;
   const nested = createSequence({
-    name: name || `Nested Sequence ${String(Object.keys(store.project.sequences).length).padStart(2, '0')}`,
+    name: name || `중첩 시퀀스 ${String(Object.keys(store.project.sequences).length).padStart(2, '0')}`,
     width: s.width, height: s.height, fps: s.fps,
     videoTracks: Math.max(3, (usedV.length ? Math.max(...usedV) - minV : 0) + 1),
     audioTracks: Math.max(3, (usedA.length ? Math.max(...usedA) - minA : 0) + 1),
@@ -922,7 +1011,7 @@ export function nestSelection(name) {
   const nvts = videoTracks(nested);
   const nats = audioTracks(nested);
   let nestId = null;
-  store.transact('Nest', () => {
+  store.transact('중첩', () => {
     for (const c of clips) {
       const copy = deepClone(c);
       copy.start = c.start - t0;
@@ -959,7 +1048,7 @@ export function nestSelection(name) {
 
 export function addTrack(kind) {
   const s = seq();
-  store.transact(`Add ${kind === 'video' ? 'Video' : 'Audio'} Track`, () => {
+  store.transact(`${kind === 'video' ? '비디오' : '오디오'} 트랙 추가`, () => {
     const t = createTrack(kind, 0);
     if (kind === 'video') {
       const lastVideoIdx = s.tracks.findLastIndex((x) => x.kind === 'video');
@@ -974,10 +1063,10 @@ export function deleteTrack(trackId) {
   const tr = getTrack(s, trackId);
   if (!tr) return;
   if ((tr.kind === 'video' ? videoTracks(s) : audioTracks(s)).length <= 1) {
-    store.toast('A sequence needs at least one track of each kind');
+    store.toast('비디오·오디오 트랙은 각각 하나 이상 있어야 합니다');
     return;
   }
-  store.transact('Delete Track', () => {
+  store.transact('트랙 삭제', () => {
     for (const c of clipsOnTrack(s, trackId)) delete s.clips[c.id];
     s.tracks = s.tracks.filter((t) => t.id !== trackId);
     renameTracks(s);
@@ -986,7 +1075,7 @@ export function deleteTrack(trackId) {
 
 export function setTrackFlag(trackId, flag, value) {
   const s = seq();
-  store.transact('Track Setting', () => {
+  store.transact('트랙 설정', () => {
     const tr = getTrack(s, trackId);
     if (tr) tr[flag] = value ?? !tr[flag];
   });
@@ -1003,21 +1092,21 @@ export function addMarker(t = store.ui.playhead, props = {}) {
   const s = seq();
   t = q(t);
   if (s.markers.some((m) => Math.abs(m.time - t) < EPS)) return;
-  store.transact('Add Marker', () => {
-    s.markers.push({ id: uid('mk'), time: t, name: props.name || `Marker ${s.markers.length + 1}`, color: props.color || '#4ade80', comment: props.comment || '' });
+  store.transact('마커 추가', () => {
+    s.markers.push({ id: uid('mk'), time: t, name: props.name || `마커 ${s.markers.length + 1}`, color: props.color || '#4ade80', comment: props.comment || '' });
     s.markers.sort((a, b) => a.time - b.time);
   });
 }
 
 export function removeMarker(id) {
-  store.transact('Delete Marker', () => {
+  store.transact('마커 삭제', () => {
     seq().markers = seq().markers.filter((m) => m.id !== id);
   });
 }
 
 export function setSequenceInOut(which, t) {
   const s = seq();
-  store.transact(which === 'in' ? 'Mark In' : 'Mark Out', () => {
+  store.transact(which === 'in' ? '시작 표시' : '끝 표시', () => {
     if (which === 'in') {
       s.inPoint = t == null ? null : q(t);
       if (s.inPoint != null && s.outPoint != null && s.outPoint <= s.inPoint) s.outPoint = null;
@@ -1034,7 +1123,7 @@ export function markClip() {
   const tracks = s.tracks.filter((tr) => tr.targeted).map((tr) => tr.id);
   const c = store.selectedClips()[0] || Object.values(s.clips).find((x) => tracks.includes(x.trackId) && x.start <= t && clipEnd(x) > t);
   if (!c) return;
-  store.transact('Mark Clip', () => {
+  store.transact('클립 범위 표시', () => {
     s.inPoint = c.start;
     s.outPoint = clipEnd(c);
   });
@@ -1054,7 +1143,7 @@ export function selectForward(t, trackId = null) {
 
 export function updateSequenceSettings({ width, height, fps, name }) {
   const s = seq();
-  store.transact('Sequence Settings', () => {
+  store.transact('시퀀스 설정', () => {
     const sx = width / s.width;
     const sy = height / s.height;
     if (name) s.name = name;
@@ -1077,7 +1166,7 @@ export function updateSequenceSettings({ width, height, fps, name }) {
 
 export function closeAllGaps() {
   const s = seq();
-  store.transact('Close Gaps', () => {
+  store.transact('빈자리 닫기', () => {
     for (const tr of s.tracks.filter((t) => !t.locked)) {
       let cursor = 0;
       for (const c of clipsOnTrack(s, tr.id)) {
@@ -1089,3 +1178,170 @@ export function closeAllGaps() {
 }
 
 export { sequenceDuration, prevAdjacent, linkedClips, trackKindForClip };
+
+// ---------------------------------------------------------------- labels
+
+export function setLabel(ids, color) {
+  const s = seq();
+  store.transact('레이블 색상', () => {
+    for (const id of ids) if (s.clips[id]) s.clips[id].label = color || null;
+  });
+}
+
+// ---------------------------------------------------------------- multicam
+
+/**
+ * Build a multicam source sequence: one angle per video track (V1 = 앵글 1), audio of every
+ * angle on its own track with only angle 1 audible. offsets: seconds each angle starts later.
+ */
+export function createMulticamSequence(mediaIds, offsets, { name, place = true } = {}) {
+  const p = store.project;
+  const first = p.media[mediaIds[0]];
+  const cur = seq();
+  const mc = createSequence({
+    name: name || `멀티캠 ${Object.values(p.sequences).filter((x) => x.multicam).length + 1}`,
+    width: first?.width ? Math.round(first.width / 2) * 2 : cur.width,
+    height: first?.height ? Math.round(first.height / 2) * 2 : cur.height,
+    fps: first?.fps ? Math.round(first.fps * 1000) / 1000 : cur.fps,
+    videoTracks: Math.max(1, mediaIds.length),
+    audioTracks: Math.max(1, mediaIds.length),
+  });
+  mc.multicam = true;
+  const minOff = Math.min(...offsets);
+  const vts = videoTracks(mc);
+  const ats = audioTracks(mc);
+  mediaIds.forEach((mid, i) => {
+    const m = p.media[mid];
+    if (!m) return;
+    const start = offsets[i] - minOff;
+    const dur = m.duration ?? DEFAULT_STILL_DURATION;
+    const link = m.hasAudio ? uid('link') : null;
+    const v = createClip(mc, { kind: 'video', trackId: vts[i].id, mediaId: mid, name: m.name, start, duration: dur, linkId: link });
+    mc.clips[v.id] = v;
+    if (m.hasAudio) {
+      const a = createClip(mc, { kind: 'audio', trackId: ats[i].id, mediaId: mid, name: m.name, start, duration: dur, linkId: link });
+      mc.clips[a.id] = a;
+    }
+    vts[i].name = `V${i + 1}`;
+    ats[i].muted = i > 0;
+  });
+  let mid = null;
+  store.transact('멀티캠 소스 시퀀스 만들기', () => {
+    mid = addSequenceToProject(p, mc);
+  });
+  if (place) {
+    const ids = placeMedia(mid, { mode: 'overwrite' });
+    store.transact('멀티캠 사용', () => {
+      for (const id of ids) {
+        const c = seq().clips[id];
+        if (c?.kind === 'nest') c.multicam = { angle: 1 };
+      }
+    });
+  }
+  return mc.id;
+}
+
+/** Find the multicam nest clip at the playhead (targeted video tracks first). */
+export function multicamClipAt(t = store.ui.playhead) {
+  const s = seq();
+  const isMc = (c) => c.kind === 'nest' && c.multicam && store.project.sequences[store.project.media[c.mediaId]?.sequenceId]?.multicam;
+  const tracks = videoTracks(s);
+  const order = [...tracks.filter((tr) => tr.targeted), ...tracks.filter((tr) => !tr.targeted)];
+  for (const tr of order) {
+    const c = clipsOnTrack(s, tr.id).find((x) => x.start <= t + EPS && clipEnd(x) > t + EPS && isMc(x));
+    if (c) return c;
+  }
+  return null;
+}
+
+/** Switch angle: while playing, cut at the playhead and switch the rest; while paused, switch the segment. */
+export function switchAngle(n, { cut = null } = {}) {
+  const s = seq();
+  const c = multicamClipAt();
+  if (!c) {
+    store.toast('재생헤드 아래에 멀티캠 클립이 없습니다');
+    return;
+  }
+  const inner = store.project.sequences[store.project.media[c.mediaId].sequenceId];
+  if (n > videoTracks(inner).length) {
+    store.toast(`앵글 ${n}이(가) 없습니다`);
+    return;
+  }
+  const t = q(store.ui.playhead);
+  const doCut = !!cut;
+  store.transact(`앵글 ${n}(으)로 전환`, () => {
+    let target = c;
+    if (doCut && t > c.start + EPS && t < clipEnd(c) - EPS) {
+      const rights = splitGroup(linkedClips(s, c).filter((x) => x.start < t - EPS && clipEnd(x) > t + EPS), t);
+      target = rights.find((x) => x.kind === 'nest') || c;
+    }
+    target.multicam = { angle: n };
+  });
+}
+
+// ---------------------------------------------------------------- auto ducking
+
+/**
+ * Lower music clips while speech is present on other tracks.
+ * activity(t) -> boolean says whether speech is audible at sequence time t.
+ */
+export function autoDuck(musicIds, intervals, { duckDb = -15, fadeIn = 0.3, fadeOut = 0.6 } = {}) {
+  const s = seq();
+  let changed = 0;
+  store.transact('자동 더킹', () => {
+    for (const id of musicIds) {
+      const c = s.clips[id];
+      const vol = c?.effects.find((e) => e.type === 'volume');
+      if (!vol) continue;
+      const base = vol.params.level.kf?.length ? Math.max(...vol.params.level.kf.map((k) => k.v)) : vol.params.level.value;
+      const low = clamp(base + duckDb, -60, 15);
+      const keys = [];
+      for (const [a, b] of intervals) {
+        if (b <= c.start || a >= clipEnd(c)) continue;
+        const pts = [[a - fadeIn, base], [a, low], [b, low], [b + fadeOut, base]];
+        for (const [t, v] of pts) keys.push({ t: clamp(t - c.start, 0, c.duration), v, ease: 'linear' });
+      }
+      if (!keys.length) continue;
+      keys.sort((x, y) => x.t - y.t);
+      // collapse keys on the same frame, keeping the lower level (overlapping ducks)
+      const merged = [];
+      for (const k of keys) {
+        const last = merged[merged.length - 1];
+        if (last && Math.abs(last.t - k.t) < 1 / s.fps) last.v = Math.min(last.v, k.v);
+        else merged.push(k);
+      }
+      if (merged[0].t > 0) merged.unshift({ t: 0, v: base, ease: 'linear' });
+      vol.params.level.kf = merged;
+      changed++;
+    }
+  });
+  return changed;
+}
+
+// ---------------------------------------------------------------- auto reframe
+
+/** Duplicate the active sequence at a new frame size; visual clips are re-scaled to fill (centre crop). */
+export function autoReframe(width, height, name) {
+  const srcId = seq().id;
+  const newId = duplicateSequence(srcId);
+  if (!newId) return null;
+  store.openSequence(newId);
+  updateSequenceSettings({ width, height, fps: seq().fps, name: name || `${seq().name} (${width}×${height})` });
+  const s = seq();
+  store.transact('자동 리프레임', () => {
+    for (const c of Object.values(s.clips)) {
+      const motion = c.effects.find((e) => e.type === 'motion');
+      if (!motion) continue;
+      const m = c.mediaId ? store.project.media[c.mediaId] : null;
+      if ((c.kind === 'video' || c.kind === 'image' || c.kind === 'nest') && m?.width) {
+        const fit = Math.min(width / m.width, height / m.height);
+        const fill = Math.max(width / m.width, height / m.height);
+        const factor = fill / fit;
+        const p = motion.params.scale;
+        p.value = Math.round(p.value * factor * 10) / 10;
+        if (p.kf) for (const k of p.kf) k.v = Math.round(k.v * factor * 10) / 10;
+      }
+    }
+  });
+  return newId;
+}

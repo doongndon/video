@@ -1,13 +1,30 @@
 // Project / sequence data model: factories, queries and keyframe evaluation.
 // Everything here is plain JSON so it can be snapshotted for undo and persisted.
 
-import { uid, EPS, clamp, lerp } from './util.js';
+import { uid, EPS, clamp, lerp, deepClone } from './util.js';
 import { EFFECTS, fixedEffectsFor } from './effects.js';
 
 export const DEFAULT_STILL_DURATION = 5;
 
-export function createProject(name = 'Untitled Project') {
-  const project = { version: 2, name, media: {}, mediaOrder: [], sequences: {}, activeSequenceId: null };
+/** Fixed (non-removable) effect types. */
+export const EFFECT_FIXED_TYPES = new Set(Object.entries(EFFECTS).filter(([, d]) => d.fixed).map(([k]) => k));
+
+/** Clip / media label colours (empty = default colour by clip type). */
+export const LABEL_COLORS = [
+  ['', '기본 (없음)'],
+  ['#d9534f', '빨강'],
+  ['#f0883e', '주황'],
+  ['#e3c23a', '노랑'],
+  ['#5cb85c', '초록'],
+  ['#2bb3a6', '청록'],
+  ['#4a90e2', '파랑'],
+  ['#8e6bd8', '보라'],
+  ['#d46fb2', '분홍'],
+  ['#8d95a3', '회색'],
+];
+
+export function createProject(name = '제목 없는 프로젝트') {
+  const project = { version: 3, name, media: {}, mediaOrder: [], sequences: {}, activeSequenceId: null, bins: {} };
   addSequenceToProject(project, createSequence());
   return project;
 }
@@ -40,7 +57,30 @@ export function migrateProject(project) {
     if (!project.media[sequenceMediaId(seq.id)]) addSequenceToProject(project, seq);
   }
   if (!project.sequences[project.activeSequenceId]) project.activeSequenceId = Object.keys(project.sequences)[0];
-  project.version = 2;
+  // clips from older versions may lack newer fixed effects (e.g. time remapping) or params
+  for (const seq of Object.values(project.sequences)) {
+    for (const c of Object.values(seq.clips)) {
+      const want = fixedEffectsFor(c.kind);
+      want.forEach((type, i) => {
+        if (!c.effects.some((e) => e.type === type)) {
+          const at = Math.min(i, c.effects.length);
+          c.effects.splice(at, 0, createEffect(type, seq));
+        }
+      });
+      for (const fx of c.effects) {
+        const def = EFFECTS[fx.type];
+        if (!def) continue;
+        for (const p of def.params) {
+          if (!fx.params[p.key]) {
+            const v = defaultParamValue(p, seq);
+            fx.params[p.key] = { value: v && typeof v === 'object' ? deepClone(v) : v, kf: null };
+          }
+        }
+      }
+    }
+  }
+  project.bins = project.bins || {};
+  project.version = 3;
   return project;
 }
 
@@ -72,7 +112,7 @@ export function sequenceContains(project, outerId, innerId, depth = 0) {
   return false;
 }
 
-export function createSequence({ name = 'Sequence 01', width = 1920, height = 1080, fps = 30, videoTracks = 3, audioTracks = 3 } = {}) {
+export function createSequence({ name = '시퀀스 01', width = 1920, height = 1080, fps = 30, videoTracks = 3, audioTracks = 3 } = {}) {
   const seq = { id: uid('seq'), name, width, height, fps, tracks: [], clips: {}, markers: [], inPoint: null, outPoint: null };
   for (let i = 0; i < videoTracks; i++) seq.tracks.push(createTrack('video', i));
   for (let i = 0; i < audioTracks; i++) seq.tracks.push(createTrack('audio', i));
@@ -115,7 +155,10 @@ export function createEffect(type, seq) {
   const def = EFFECTS[type];
   if (!def) throw new Error(`Unknown effect ${type}`);
   const params = {};
-  for (const p of def.params) params[p.key] = { value: defaultParamValue(p, seq), kf: null };
+  for (const p of def.params) {
+    const v = defaultParamValue(p, seq);
+    params[p.key] = { value: v && typeof v === 'object' ? deepClone(v) : v, kf: null };
+  }
   return { id: uid('fx'), type, enabled: true, params };
 }
 
@@ -234,10 +277,88 @@ export function createClip(seq, { kind, trackId, mediaId = null, name = '', star
 
 export const clipEnd = (c) => c.start + c.duration;
 
+/**
+ * Content seconds elapsed after tl seconds of a clip with a time-remap speed param (percent).
+ * Integrates the keyframed speed curve exactly for linear/hold segments and numerically for eased ones.
+ */
+export function remapIntegral(param, tl) {
+  if (!param) return tl;
+  const kf = param.kf;
+  if (!kf || !kf.length) return (tl * param.value) / 100;
+  if (tl <= 0) return (tl * kf[0].v) / 100; // transition handles before the clip: first speed
+  let acc = 0;
+  let t = 0;
+  if (kf[0].t > 0) {
+    const e = Math.min(kf[0].t, tl);
+    acc += (e * kf[0].v) / 100;
+    t = e;
+    if (tl <= kf[0].t) return acc;
+  }
+  for (let i = 0; i < kf.length - 1; i++) {
+    const a = kf[i];
+    const b = kf[i + 1];
+    const s0 = Math.max(a.t, t);
+    const s1 = Math.min(b.t, tl);
+    if (s1 <= s0) {
+      if (a.t >= tl) break;
+      continue;
+    }
+    const span = Math.max(EPS, b.t - a.t);
+    const speedAt = (x) => {
+      if (a.ease === 'hold') return a.v;
+      let u = (x - a.t) / span;
+      if (a.ease === 'ease') u = u * u * (3 - 2 * u);
+      return lerp(a.v, b.v, u);
+    };
+    if (a.ease === 'ease') {
+      const n = 12; // Simpson's rule
+      const hdt = (s1 - s0) / n;
+      let sum = 0;
+      for (let k = 0; k <= n; k++) sum += speedAt(s0 + k * hdt) * (k === 0 || k === n ? 1 : k % 2 ? 4 : 2);
+      acc += (sum * hdt) / 3 / 100;
+    } else {
+      acc += (((speedAt(s0) + speedAt(s1)) / 2) * (s1 - s0)) / 100;
+    }
+    t = s1;
+    if (t >= tl) return acc;
+  }
+  const last = kf[kf.length - 1];
+  const from = Math.max(t, last.t);
+  if (tl > from) acc += ((tl - from) * last.v) / 100;
+  return acc;
+}
+
+/** Instantaneous time-remap speed factor (1 = normal) at clip-local time tl. */
+export function remapSpeedAt(clip, tl) {
+  const fx = clip.effects?.find((e) => e.type === 'timeRemap' && e.enabled);
+  if (!fx) return 1;
+  return evalParam(fx.params.speed, tl) / 100;
+}
+
+/** Source seconds consumed after tl seconds into the clip (speed, time remapping). */
+export function contentTime(clip, tl) {
+  const fx = clip.effects?.find((e) => e.type === 'timeRemap' && e.enabled);
+  const r = fx ? remapIntegral(fx.params.speed, tl) : tl;
+  return r * clip.speed;
+}
+
 export function mediaTimeAt(clip, t) {
   if (clip.hold) return clip.inPoint;
-  if (clip.reverse) return clip.inPoint + (clip.start + clip.duration - t) * clip.speed;
-  return clip.inPoint + (t - clip.start) * clip.speed;
+  const tl = t - clip.start;
+  if (clip.reverse) return clip.inPoint + contentTime(clip, clip.duration) - contentTime(clip, tl);
+  return clip.inPoint + contentTime(clip, tl);
+}
+
+/** Media time at the clip's out point (exclusive). */
+export function sourceOut(clip) {
+  if (clip.hold) return clip.inPoint;
+  return clip.inPoint + contentTime(clip, clip.duration);
+}
+
+/** True when the clip's playback speed varies over time (speed ramps). */
+export function hasSpeedRamp(clip) {
+  const fx = clip.effects?.find((e) => e.type === 'timeRemap' && e.enabled);
+  return !!(fx && (fx.params.speed.kf?.length || fx.params.speed.value !== 100));
 }
 
 /** Clips whose content runs in time (video, audio, nested sequences) — speed/slip/trim limits apply. */

@@ -6,17 +6,21 @@ import { playback } from './playback.js';
 import * as edit from './edit.js';
 import { createSyntheticMedia, importFiles, mediaStatus, runtime, peakInRange } from './media.js';
 import { saveProjectFile, openProjectFile, clearSession, relinkFromFiles, setAutosave, saveProjectNow } from './persist.js';
-import { createProject, clipEnd, clipsOnTrack, editPoints, sequenceDuration, videoTracks, mediaTimeAt, isTimed } from './model.js';
+import { createProject, clipEnd, clipsOnTrack, editPoints, sequenceDuration, videoTracks, mediaTimeAt, EFFECT_FIXED_TYPES } from './model.js';
 import { snapFrame, EPS } from './util.js';
 import { sourceApi } from './ui/source-monitor.js';
 import { loadSampleProject } from './sample.js';
 import { programApi } from './ui/program-monitor.js';
 import { timelineApi } from './ui/timeline.js';
 import { pickFiles, importDialog } from './ui/project-panel.js';
-import { showPanel, toggleMaximize, confirmDialog, promptDialog, toast } from './ui/common.js';
+import { showPanel, toggleMaximize, confirmDialog, promptDialog, toast, applyUiScale } from './ui/common.js';
+import { applyWorkspace } from './ui/workspaces.js';
+import { insertTemplate } from './templates.js';
+import { toggleVoiceover } from './recorder.js';
 import {
   openSpeedDialog, openSequenceSettings, openExportDialog, openShortcutsDialog, openAboutDialog,
   openColorMatteDialog, importSrt, exportSrt, openMarkerDialog, openSceneDetectDialog,
+  openDuckingDialog, openReframeDialog, openMulticamDialog, openAutoCaptionDialog, openGuideDialog,
 } from './ui/dialogs.js';
 
 const inSource = () => store.ui.focusPanel === 'source' && sourceApi.hasMedia?.();
@@ -43,7 +47,7 @@ function seekMarker(dir) {
 function nudge(frames) {
   const ids = [...edit.withLinked(selIds())];
   if (!ids.length) return;
-  store.transact('Nudge', () => edit.rawMoveClips(ids, frames / seq().fps, 0, 0, { mode: 'overwrite' }));
+  store.transact('1프레임 이동', () => edit.rawMoveClips(ids, frames / seq().fps, 0, 0, { mode: 'overwrite' }));
 }
 
 function matchFrame() {
@@ -52,29 +56,34 @@ function matchFrame() {
   for (const tr of videoTracks(s).slice().reverse().concat(s.tracks.filter((x) => x.kind === 'audio'))) {
     const c = clipsOnTrack(s, tr.id).find((x) => t >= x.start && t < clipEnd(x) && x.mediaId);
     if (!c) continue;
-    const m = s.clips[c.id] && store.project.media[c.mediaId];
-    if (!m || m.kind === 'color' || m.kind === 'adjustment') continue;
+    const m = store.project.media[c.mediaId];
+    if (!m || ['color', 'adjustment', 'sequence', 'lut'].includes(m.kind)) continue;
     store.ui.sourceMediaId = c.mediaId;
     store.ui.sourceSeek = mediaTimeAt(c, t);
     store.emit('source');
     showPanel('source');
     return;
   }
-  toast('No clip under the playhead');
+  toast('재생헤드 아래에 원본을 열 수 있는 클립이 없습니다');
 }
 
-async function newProject() {
-  if (store.project.mediaOrder.length || Object.keys(seq().clips).length) {
-    if (!(await confirmDialog('New Project', 'Start a new project? The current project and its autosave will be cleared (save a project file first if you need it).'))) return;
-  }
+async function resetProjectState() {
   setAutosave(false);
   await clearSession();
   for (const rt of runtime.values()) if (rt.url) URL.revokeObjectURL(rt.url);
   runtime.clear();
   playback.resetMedia();
-  store.loadProject(createProject());
+}
+
+async function newProject() {
+  if (store.project.mediaOrder.length > 1 || Object.keys(seq().clips).length) {
+    if (!(await confirmDialog('새 프로젝트', '현재 프로젝트와 자동 저장본을 지우고 새로 시작할까요?\n필요하면 먼저 파일 ▸ 프로젝트 파일로 저장을 하세요.'))) return;
+  }
+  await resetProjectState();
+  store.loadProject(createProject('제목 없는 프로젝트'));
   setAutosave(true);
   saveProjectNow();
+  toast('새 프로젝트를 만들었습니다');
 }
 
 async function openProject() {
@@ -87,18 +96,18 @@ async function openProject() {
     setAutosave(true);
     saveProjectNow();
     const offline = store.project.mediaOrder.filter((id) => mediaStatus(id) === 'offline').length;
-    toast(offline ? `Project opened — ${offline} media item(s) offline. Use File ▸ Link Media… to relink.` : 'Project opened');
+    toast(offline ? `프로젝트를 열었습니다. 미디어 ${offline}개가 오프라인입니다 — 파일 ▸ 미디어 다시 연결로 연결하세요.` : '프로젝트를 열었습니다');
   } catch (err) {
     setAutosave(true);
-    toast(`Could not open project: ${err.message}`);
+    toast(`프로젝트를 열 수 없습니다: ${err.message}`);
   }
 }
 
 async function linkMedia() {
-  const files = await pickFiles();
+  const files = await pickFiles({ accept: 'video/*,audio/*,image/*,.cube' });
   if (!files.length) return;
   const n = await relinkFromFiles(files);
-  toast(n ? `Relinked ${n} item(s)` : 'No matching file names found');
+  toast(n ? `${n}개 항목을 다시 연결했습니다` : '이름이 같은 파일을 찾지 못했습니다');
 }
 
 export const commands = {
@@ -116,8 +125,16 @@ export const commands = {
   exportFrame: () => programApi.saveFrame?.(),
   linkMedia,
   renameProject: async () => {
-    const n = await promptDialog('Rename Project', 'Project name', store.project.name);
-    if (n) store.transact('Rename Project', () => { store.project.name = n; });
+    const n = await promptDialog('프로젝트 이름 바꾸기', '프로젝트 이름', store.project.name);
+    if (n) store.transact('프로젝트 이름 바꾸기', () => { store.project.name = n; });
+  },
+  loadSample: async () => {
+    if (store.project.mediaOrder.length > 1 || Object.keys(seq().clips).length) {
+      if (!(await confirmDialog('샘플 프로젝트 열기', '현재 프로젝트를 샘플 프로젝트로 바꿀까요?\n필요하면 먼저 프로젝트 파일로 저장하세요.'))) return;
+    }
+    await resetProjectState();
+    setAutosave(true);
+    await loadSampleProject();
   },
 
   // ---- edit
@@ -129,7 +146,7 @@ export const commands = {
   pasteInsert: () => edit.paste({ insert: true }),
   pasteAttributes: () => {
     const cb = store.ui.clipboard;
-    if (!cb?.clips.length || !sel().length) return;
+    if (!cb?.clips.length || !sel().length) return toast('먼저 클립을 복사하고, 붙여 넣을 클립을 선택하세요');
     edit.pasteAttributes(cb.clips[0], selIds());
   },
   clear: () => edit.deleteSelection(),
@@ -138,7 +155,7 @@ export const commands = {
   deselectAll: () => store.clearSelection(),
 
   // ---- clip
-  speedDuration: () => sel().length && openSpeedDialog(selIds()),
+  speedDuration: () => (sel().length ? openSpeedDialog(selIds()) : toast('클립을 먼저 선택하세요')),
   toggleEnable: () => sel().length && edit.setEnabled(selIds(), !(sel()[0].enabled !== false)),
   linkToggle: () => {
     const s = sel();
@@ -149,11 +166,9 @@ export const commands = {
   frameHold: () => {
     const c = sel().find((x) => x.kind === 'video');
     if (c) edit.addFrameHold(c);
+    else toast('영상 클립을 선택하세요');
   },
-  reverse: () => {
-    const s = sel().filter(isTimed);
-    if (s.length) edit.setSpeed(s.map((c) => c.id), { speed: s[0].speed, reverse: !s[0].reverse });
-  },
+  reverse: () => edit.toggleReverse(selIds()),
   insert: () => sourceApi.insert?.(),
   overwrite: () => sourceApi.overwrite?.(),
   nudgeLeft: () => nudge(-1),
@@ -161,21 +176,29 @@ export const commands = {
   normalize: () => {
     const ids = [...edit.withLinked(selIds())];
     const n = edit.normalizeAudio(ids, peakInRange, -1);
-    toast(n ? `Normalized ${n} audio clip(s) to -1 dB peak` : 'Select audio clips (waveforms must be analysed)');
+    toast(n ? `오디오 클립 ${n}개를 최대 -1 dB로 맞췄습니다` : '오디오 클립을 선택하세요 (파형 분석이 끝나야 합니다)');
   },
+  autoDuck: () => openDuckingDialog(),
   sceneDetect: () => openSceneDetectDialog(),
-  removeEffects: () => store.transact('Remove Effects', () => {
-    for (const c of sel()) c.effects = c.effects.filter((fx) => ['motion', 'opacity', 'text', 'fill', 'volume', 'panner'].includes(fx.type));
+  setLabel: (color) => {
+    if (!sel().length) return toast('클립을 먼저 선택하세요');
+    edit.setLabel([...edit.withLinked(selIds())], color);
+  },
+  removeEffects: () => store.transact('효과 모두 제거', () => {
+    for (const c of sel()) c.effects = c.effects.filter((fx) => EFFECT_FIXED_TYPES.has(fx.type));
   }),
+  multicamCreate: () => openMulticamDialog(),
+  switchAngle: (n) => edit.switchAngle(n, { cut: playback.playing }),
 
   // ---- sequence
   sequenceSettings: () => openSequenceSettings(),
   newSequence: () => edit.newSequence(),
   duplicateSequence: () => edit.duplicateSequence(),
   deleteSequence: () => edit.deleteSequence(store.seq.id),
+  autoReframe: () => openReframeDialog(),
   nest: async () => {
-    if (!sel().length) return toast('Select clips to nest');
-    const n = await promptDialog('Nested Sequence Name', 'Name', `Nested Sequence ${Object.keys(store.project.sequences).length}`);
+    if (!sel().length) return toast('중첩할 클립을 선택하세요');
+    const n = await promptDialog('중첩 시퀀스 이름', '이름', `중첩 시퀀스 ${Object.keys(store.project.sequences).length}`);
     if (n != null) edit.nestSelection(n);
   },
   addEdit: () => edit.addEdit(),
@@ -191,7 +214,7 @@ export const commands = {
   toggleSnap: () => timelineApi.toggleSnap?.(),
   toggleLinked: () => {
     store.ui.linkedSelection = !store.ui.linkedSelection;
-    toast(`Linked selection ${store.ui.linkedSelection ? 'on' : 'off'}`);
+    toast(`연결된 선택 ${store.ui.linkedSelection ? '켬' : '끔'}`);
     store.changed();
   },
   addVideoTrack: () => edit.addTrack('video'),
@@ -209,16 +232,16 @@ export const commands = {
   goOut: () => (inSource() ? sourceApi.goOut() : (playback.stop(), store.setPlayhead(seq().outPoint ?? sequenceDuration(seq())))),
   clearIn: () => (inSource() ? sourceApi.clearIn() : edit.setSequenceInOut('in', null)),
   clearOut: () => (inSource() ? sourceApi.clearOut() : edit.setSequenceInOut('out', null)),
-  clearInOut: () => (inSource() ? sourceApi.clearInOut() : store.transact('Clear In and Out', () => { seq().inPoint = null; seq().outPoint = null; })),
+  clearInOut: () => (inSource() ? sourceApi.clearInOut() : store.transact('시작/끝 지우기', () => { seq().inPoint = null; seq().outPoint = null; })),
   addMarker: () => edit.addMarker(),
   nextMarker: () => seekMarker(1),
   prevMarker: () => seekMarker(-1),
   editMarker: () => {
     const mk = seq().markers.find((m) => Math.abs(m.time - store.ui.playhead) < 0.5 / seq().fps);
     if (mk) openMarkerDialog(mk.id);
-    else toast('No marker at the playhead');
+    else toast('재생헤드 위치에 마커가 없습니다');
   },
-  clearMarkers: () => store.transact('Clear All Markers', () => { seq().markers = []; }),
+  clearMarkers: () => store.transact('마커 모두 지우기', () => { seq().markers = []; }),
 
   // ---- graphics
   newText: () => edit.addTextClip(),
@@ -227,8 +250,10 @@ export const commands = {
   newTriangle: () => edit.addShapeClip('triangle'),
   newLine: () => edit.addShapeClip('line'),
   newColorMatte: () => openColorMatteDialog(),
-  newAdjustment: () => createSyntheticMedia('adjustment', { name: 'Adjustment Layer' }),
-  newBlack: () => createSyntheticMedia('color', { name: 'Black Video', color: '#000000' }),
+  newAdjustment: () => createSyntheticMedia('adjustment', { name: '조정 레이어' }),
+  newBlack: () => createSyntheticMedia('color', { name: '블랙 비디오', color: '#000000' }),
+  template: (id) => insertTemplate(id),
+  autoCaptions: () => openAutoCaptionDialog(),
 
   // ---- transport (context aware)
   playStop: () => (inSource() ? sourceApi.togglePlay() : playback.toggle()),
@@ -247,30 +272,31 @@ export const commands = {
   toggleLoop: () => {
     playback.loop = !playback.loop;
     playback.emit('state');
-    toast(`Loop ${playback.loop ? 'on' : 'off'}`);
+    toast(`반복 재생 ${playback.loop ? '켬' : '끔'}`);
+  },
+  toggleAudioScrub: () => {
+    store.ui.audioScrub = !store.ui.audioScrub;
+    toast(`오디오 스크러빙 ${store.ui.audioScrub ? '켬' : '끔'}`);
+  },
+  voiceover: () => {
+    const tr = seq().tracks.find((t) => t.kind === 'audio' && t.targeted && !t.locked) || seq().tracks.find((t) => t.kind === 'audio' && !t.locked);
+    if (tr) toggleVoiceover(tr.id);
   },
   snapPlayhead: () => store.setPlayhead(snapFrame(store.ui.playhead, seq().fps)),
 
   // ---- window / help
   maximizePanel: () => toggleMaximize(),
   showPanel: (id) => showPanel(id),
+  workspace: (name) => applyWorkspace(name),
+  uiScale: (v) => applyUiScale(v),
   resetLayout: () => {
-    for (const k of Object.keys(localStorage)) if (k.startsWith('montage.split') || k.startsWith('montage.tab.')) localStorage.removeItem(k);
+    try {
+      for (const k of Object.keys(localStorage)) if (k.startsWith('montage.split') || k.startsWith('montage.tab.')) localStorage.removeItem(k);
+    } catch { /* storage unavailable */ }
     location.reload();
   },
   shortcuts: () => openShortcutsDialog(),
-  loadSample: async () => {
-    if (store.project.mediaOrder.length > 1 || Object.keys(seq().clips).length) {
-      if (!(await confirmDialog('Load Sample Project', 'Replace the current project with the sample project? Save a project file first if you need this one.'))) return;
-    }
-    setAutosave(false);
-    await clearSession();
-    for (const rt of runtime.values()) if (rt.url) URL.revokeObjectURL(rt.url);
-    runtime.clear();
-    playback.resetMedia();
-    setAutosave(true);
-    await loadSampleProject();
-  },
+  guide: () => openGuideDialog(),
   about: () => openAboutDialog(),
 };
 

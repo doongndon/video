@@ -6,15 +6,73 @@ import { evalEffect } from './model.js';
 import { dbToGain, clamp } from './util.js';
 
 /** Audio effects handled by the chain (Volume/Panner/Amplify are applied as plain gain/pan). */
-export const CHAIN_FX = new Set(['eq3', 'highpass', 'lowpass', 'compressor', 'reverb', 'delay', 'bandpass']);
+export const CHAIN_FX = new Set(['eq3', 'highpass', 'lowpass', 'compressor', 'reverb', 'delay', 'bandpass', 'noiseGate', 'humRemove']);
+
+// ---- AudioWorklet processors (loaded from a blob so the app needs no extra files)
+const WORKLET_SRC = `
+class GateProcessor extends AudioWorkletProcessor {
+  static get parameterDescriptors() {
+    return [
+      { name: 'threshold', defaultValue: -45 },
+      { name: 'reduction', defaultValue: -40 },
+      { name: 'attack', defaultValue: 5 },
+      { name: 'release', defaultValue: 150 },
+    ];
+  }
+  constructor() { super(); this.env = 0; this.gain = 1; }
+  process(inputs, outputs, p) {
+    const inp = inputs[0];
+    const out = outputs[0];
+    if (!inp || !inp.length) return true;
+    const thr = Math.pow(10, p.threshold[0] / 20);
+    const red = Math.pow(10, p.reduction[0] / 20);
+    const att = Math.exp(-1 / (sampleRate * Math.max(0.1, p.attack[0]) / 1000));
+    const rel = Math.exp(-1 / (sampleRate * Math.max(1, p.release[0]) / 1000));
+    const n = inp[0].length;
+    for (let i = 0; i < n; i++) {
+      let peak = 0;
+      for (let c = 0; c < inp.length; c++) { const v = Math.abs(inp[c][i]); if (v > peak) peak = v; }
+      this.env = peak > this.env ? peak : this.env * 0.9995;
+      const target = this.env >= thr ? 1 : red;
+      const coef = target > this.gain ? att : rel;
+      this.gain = target + (this.gain - target) * coef;
+      for (let c = 0; c < out.length; c++) out[c][i] = (inp[c] || inp[0])[i] * this.gain;
+    }
+    return true;
+  }
+}
+registerProcessor('montage-gate', GateProcessor);
+`;
+
+const workletReady = new WeakSet();
+const workletLoading = new WeakMap();
+
+/** Load the app's AudioWorklet processors into a context (idempotent). */
+export function loadAudioWorklets(ctx) {
+  if (workletReady.has(ctx)) return Promise.resolve();
+  if (!ctx.audioWorklet) return Promise.reject(new Error('AudioWorklet unsupported'));
+  if (!workletLoading.has(ctx)) {
+    const url = URL.createObjectURL(new Blob([WORKLET_SRC], { type: 'application/javascript' }));
+    workletLoading.set(ctx, ctx.audioWorklet.addModule(url).then(() => {
+      workletReady.add(ctx);
+      URL.revokeObjectURL(url);
+    }));
+  }
+  return workletLoading.get(ctx);
+}
 
 export function chainEffects(clip) {
   return clip.effects.filter((e) => e.enabled && CHAIN_FX.has(e.type) && EFFECTS[e.type]);
 }
 
 /** Structural signature: rebuild the chain only when this changes. */
-export function chainSignature(clip) {
-  return chainEffects(clip).map((e) => `${e.id}:${e.type}:${e.type === 'reverb' ? e.params.decay.value : ''}`).join('|');
+export function chainSignature(clip, ctx) {
+  return chainEffects(clip).map((e) => {
+    const extra = e.type === 'reverb' ? e.params.decay.value
+      : e.type === 'humRemove' ? `${e.params.freq.value}/${e.params.harmonics.value}/${e.params.q.value}`
+        : e.type === 'noiseGate' ? (ctx && workletReady.has(ctx) ? 'ready' : 'pending') : '';
+    return `${e.id}:${e.type}:${extra}`;
+  }).join('|');
 }
 
 const irCache = new Map();
@@ -159,6 +217,33 @@ function buildUnit(ctx, fx) {
         setParam(wet.gain, clamp(v.mix / 100, 0, 1), when, mode);
         setParam(dry.gain, 1, when, mode);
       };
+      break;
+    }
+    case 'noiseGate': {
+      if (!workletReady.has(ctx)) {
+        input.connect(output); // processor not loaded yet: pass audio through
+        break;
+      }
+      const node = new AudioWorkletNode(ctx, 'montage-gate', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2] });
+      input.connect(node).connect(output);
+      unit.apply = (v, when, mode) => {
+        for (const k of ['threshold', 'reduction', 'attack', 'release']) setParam(node.parameters.get(k), v[k], when, mode);
+      };
+      break;
+    }
+    case 'humRemove': {
+      const base = Number(fx.params.freq.value) || 60;
+      const n = Math.max(1, Math.min(8, Math.round(fx.params.harmonics.value)));
+      let prev = input;
+      for (let k = 1; k <= n; k++) {
+        const f = ctx.createBiquadFilter();
+        f.type = 'notch';
+        f.frequency.value = Math.min(base * k, ctx.sampleRate / 2 - 100);
+        f.Q.value = fx.params.q.value;
+        prev.connect(f);
+        prev = f;
+      }
+      prev.connect(output);
       break;
     }
     default:

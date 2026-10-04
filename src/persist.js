@@ -49,7 +49,7 @@ export async function saveProjectNow() {
         await tx('files', 'readwrite', (s) => s.put(rt.file, id)).catch((err) => {
           savedFiles.delete(id);
           console.warn('could not persist media file', err);
-          store.toast(`Autosave: could not store ${rt.file.name} in the browser (quota?). It will need relinking after reload.`);
+          store.toast(`자동 저장: ${rt.file.name} 파일을 브라우저에 저장하지 못했습니다(저장 공간 부족 가능). 새로 고침 후 미디어 다시 연결이 필요할 수 있습니다.`);
         });
       }
     }
@@ -129,7 +129,7 @@ export function saveProjectFile() {
 export async function openProjectFile(file) {
   const data = JSON.parse(await file.text());
   const project = data.project || data;
-  if (!(project?.sequence?.tracks || project?.sequences) || !project.media) throw new Error('Not a Montage project file');
+  if (!(project?.sequence?.tracks || project?.sequences) || !project.media) throw new Error('Montage 프로젝트 파일이 아닙니다');
   for (const rt of runtime.values()) if (rt.url) URL.revokeObjectURL(rt.url);
   runtime.clear();
   store.loadProject(project);

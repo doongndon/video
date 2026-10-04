@@ -6,12 +6,15 @@ import { runtime, mediaEvents, mediaStatus, importFiles } from '../media.js';
 import * as edit from '../edit.js';
 import {
   clipEnd, clipsOnTrack, videoTracks, audioTracks, getTrack, sequenceDuration, transitionsOnTrack,
-  mediaTimeAt, evalEffect, linkedClips, prevAdjacent, nextAdjacent, editPoints, isAnimated, isTimed,
+  mediaTimeAt, evalEffect, linkedClips, prevAdjacent, nextAdjacent, editPoints, isAnimated, isTimed, hasSpeedRamp, LABEL_COLORS,
 } from '../model.js';
 import { EFFECTS, TRANSITIONS } from '../effects.js';
 import { h, clamp, EPS, formatTimecode, parseTimecode, snapFrame, dbToGain, modKey } from '../util.js';
-import { showMenu, loadPref, savePref, fitCanvasToBox, promptDialog, toast, dnd, inlineEdit } from './common.js';
+import { showMenu, loadPref, savePref, fitCanvasToBox, promptDialog, toast, dnd, inlineEdit, uiScale } from './common.js';
 import { openSpeedDialog, openMarkerDialog } from './dialogs.js';
+import { icon, iconButton } from './icons.js';
+import { toggleVoiceover, recordingTrack } from '../recorder.js';
+import { getPreset } from './presets.js';
 
 const RULER_H = 34;
 const DIVIDER_H = 6;
@@ -30,6 +33,16 @@ const COLORS = {
 };
 
 export const timelineApi = {};
+
+/** Canvas font sizes follow the UI size setting (보기 ▸ 화면 크기). */
+let SC = uiScale();
+const fpx = (n) => Math.round(n * SC);
+
+function lighten(hex, k) {
+  const n = parseInt(hex.slice(1), 16);
+  const ch = (v) => Math.round(v + (255 - v) * k);
+  return `rgb(${ch((n >> 16) & 255)},${ch((n >> 8) & 255)},${ch(n & 255)})`;
+}
 
 export function createTimeline() {
   const view = {
@@ -50,26 +63,29 @@ export function createTimeline() {
   let staticDirty = true;
 
   // ---------------------------------------------------------------- DOM
-  const tcEl = h('span.tc', { title: 'Click to type a timecode' }, '00:00:00:00');
-  const seqName = h('span', { style: { color: 'var(--text-dim)' } });
-  const snapBtn = h('button.icon', { title: 'Snap (S)', onclick: () => toggleSnap() }, '🧲');
-  const linkBtn = h('button.icon', { title: 'Linked Selection', onclick: () => { store.ui.linkedSelection = !store.ui.linkedSelection; refreshTopBar(); } }, '🔗');
-  const markerBtn = h('button.icon', { title: 'Add Marker (M)', onclick: () => edit.addMarker() }, '◆');
-  const settingsBtn = h('button.icon', { title: 'Timeline display settings', onclick: (e) => showSettingsMenu(e) }, '⚙');
-  const top = h('div.tl-top', tcEl, seqName, h('span.grow'), snapBtn, linkBtn, markerBtn, settingsBtn);
+  const tcEl = h('span.tc', { title: '클릭해서 시간 입력 (+15처럼 쓰면 15프레임 앞으로)' }, '00:00:00:00');
+  const seqName = h('span.seq-info');
+  const snapBtn = iconButton('magnet', '스냅: 클립이 편집점·재생헤드에 달라붙기 (S)', () => toggleSnap(), { label: '스냅' });
+  const linkBtn = iconButton('link', '연결된 선택: 영상과 소리를 함께 선택', () => { store.ui.linkedSelection = !store.ui.linkedSelection; refreshTopBar(); }, { label: '연결 선택' });
+  const markerBtn = iconButton('marker', '마커 추가 (M)', () => edit.addMarker());
+  const razorBtn = iconButton('scissors', '재생헤드 위치에서 자르기 (Ctrl+K)', () => edit.addEdit(), { label: '자르기' });
+  const zoomOutBtn = iconButton('zoomOut', '타임라인 축소 (-)', () => timelineApi.zoomOut());
+  const zoomInBtn = iconButton('zoomIn', '타임라인 확대 (=)', () => timelineApi.zoomIn());
+  const settingsBtn = iconButton('gear', '타임라인 표시 설정', (e) => showSettingsMenu(e));
+  const top = h('div.tl-top', tcEl, seqName, h('span.grow'), razorBtn, snapBtn, linkBtn, markerBtn, zoomOutBtn, zoomInBtn, settingsBtn);
   const seqTabs = h('div.seq-tabs');
 
   const headersInner = h('div.tl-headers-inner');
-  const rulerSpacer = h('div.tl-ruler-spacer', h('span', { style: { color: 'var(--text-faint)', fontSize: '11px' } }, 'Tracks'));
+  const rulerSpacer = h('div.tl-ruler-spacer', h('span', '트랙'));
   const headers = h('div.tl-headers', rulerSpacer, headersInner);
   const canvas = h('canvas', { tabindex: 0 });
   const vscroll = h('div.tl-vscroll', h('div'));
   const wrap = h('div.tl-canvas-wrap', canvas, vscroll);
   const main = h('div.tl-main', headers, wrap);
   const hscroll = h('div.tl-hscroll', h('div'));
-  const zoomSlider = h('input', { type: 'range', min: 0, max: 1000, step: 1, title: 'Zoom' });
+  const zoomSlider = h('input', { type: 'range', min: 0, max: 1000, step: 1, title: '타임라인 확대/축소', 'aria-label': '타임라인 확대/축소' });
   const durEl = h('span', { style: { color: 'var(--text-faint)' } });
-  const bottom = h('div.tl-bottom', h('span', '−'), zoomSlider, h('span', '+'), h('span.grow', { style: { flex: 1 } }), durEl);
+  const bottom = h('div.tl-bottom', icon('zoomOut'), zoomSlider, icon('zoomIn'), h('span.grow'), durEl);
   const root = h('div.timeline', seqTabs, top, main, h('div.tl-hscroll-wrap', hscroll), bottom);
 
   const staticCanvas = document.createElement('canvas');
@@ -179,21 +195,23 @@ export function createTimeline() {
     const anySolo = audioTracks(s).some((t) => t.solo);
     for (const row of view.rows) {
       const t = row.track;
-      const lockBtn = h(`button.lock${t.locked ? '.on' : ''}`, { title: 'Toggle Track Lock', onclick: () => edit.setTrackFlag(t.id, 'locked') }, t.locked ? '🔒' : '🔓');
-      const name = h(`span.tname${t.targeted ? '.targeted' : ''}`, { title: 'Toggle track targeting (source patching)', onclick: () => edit.setTrackFlag(t.id, 'targeted') }, t.name);
+      const lockBtn = h(`button.lock${t.locked ? '.on' : ''}`, { title: t.locked ? '트랙 잠금 풀기' : '트랙 잠그기 (편집 막기)', 'aria-pressed': String(!!t.locked), onclick: () => edit.setTrackFlag(t.id, 'locked') }, icon(t.locked ? 'lock' : 'unlock'));
+      const name = h(`span.tname${t.targeted ? '.targeted' : ''}`, { title: '대상 트랙: 붙여넣기·삽입이 들어갈 트랙 (클릭해서 켜기/끄기)', 'aria-pressed': String(!!t.targeted), onclick: () => edit.setTrackFlag(t.id, 'targeted') }, t.name);
       const items = [lockBtn, name];
       if (t.kind === 'video') {
-        items.push(h(`button.eye${t.hidden ? '.on' : ''}`, { title: 'Toggle Track Output', onclick: () => edit.setTrackFlag(t.id, 'hidden') }, t.hidden ? '⊘' : '👁'));
+        items.push(h(`button.eye${t.hidden ? '.on' : ''}`, { title: t.hidden ? '트랙 보이기' : '트랙 숨기기', 'aria-pressed': String(!!t.hidden), onclick: () => edit.setTrackFlag(t.id, 'hidden') }, icon(t.hidden ? 'eyeOff' : 'eye')));
       } else {
-        items.push(h(`button.mute${t.muted ? '.on' : ''}`, { title: 'Mute Track', onclick: () => edit.setTrackFlag(t.id, 'muted') }, 'M'));
-        items.push(h(`button.solo${t.solo ? '.on' : ''}`, { title: 'Solo Track', onclick: () => edit.setTrackFlag(t.id, 'solo') }, 'S'));
-        const vol = h('span.vol', { title: 'Track volume (drag)' }, `${(t.volume || 0).toFixed(1)}dB`);
+        items.push(h(`button.mute${t.muted ? '.on' : ''}`, { title: '음소거 (M)', 'aria-pressed': String(!!t.muted), onclick: () => edit.setTrackFlag(t.id, 'muted') }, 'M'));
+        items.push(h(`button.solo${t.solo ? '.on' : ''}`, { title: '솔로: 이 트랙만 듣기 (S)', 'aria-pressed': String(!!t.solo), onclick: () => edit.setTrackFlag(t.id, 'solo') }, 'S'));
+        const recOn = recordingTrack() === t.id;
+        items.push(h(`button.rec${recOn ? '.on' : ''}`, { title: recOn ? '녹음 멈추기' : '보이스오버 녹음: 재생헤드부터 마이크로 녹음해 이 트랙에 넣기', 'aria-pressed': String(recOn), onclick: () => toggleVoiceover(t.id) }, icon(recOn ? 'record' : 'mic')));
+        const vol = h('span.vol', { title: '트랙 볼륨 (좌우로 끌기 · 두 번 클릭: 0 dB)' }, `${(t.volume || 0).toFixed(1)}dB`);
         vol.addEventListener('pointerdown', (e) => {
           e.preventDefault();
           vol.setPointerCapture(e.pointerId);
           const x0 = e.clientX;
           const v0 = t.volume || 0;
-          store.begin('Track Volume');
+          store.begin('트랙 볼륨');
           const move = (ev) => {
             const v = clamp(v0 + (ev.clientX - x0) * 0.2, -60, 12);
             edit.setTrackValue(t.id, 'volume', Math.round(v * 10) / 10);
@@ -209,7 +227,7 @@ export function createTimeline() {
           vol.addEventListener('pointerup', up);
         });
         vol.addEventListener('dblclick', () => {
-          store.transact('Track Volume', () => edit.setTrackValue(t.id, 'volume', 0));
+          store.transact('트랙 볼륨', () => edit.setTrackValue(t.id, 'volume', 0));
         });
         items.push(vol);
         if (anySolo && !t.solo) name.style.opacity = '0.5';
@@ -219,10 +237,10 @@ export function createTimeline() {
       el.addEventListener('contextmenu', (e) => {
         e.preventDefault();
         showMenu([
-          { label: 'Add Video Track', action: () => edit.addTrack('video') },
-          { label: 'Add Audio Track', action: () => edit.addTrack('audio') },
+          { label: '비디오 트랙 추가', action: () => edit.addTrack('video') },
+          { label: '오디오 트랙 추가', action: () => edit.addTrack('audio') },
           '-',
-          { label: `Delete Track ${t.name}`, action: () => edit.deleteTrack(t.id) },
+          { label: `${t.name} 트랙 삭제`, action: () => edit.deleteTrack(t.id) },
         ], e.clientX, e.clientY);
       });
       headersInner.append(el);
@@ -236,24 +254,24 @@ export function createTimeline() {
       const m = p.media[id];
       if (m?.kind !== 'sequence' || !p.sequences[m.sequenceId]) continue;
       const sid = m.sequenceId;
-      const tab = h(`span.seq-tab${sid === p.activeSequenceId ? '.active' : ''}`, { title: 'Click to open · double-click to rename · right-click for options' }, p.sequences[sid].name);
+      const tab = h(`span.seq-tab${sid === p.activeSequenceId ? '.active' : ''}`, { title: '클릭: 열기 · 두 번 클릭: 이름 바꾸기 · 오른쪽 클릭: 메뉴' }, p.sequences[sid].multicam ? icon('multicam') : null, p.sequences[sid].name);
       tab.addEventListener('click', () => store.openSequence(sid));
       tab.addEventListener('dblclick', async () => {
-        const n = await promptDialog('Rename Sequence', 'Name', p.sequences[sid].name);
-        if (n) store.transact('Rename Sequence', () => { store.project.sequences[sid].name = n; });
+        const n = await promptDialog('시퀀스 이름 바꾸기', '이름', p.sequences[sid].name);
+        if (n) store.transact('시퀀스 이름 바꾸기', () => { store.project.sequences[sid].name = n; });
       });
       tab.addEventListener('contextmenu', (e) => {
         e.preventDefault();
         showMenu([
-          { label: 'Open', action: () => store.openSequence(sid) },
-          { label: 'Rename…', action: () => tab.dispatchEvent(new Event('dblclick')) },
-          { label: 'Duplicate', action: () => edit.duplicateSequence(sid) },
-          { label: 'Delete', action: () => edit.deleteSequence(sid) },
+          { label: '열기', action: () => store.openSequence(sid) },
+          { label: '이름 바꾸기…', action: () => tab.dispatchEvent(new Event('dblclick')) },
+          { label: '복제', action: () => edit.duplicateSequence(sid) },
+          { label: '삭제', action: () => edit.deleteSequence(sid) },
         ], e.clientX, e.clientY);
       });
       seqTabs.append(tab);
     }
-    seqTabs.append(h('button.icon', { title: 'New Sequence', onclick: () => edit.newSequence() }, '+'));
+    seqTabs.append(iconButton('plus', '새 시퀀스', () => edit.newSequence()));
   }
 
   function refreshTopBar() {
@@ -261,8 +279,10 @@ export function createTimeline() {
     tcEl.textContent = formatTimecode(store.ui.playhead, s.fps);
     seqName.textContent = `${s.name} · ${s.width}×${s.height} · ${s.fps} fps`;
     snapBtn.classList.toggle('on', store.ui.snapping);
+    snapBtn.setAttribute('aria-pressed', String(store.ui.snapping));
     linkBtn.classList.toggle('on', store.ui.linkedSelection);
-    durEl.textContent = `Duration ${formatTimecode(sequenceDuration(s), s.fps)}`;
+    linkBtn.setAttribute('aria-pressed', String(store.ui.linkedSelection));
+    durEl.textContent = `전체 길이 ${formatTimecode(sequenceDuration(s), s.fps)}`;
   }
 
   tcEl.addEventListener('click', () => {
@@ -283,23 +303,25 @@ export function createTimeline() {
   function toggleSnap() {
     store.ui.snapping = !store.ui.snapping;
     refreshTopBar();
-    toast(`Snap ${store.ui.snapping ? 'on' : 'off'}`);
+    toast(`스냅 ${store.ui.snapping ? '켬' : '끔'}`);
   }
 
   function showSettingsMenu(e) {
     const r = e.currentTarget.getBoundingClientRect();
     showMenu([
-      { label: 'Track Height: Small', checked: view.th === 34, action: () => setTrackH(34) },
-      { label: 'Track Height: Medium', checked: view.th === 50, action: () => setTrackH(50) },
-      { label: 'Track Height: Large', checked: view.th === 80, action: () => setTrackH(80) },
-      { label: 'Track Height: Extra Large', checked: view.th === 120, action: () => setTrackH(120) },
+      { group: '트랙 높이' },
+      { label: '작게', checked: view.th === 34, action: () => setTrackH(34) },
+      { label: '보통', checked: view.th === 50, action: () => setTrackH(50) },
+      { label: '크게', checked: view.th === 80, action: () => setTrackH(80) },
+      { label: '아주 크게', checked: view.th === 120, action: () => setTrackH(120) },
       '-',
-      { label: 'Show Video Thumbnails', checked: view.showThumbs, action: () => { view.showThumbs = !view.showThumbs; savePref('tl.thumbs', view.showThumbs); invalidate(); } },
-      { label: 'Show Audio Waveforms', checked: view.showWaves, action: () => { view.showWaves = !view.showWaves; savePref('tl.waves', view.showWaves); invalidate(); } },
+      { label: '영상 썸네일 보기', checked: view.showThumbs, action: () => { view.showThumbs = !view.showThumbs; savePref('tl.thumbs', view.showThumbs); invalidate(); } },
+      { label: '오디오 파형 보기', checked: view.showWaves, action: () => { view.showWaves = !view.showWaves; savePref('tl.waves', view.showWaves); invalidate(); } },
+      { label: '재생헤드 끌 때 소리 듣기 (오디오 스크러빙)', checked: store.ui.audioScrub, action: () => { store.ui.audioScrub = !store.ui.audioScrub; } },
       '-',
-      { label: 'Add Video Track', action: () => edit.addTrack('video') },
-      { label: 'Add Audio Track', action: () => edit.addTrack('audio') },
-      { label: 'Close All Gaps', action: () => edit.closeAllGaps() },
+      { label: '비디오 트랙 추가', action: () => edit.addTrack('video') },
+      { label: '오디오 트랙 추가', action: () => edit.addTrack('audio') },
+      { label: '빈 공간 모두 메우기', action: () => edit.closeAllGaps() },
     ], r.left, r.bottom + 2);
   }
 
@@ -432,7 +454,7 @@ export function createTimeline() {
 
   function drawClip(ctx, c, x, y, w, hh, { dim = false, ghost = false } = {}) {
     const selected = store.selection.clips.has(c.id);
-    const [base, light] = COLORS[c.kind] || COLORS.video;
+    const [base, light] = c.label ? [c.label, lighten(c.label, 0.35)] : COLORS[c.kind] || COLORS.video;
     const offline = c.mediaId && ['offline', 'error', 'missing'].includes(mediaStatus(c.mediaId));
     ctx.save();
     ctx.globalAlpha = ghost ? 0.6 : dim ? 0.35 : 1;
@@ -442,7 +464,7 @@ export function createTimeline() {
     ctx.fillStyle = offline ? '#7a2222' : selected ? light : base;
     ctx.fillRect(x, y, w, hh);
 
-    const nameH = Math.min(15, hh);
+    const nameH = Math.min(fpx(16), hh);
     const bodyY = y + nameH;
     const bodyH = hh - nameH;
     const m = c.mediaId ? store.project.media[c.mediaId] : null;
@@ -522,8 +544,8 @@ export function createTimeline() {
     if (c.kind === 'text' && bodyH > 10) {
       const fx = c.effects.find((e) => e.type === 'text');
       ctx.fillStyle = 'rgba(255,255,255,0.85)';
-      ctx.font = '11px sans-serif';
-      ctx.fillText(`T  ${String(fx?.params.content.value || '').replace(/\n/g, ' ')}`, Math.max(x, 0) + 4, bodyY + Math.min(bodyH - 3, 13));
+      ctx.font = `${fpx(12)}px "Noto Sans KR", sans-serif`;
+      ctx.fillText(`T  ${String(fx?.params.content.value || '').replace(/\n/g, ' ')}`, Math.max(x, 0) + 4, bodyY + Math.min(bodyH - 3, fpx(14)));
     }
     if (c.kind === 'color' && bodyH > 6) {
       const fx = c.effects.find((e) => e.type === 'fill');
@@ -539,21 +561,24 @@ export function createTimeline() {
     const anyKf = c.effects.some((e) => Object.values(e.params).some((p) => p.kf?.length));
     if (w > 22) {
       ctx.fillStyle = userFx.length ? '#e8c547' : anyKf ? '#9fc5ff' : 'rgba(255,255,255,0.35)';
-      ctx.font = 'italic bold 10px serif';
-      ctx.fillText('fx', labelX, y + 11);
-      labelX += 14;
+      ctx.font = `italic bold ${fpx(11)}px serif`;
+      ctx.fillText('fx', labelX, y + nameH - fpx(4));
+      labelX += fpx(15);
     }
     ctx.fillStyle = '#fff';
-    ctx.font = '11px system-ui, sans-serif';
+    ctx.font = `${fpx(12)}px "Noto Sans KR", system-ui, sans-serif`;
     let label = c.name || m?.name || c.kind;
-    if (c.hold) label += ' [Hold]';
-    else if (c.speed !== 1 || c.reverse) label += ` [${c.reverse ? '-' : ''}${Math.round(c.speed * 100)}%]`;
-    if (offline) label = `MEDIA OFFLINE · ${label}`;
+    if (c.multicam) label = `[앵글 ${c.multicam.angle}] ${label}`;
+    if (c.hold) label += ' [정지]';
+    else if (c.speed !== 1 || c.reverse) label += ` [${c.reverse ? '역 ' : ''}${Math.round(c.speed * 100)}%]`;
+    if (hasSpeedRamp(c)) label += ' [속도 램프]';
+    if (c.stab) label += ' [손떨림 보정]';
+    if (offline) label = `미디어 오프라인 · ${label}`;
     ctx.save();
     ctx.beginPath();
     ctx.rect(labelX, y, Math.max(0, x + w - labelX - 3), nameH);
     ctx.clip();
-    ctx.fillText(label, labelX, y + 11);
+    ctx.fillText(label, labelX, y + nameH - fpx(4));
     ctx.restore();
 
     // edges
@@ -610,8 +635,13 @@ export function createTimeline() {
     ctx.stroke();
     if (w > 50) {
       ctx.fillStyle = '#fff';
-      ctx.font = '10px sans-serif';
-      ctx.fillText(TRANSITIONS[tw.type]?.name || tw.type, x + 3, y + 12, w - 6);
+      ctx.font = `${fpx(11)}px "Noto Sans KR", sans-serif`;
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(x + 2, y, w - 4, hh);
+      ctx.clip();
+      ctx.fillText(TRANSITIONS[tw.type]?.name || tw.type, x + 3, y + Math.min(hh - 4, fpx(13)));
+      ctx.restore();
     }
     ctx.restore();
   }
@@ -619,7 +649,7 @@ export function createTimeline() {
   function rulerStep() {
     const f = fps();
     const candidates = [1 / f, 2 / f, 5 / f, 10 / f, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1800, 3600];
-    for (const c of candidates) if (c * view.pps >= 70) return c;
+    for (const c of candidates) if (c * view.pps >= fpx(92)) return c;
     return 3600;
   }
 
@@ -634,7 +664,7 @@ export function createTimeline() {
     const t0 = Math.floor(tOf(0) / minor) * minor;
     ctx.strokeStyle = '#6a6a6a';
     ctx.fillStyle = '#a8a8a8';
-    ctx.font = '10px ui-monospace, Menlo, monospace';
+    ctx.font = `${fpx(11)}px ui-monospace, Menlo, monospace`;
     ctx.beginPath();
     for (let t = Math.max(0, t0); xOf(t) < W; t += minor) {
       const x = Math.round(xOf(t)) + 0.5;
@@ -738,13 +768,13 @@ export function createTimeline() {
     }
     // trim tooltip
     if (drag?.tooltip) {
-      ctx.font = '11px ui-monospace, monospace';
+      ctx.font = `${fpx(12)}px "Noto Sans KR", ui-monospace, monospace`;
       const tw = ctx.measureText(drag.tooltip).width + 10;
       const tx = clamp(drag.tipX + 10, 0, W - tw);
       ctx.fillStyle = 'rgba(20,20,20,0.92)';
-      ctx.fillRect(tx, drag.tipY - 26, tw, 18);
+      ctx.fillRect(tx, drag.tipY - fpx(28), tw, fpx(20));
       ctx.fillStyle = '#fff';
-      ctx.fillText(drag.tooltip, tx + 5, drag.tipY - 13);
+      ctx.fillText(drag.tooltip, tx + 5, drag.tipY - fpx(13));
     }
     // playhead
     const px = Math.round(xOf(store.ui.playhead)) + 0.5;
@@ -796,7 +826,7 @@ export function createTimeline() {
       if (x <= x0 + ez) zone = 'in';
       else if (x >= x1 - ez) zone = 'out';
       if (zone === 'body' && c.kind === 'audio' && row.h >= 30) {
-        const nameH = Math.min(15, row.h - 3);
+        const nameH = Math.min(fpx(16), row.h - 3);
         const vol = c.effects.find((e) => e.type === 'volume');
         if (vol) {
           const vy = volumeY(evalParamAt(vol, 'level', t - c.start), ry + 1 + nameH, row.h - 3 - nameH);
@@ -877,7 +907,7 @@ export function createTimeline() {
       // marker drag?
       const mk = store.seq.markers.find((m) => Math.abs(xOf(m.time) - x) < 6 && y > 12 && y < 28);
       if (mk) {
-        store.begin('Move Marker');
+        store.begin('마커 이동');
         drag = { type: 'marker', id: mk.id, t0: mk.time, x0: x };
         return;
       }
@@ -972,6 +1002,7 @@ export function createTimeline() {
       if (snap || sd.at != null) t += sd.delta;
     }
     store.setPlayhead(snapFrame(t, fps()));
+    playback.scrubAudio();
   }
 
   function beginMove(e, x, y, hit, ids) {
@@ -1018,7 +1049,7 @@ export function createTimeline() {
       }
     }
     store.selectClips(clips.map((l) => l.id));
-    store.begin(mode === 'ripple' ? 'Ripple Trim' : mode === 'rolling' ? 'Rolling Edit' : 'Trim');
+    store.begin(mode === 'ripple' ? '잔물결 다듬기' : mode === 'rolling' ? '롤링 편집' : '다듬기');
     const restorePlayhead = store.ui.playhead;
     const edgeT = edge === 'in' ? c.start : clipEnd(c);
     drag = {
@@ -1032,7 +1063,7 @@ export function createTimeline() {
     const m = store.project.media[c.mediaId];
     const max = m && Number.isFinite(m.duration) ? (m.duration - c.inPoint - c.duration * c.speed) : Infinity;
     const min = -c.inPoint;
-    store.begin('Slip');
+    store.begin('밀어 넣기 (슬립)');
     drag = { type: 'slip', ids: [...edit.withLinked([c.id])], x0: x, min, max, applied: 0, restorePlayhead: store.ui.playhead };
   }
 
@@ -1042,13 +1073,13 @@ export function createTimeline() {
     const vol = c.effects.find((e) => e.type === 'volume');
     // grabbing a keyframe dot moves just that keyframe
     const kfIndex = vol?.params.level.kf ? vol.params.level.kf.findIndex((k) => Math.abs(xOf(c.start + k.t) - x) <= 5) : -1;
-    store.begin(kfIndex >= 0 ? 'Move Volume Keyframe' : 'Volume');
+    store.begin(kfIndex >= 0 ? '볼륨 키프레임 이동' : '볼륨');
     drag = { type: 'volume', id: c.id, bodyY: rowY(hit.row) + 1 + nameH, bodyH: hit.row.h - 3 - nameH, tl: hit.t - c.start, kfIndex, x0: x };
   }
 
   /** Ctrl/Cmd+click on the volume rubber band adds a keyframe there. */
   function addVolumeKeyframe(clipId, t) {
-    store.transact('Add Volume Keyframe', () => {
+    store.transact('볼륨 키프레임 추가', () => {
       const c = store.seq.clips[clipId];
       const vol = c?.effects.find((e) => e.type === 'volume');
       if (!vol) return;
@@ -1135,7 +1166,7 @@ export function createTimeline() {
           const ni = clamp(idx + (c.kind === 'audio' ? dA : dV), 0, list.length - 1);
           return { id: c.id, trackId: list[ni].id, start: c.start + dt };
         });
-        drag.tooltip = `${dt >= 0 ? '+' : '-'}${formatTimecode(Math.abs(dt), fps())}${drag.insert ? '  (insert)' : ''}${drag.duplicate ? '  (copy)' : ''}`;
+        drag.tooltip = `${dt >= 0 ? '+' : '-'}${formatTimecode(Math.abs(dt), fps())}${drag.insert ? '  (삽입)' : ''}${drag.duplicate ? '  (복제)' : ''}`;
         drag.tipX = x;
         drag.tipY = y;
         autoScroll(x);
@@ -1163,7 +1194,7 @@ export function createTimeline() {
           if (c) c.inPoint += inc * c.speed;
         }
         drag.applied = delta;
-        drag.tooltip = `Slip ${delta >= 0 ? '+' : '-'}${formatTimecode(Math.abs(delta), fps())}`;
+        drag.tooltip = `슬립 ${delta >= 0 ? '+' : '-'}${formatTimecode(Math.abs(delta), fps())}`;
         drag.tipX = x;
         drag.tipY = y;
         store.changed();
@@ -1246,9 +1277,9 @@ export function createTimeline() {
       case 'move':
         if (!d.moved && d.clickIds) store.selectClips(d.clickIds);
         if (d.moved && (Math.abs(d.dt) > EPS || d.dV || d.dA || d.duplicate)) {
-          store.transact(d.duplicate ? 'Duplicate' : d.insert ? 'Insert Move' : 'Move', () => {
+          store.transact(d.duplicate ? '복제' : d.insert ? '삽입하며 이동' : '이동', () => {
             const ids = edit.rawMoveClips(d.ids, d.dt, d.dV, d.dA, { mode: d.insert ? 'insert' : 'overwrite', duplicate: d.duplicate });
-            if (!ids) toast('Cannot move onto a locked track');
+            if (!ids) toast('잠긴 트랙으로는 옮길 수 없습니다');
             else if (d.duplicate) store.selectClips(ids);
           });
         }
@@ -1339,14 +1370,15 @@ export function createTimeline() {
     if (hit.area === 'transition') {
       store.selectTransition(hit.transition.clip.id, hit.transition.edge);
       showMenu([
-        { label: 'Set Transition Duration…', action: async () => {
-          const c = s.clips[hit.transition.clip.id];
+        { label: '전환 길이 정하기…', action: async () => {
+          const c = store.seq.clips[hit.transition.clip.id];
           const key = hit.transition.edge === 'in' ? 'transIn' : 'transOut';
-          const v = await promptDialog('Transition Duration', 'Duration (timecode or frames)', formatTimecode(c[key].duration, s.fps));
+          if (!c?.[key]) return;
+          const v = await promptDialog('전환 길이', '길이 (타임코드 또는 프레임 수)', formatTimecode(c[key].duration, s.fps));
           const d = v != null ? parseTimecode(v, s.fps) : null;
-          if (d) store.transact('Transition Duration', () => edit.setTransitionDuration(c.id, hit.transition.edge, d));
+          if (d) store.transact('전환 길이', () => edit.setTransitionDuration(c.id, hit.transition.edge, d));
         } },
-        { label: 'Clear', key: 'Del', action: () => edit.deleteSelection() },
+        { label: '전환 삭제', key: 'Del', action: () => edit.deleteSelection() },
       ], e.clientX, e.clientY);
       return;
     }
@@ -1354,32 +1386,45 @@ export function createTimeline() {
       const c = hit.clip;
       if (!store.selection.clips.has(c.id)) store.selectClips([...edit.withLinked([c.id])]);
       const sel = store.selectedClips();
-      const ids = sel.map((x) => x.id);
+      const ids = sel.map((x2) => x2.id);
       const cb = store.ui.clipboard;
+      const isMc = c.kind === 'nest' && c.multicam;
+      const mcInner = isMc ? store.project.sequences[store.project.media[c.mediaId]?.sequenceId] : null;
       showMenu([
-        { label: 'Cut', key: 'Ctrl+X', action: () => edit.copySelection(true) },
-        { label: 'Copy', key: 'Ctrl+C', action: () => edit.copySelection() },
-        { label: 'Paste Attributes', disabled: !(cb && cb.clips.length >= 1), action: () => edit.pasteAttributes(cb.clips.find((x) => (x.kind === 'audio') === (c.kind === 'audio')) || cb.clips[0], ids) },
-        { label: 'Remove Effects', action: () => store.transact('Remove Effects', () => { for (const x of sel) x.effects = x.effects.filter((fx) => EFFECTS[fx.type]?.fixed); }) },
+        { label: '잘라내기', key: 'Ctrl+X', action: () => edit.copySelection(true) },
+        { label: '복사', key: 'Ctrl+C', action: () => edit.copySelection() },
+        { label: '효과만 붙여넣기', key: 'Ctrl+Alt+V', disabled: !(cb && cb.clips.length >= 1), action: () => edit.pasteAttributes(cb.clips.find((x2) => (x2.kind === 'audio') === (c.kind === 'audio')) || cb.clips[0], ids) },
+        { label: '추가한 효과 모두 제거', action: () => store.transact('효과 모두 제거', () => {
+          for (const id of ids) {
+            const cc = store.seq.clips[id];
+            if (cc) cc.effects = cc.effects.filter((fx) => EFFECTS[fx.type]?.fixed);
+          }
+        }) },
         '-',
-        { label: 'Clear', key: 'Del', action: () => edit.deleteSelection() },
-        { label: 'Ripple Delete', key: 'Shift+Del', action: () => edit.deleteSelection({ ripple: true }) },
+        { label: '지우기 (빈자리 남김)', key: 'Del', action: () => edit.deleteSelection() },
+        { label: '잔물결 삭제 (빈자리 당김)', key: 'Shift+Del', action: () => edit.deleteSelection({ ripple: true }) },
         '-',
-        { label: 'Enable', checked: c.enabled !== false, key: 'Shift+E', action: () => edit.setEnabled(ids, !(c.enabled !== false)) },
-        c.linkId ? { label: 'Unlink', key: 'Ctrl+L', action: () => edit.unlinkClips(ids) } : { label: 'Link', key: 'Ctrl+L', disabled: ids.length < 2, action: () => edit.linkClips(ids) },
-        { label: 'Rename…', action: async () => { const n = await promptDialog('Rename Clip', 'Name', c.name); if (n != null) edit.renameClip(c.id, n); } },
+        { label: '클립 사용', checked: c.enabled !== false, key: 'Shift+E', action: () => edit.setEnabled(ids, !(c.enabled !== false)) },
+        c.linkId ? { label: '연결 해제 (영상/소리 따로)', key: 'Ctrl+L', action: () => edit.unlinkClips(ids) } : { label: '연결 (함께 움직이기)', key: 'Ctrl+L', disabled: ids.length < 2, action: () => edit.linkClips(ids) },
+        { label: '이름 바꾸기…', action: async () => { const n = await promptDialog('클립 이름 바꾸기', '이름', c.name); if (n != null) edit.renameClip(c.id, n); } },
+        { label: '레이블 색상', submenu: LABEL_COLORS.map(([col, n]) => ({ label: n, swatch: col || 'transparent', checked: (c.label || '') === col, action: () => edit.setLabel([...edit.withLinked(ids)], col) })) },
         '-',
-        { label: 'Speed/Duration…', key: 'Ctrl+R', action: () => openSpeedDialog(ids) },
-        { label: 'Add Frame Hold', disabled: c.kind !== 'video', action: () => edit.addFrameHold(c) },
-        { label: 'Reverse Speed', checked: !!c.reverse, disabled: !isTimed(c), action: () => edit.setSpeed(ids, { speed: c.speed, reverse: !c.reverse }) },
+        { label: '속도/지속 시간…', key: 'Ctrl+R', action: () => openSpeedDialog(ids) },
+        { label: '프레임 고정 추가 (재생헤드부터 정지 화면)', disabled: c.kind !== 'video', action: () => edit.addFrameHold(c) },
+        { label: '역재생', checked: !!c.reverse, disabled: !isTimed(c), action: () => edit.toggleReverse(ids) },
+        { label: '속도 램프 (시간 다시 매핑) 편집', disabled: !c.effects.some((fx) => fx.type === 'timeRemap'), action: () => store.emit('reveal-effect-controls') },
         '-',
-        { label: 'Apply Default Transitions', key: 'Shift+D', action: () => edit.applyDefaultTransitions() },
-        { label: 'Nest…', action: async () => { const n = await promptDialog('Nested Sequence Name', 'Name', `Nested Sequence ${Object.keys(store.project.sequences).length}`); if (n != null) edit.nestSelection(n); } },
-        c.kind === 'nest' ? { label: 'Open Nested Sequence', action: () => store.openSequence(store.project.media[c.mediaId]?.sequenceId) } : null,
-        { label: 'Scale to Fill Frame', disabled: !(c.kind === 'video' || c.kind === 'image'), action: () => scaleToFill(sel) },
-        { label: 'Reset Motion', disabled: !c.effects.some((fx) => fx.type === 'motion'), action: () => { for (const x of sel) { const fx = x.effects.find((f) => f.type === 'motion'); if (fx) edit.resetEffect(x.id, fx.id); } } },
+        { label: '기본 전환 넣기', key: 'Shift+D', action: () => edit.applyDefaultTransitions() },
+        { label: '중첩 (하나로 묶기)…', action: async () => { const n = await promptDialog('중첩 시퀀스 이름', '이름', `중첩 시퀀스 ${Object.keys(store.project.sequences).length}`); if (n != null) edit.nestSelection(n); } },
+        c.kind === 'nest' ? { label: '중첩 시퀀스 열기', action: () => store.openSequence(store.project.media[c.mediaId]?.sequenceId) } : null,
+        isMc && mcInner ? { label: '멀티캠 앵글', submenu: videoTracks(mcInner).map((tr, i) => ({ label: `앵글 ${i + 1} (${tr.name})`, key: String(i + 1), checked: c.multicam.angle === i + 1, action: () => {
+          store.setPlayhead(Math.max(store.ui.playhead, c.start));
+          store.transact(`앵글 ${i + 1}(으)로 전환`, () => { const cc = store.seq.clips[c.id]; if (cc) cc.multicam = { angle: i + 1 }; });
+        } })) } : null,
+        { label: '화면 채우기 (비율 맞춰 확대)', disabled: !(c.kind === 'video' || c.kind === 'image' || c.kind === 'nest'), action: () => scaleToFill(sel) },
+        { label: '모션 초기화', disabled: !c.effects.some((fx) => fx.type === 'motion'), action: () => { for (const id of ids) { const fx = store.seq.clips[id]?.effects.find((f) => f.type === 'motion'); if (fx) edit.resetEffect(id, fx.id); } } },
         '-',
-        { label: 'Reveal in Project', disabled: !c.mediaId, action: () => { store.ui.selectedMedia = new Set([c.mediaId]); store.emit('reveal-media', c.mediaId); } },
+        { label: '프로젝트 패널에서 보기', disabled: !c.mediaId, action: () => { store.ui.selectedMedia = new Set([c.mediaId]); store.emit('reveal-media', c.mediaId); } },
       ], e.clientX, e.clientY);
       return;
     }
@@ -1388,35 +1433,37 @@ export function createTimeline() {
       const prev = clips.filter((c) => clipEnd(c) <= hit.t).pop();
       const next = clips.find((c) => c.start >= hit.t);
       showMenu([
-        { label: 'Ripple Delete', disabled: !next, action: () => { store.selectGap({ trackId: hit.row.track.id, start: prev ? clipEnd(prev) : 0, end: next.start }); edit.deleteSelection(); } },
-        { label: 'Paste', key: 'Ctrl+V', disabled: !store.ui.clipboard, action: () => { store.setPlayhead(snapFrame(hit.t, fps())); edit.paste(); } },
+        { label: '이 빈 공간 메우기 (잔물결 삭제)', disabled: !next, action: () => { store.selectGap({ trackId: hit.row.track.id, start: prev ? clipEnd(prev) : 0, end: next.start }); edit.deleteSelection(); } },
+        { label: '여기에 붙여넣기', key: 'Ctrl+V', disabled: !store.ui.clipboard, action: () => { store.setPlayhead(snapFrame(hit.t, fps())); edit.paste(); } },
         '-',
-        { label: 'Add Video Track', action: () => edit.addTrack('video') },
-        { label: 'Add Audio Track', action: () => edit.addTrack('audio') },
-        { label: 'Close All Gaps', action: () => edit.closeAllGaps() },
+        { label: '비디오 트랙 추가', action: () => edit.addTrack('video') },
+        { label: '오디오 트랙 추가', action: () => edit.addTrack('audio') },
+        { label: '빈 공간 모두 메우기', action: () => edit.closeAllGaps() },
       ], e.clientX, e.clientY);
       return;
     }
     if (hit.area === 'ruler') {
       const mk = s.markers.find((m) => Math.abs(xOf(m.time) - x) < 6);
       showMenu([
-        { label: 'Add Marker', key: 'M', action: () => edit.addMarker(snapFrame(tOf(x), fps())) },
-        { label: 'Edit Marker…', disabled: !mk, action: () => openMarkerDialog(mk.id) },
-        { label: 'Delete Marker', disabled: !mk, action: () => edit.removeMarker(mk.id) },
+        { label: '마커 추가', key: 'M', action: () => edit.addMarker(snapFrame(tOf(x), fps())) },
+        { label: '마커 편집…', disabled: !mk, action: () => openMarkerDialog(mk.id) },
+        { label: '마커 삭제', disabled: !mk, action: () => edit.removeMarker(mk.id) },
         '-',
-        { label: 'Mark In Here', action: () => edit.setSequenceInOut('in', tOf(x)) },
-        { label: 'Mark Out Here', action: () => edit.setSequenceInOut('out', tOf(x)) },
-        { label: 'Clear In and Out', action: () => store.transact('Clear In/Out', () => { s.inPoint = null; s.outPoint = null; }) },
+        { label: '여기를 시작(In)으로 표시', action: () => edit.setSequenceInOut('in', tOf(x)) },
+        { label: '여기를 끝(Out)으로 표시', action: () => edit.setSequenceInOut('out', tOf(x)) },
+        { label: '시작·끝 표시 지우기', action: () => store.transact('시작/끝 지우기', () => { store.seq.inPoint = null; store.seq.outPoint = null; }) },
       ], e.clientX, e.clientY);
     }
   }
 
+
   function scaleToFill(clips) {
     const s = store.seq;
-    store.transact('Scale to Fill Frame', () => {
-      for (const c of clips) {
-        const m = store.project.media[c.mediaId];
-        const motion = c.effects.find((e) => e.type === 'motion');
+    store.transact('화면 채우기', () => {
+      for (const c0 of clips) {
+        const c = store.seq.clips[c0.id];
+        const m = c && store.project.media[c.mediaId];
+        const motion = c?.effects.find((e) => e.type === 'motion');
         if (!m?.width || !motion) continue;
         const fit = Math.min(s.width / m.width, s.height / m.height);
         const fill = Math.max(s.width / m.width, s.height / m.height);
@@ -1458,7 +1505,7 @@ export function createTimeline() {
   function mediaPlacement(payload, x, y, insert) {
     const s = store.seq;
     const m = store.project.media[payload.mediaId];
-    if (!m) return null;
+    if (!m || m.kind === 'lut') return null;
     const row = rowAtY(y);
     const inP = payload.inPoint ?? m.inPoint ?? 0;
     const outP = payload.outPoint ?? m.outPoint ?? (m.duration ?? inP + 5);
@@ -1475,7 +1522,7 @@ export function createTimeline() {
       else vIdx = aIdx = ats.indexOf(row.track);
     }
     const wantV = payload.video !== false && m.kind !== 'audio';
-    const wantA = payload.audio !== false && (m.kind === 'audio' || (m.kind === 'video' && m.hasAudio));
+    const wantA = payload.audio !== false && (m.kind === 'audio' || ((m.kind === 'video' || m.kind === 'sequence') && m.hasAudio));
     const vTrack = wantV ? vts[Math.min(vIdx, vts.length - 1)] : null;
     const aTrack = wantA ? ats[Math.min(aIdx, ats.length - 1)] : null;
     const ghosts = [];
@@ -1542,7 +1589,14 @@ export function createTimeline() {
       try { payload = JSON.parse(e.dataTransfer.getData('application/x-montage-effect')); } catch { /* ignore */ }
       const hit = hitTest(x, y);
       if (!payload || hit.area !== 'clip') return;
-      if (payload.transition) {
+      if (payload.preset) {
+        const preset = getPreset(payload.preset);
+        const ids = store.selection.clips.has(hit.clip.id) ? [...store.selection.clips] : [hit.clip.id];
+        if (preset && edit.applyEffectPreset(ids, preset)) {
+          store.selectClips([hit.clip.id]);
+          store.emit('reveal-effect-controls');
+        } else toast('이 클립에는 그 프리셋을 적용할 수 없습니다');
+      } else if (payload.transition) {
         const c = hit.clip;
         const rel = (hit.t - c.start) / c.duration;
         edit.applyTransition(c.id, rel < 0.5 ? 'in' : 'out', payload.type, 1);
@@ -1557,7 +1611,7 @@ export function createTimeline() {
       const ids = await importFiles(files);
       let t = Math.max(0, snapFrame(tOf(x), fps()));
       for (const id of ids) {
-        if (mediaStatus(id) !== 'ready') continue;
+        if (mediaStatus(id) !== 'ready' || store.project.media[id]?.kind === 'lut') continue;
         const pl = mediaPlacement({ mediaId: id }, xOf(t), y, false);
         if (!pl) continue;
         edit.placeMedia(id, { mode: 'overwrite', start: t, vTrackId: pl.vTrack?.id, aTrackId: pl.aTrack?.id });
@@ -1582,6 +1636,11 @@ export function createTimeline() {
   store.on('change', fullRefresh);
   store.on('selection', invalidate);
   store.on('tool', () => updateHover(-100, -100, {}));
+  store.on('recording', renderHeaders);
+  window.addEventListener('montage:uiscale', () => {
+    SC = uiScale();
+    invalidate();
+  });
   mediaEvents.on('updated', invalidate);
   store.on('playhead', () => {
     tcEl.textContent = formatTimecode(store.ui.playhead, fps());

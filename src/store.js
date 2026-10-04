@@ -24,6 +24,7 @@ class Store extends Emitter {
       sourceMediaId: null,
       clipboard: null,
       selectedMedia: new Set(),
+      audioScrub: true,
     };
   }
 
@@ -48,6 +49,7 @@ class Store extends Emitter {
       result = fn();
     } catch (err) {
       this.project = JSON.parse(before);
+      this.pruneSelection();
       this.changed('restore');
       throw err;
     }
@@ -95,7 +97,7 @@ class Store extends Emitter {
     this.pruneSelection();
     this.changed('restore');
     this.emit('history');
-    this.emit('toast', `Undo: ${entry.label}`);
+    this.emit('toast', `실행 취소: ${entry.label}`);
   }
 
   redo() {
@@ -106,7 +108,7 @@ class Store extends Emitter {
     this.pruneSelection();
     this.changed('restore');
     this.emit('history');
-    this.emit('toast', `Redo: ${entry.label}`);
+    this.emit('toast', `다시 실행: ${entry.label}`);
   }
 
   /** Replace the whole project (open / new). Clears history. */
@@ -123,6 +125,7 @@ class Store extends Emitter {
     this.emit('history');
     this.emit('selection');
     this.emit('playhead');
+    this.emit('source');
   }
 
   changed(reason) {
@@ -145,7 +148,9 @@ class Store extends Emitter {
   pruneSelection() {
     const clips = this.seq.clips;
     for (const id of [...this.selection.clips]) if (!clips[id]) this.selection.clips.delete(id);
-    if (this.selection.transition && !clips[this.selection.transition.clipId]) this.selection.transition = null;
+    const tr = this.selection.transition;
+    if (tr && !clips[tr.clipId]?.[tr.edge === 'in' ? 'transIn' : 'transOut']) this.selection.transition = null;
+    this.selection.gap = null;
     this.emit('selection');
   }
 

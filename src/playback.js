@@ -2,13 +2,13 @@
 // graph (clip gain/pan -> track bus -> master -> meters) and the preview frame provider.
 
 import { store } from './store.js';
-import { mediaUrl, getRuntime, mediaStatus } from './media.js';
+import { mediaUrl, getRuntime, mediaStatus, decodeAudioRange } from './media.js';
 import {
   clipEnd, clipsOnTrack, mediaTimeAt, transitionExtents, evalEffect, audioTracks, videoTracks,
-  sequenceDuration, transitionsOnTrack,
+  sequenceDuration, transitionsOnTrack, remapSpeedAt, sourceOut,
 } from './model.js';
 import { Emitter, clamp, dbToGain, snapFrame } from './util.js';
-import { createChain, chainSignature } from './audio-fx.js';
+import { createChain, chainSignature, loadAudioWorklets } from './audio-fx.js';
 
 const MAX_VIDEO_ELEMENTS = 12;
 const MAX_AUDIO_ELEMENTS = 16;
@@ -126,6 +126,10 @@ class Playback extends Emitter {
     this.audioPool = new Pool('audio', MAX_AUDIO_ELEMENTS);
     this.audio = null;
     this.trackBuses = new Map();
+    this.voices = new Map(); // reversed-audio buffer voices keyed like pool entries
+    this.scrubUntil = 0;
+    this.multicamPreview = false; // keep every multicam angle decoding (multicam panel open)
+    this.openEnded = false; // keep playing past the sequence end (voice-over recording)
     this.requestRender = this.requestRender.bind(this);
     this.tick = this.tick.bind(this);
     requestAnimationFrame(this.tick);
@@ -153,6 +157,7 @@ class Playback extends Emitter {
           if (!rt.image) return rt.status === 'loading' ? null : { offline: true };
           return { img: rt.image, w: rt.image.naturalWidth, h: rt.image.naturalHeight, fit: true };
         },
+        lut: (id) => (id ? getRuntime(id).lut || null : null),
       };
     }
     return this._provider;
@@ -184,6 +189,7 @@ class Playback extends Emitter {
     splitter.connect(left, 0);
     splitter.connect(right, 1);
     this.audio = { ctx, master, left, right, bufL: new Float32Array(1024), bufR: new Float32Array(1024) };
+    loadAudioWorklets(ctx).then(() => this.requestRender()).catch((err) => console.warn('audio worklets unavailable', err));
     return this.audio;
   }
 
@@ -237,7 +243,7 @@ class Playback extends Emitter {
     this.ensureAudio();
     const seq = store.seq;
     const end = range ? range.end : sequenceDuration(seq);
-    if (rate > 0 && store.ui.playhead >= end - 1e-3) store.setPlayhead(range ? range.start : 0);
+    if (rate > 0 && !this.openEnded && store.ui.playhead >= end - 1e-3) store.setPlayhead(range ? range.start : 0);
     this.range = range;
     this.rate = rate;
     this.playing = true;
@@ -305,7 +311,7 @@ class Playback extends Emitter {
       const dt = Math.min(0.25, (now - this.lastTick) / 1000);
       this.lastTick = now;
       let t = store.ui.playhead + dt * this.rate;
-      const end = this.range ? this.range.end : sequenceDuration(seq);
+      const end = this.range ? this.range.end : this.openEnded ? Infinity : sequenceDuration(seq);
       const start = this.range ? this.range.start : 0;
       if (this.rate > 0 && t >= end) {
         if (this.loop && end > start) t = start;
@@ -351,9 +357,14 @@ class Playback extends Emitter {
       }
       this.audio.master.gain.value = dbToGain(seq.masterVolume || 0);
     }
-    this.visitSequence(seq, t, '', 0, { keepV, keepA, speed: 1, video: true, audio: true, busTrackId: null, gain: 1, audible: true, playing: true });
+    const voiceKeys = new Set();
+    this.visitSequence(seq, t, '', 0, { keepV, keepA, voiceKeys, speed: 1, video: true, audio: true, busTrackId: null, gain: 1, audible: true, playing: true });
     this.videoPool.trim(keepV);
     this.audioPool.trim(keepA);
+    for (const [key, v] of this.voices) {
+      if (!voiceKeys.has(key) || !this.playing) this.stopVoice(v);
+      if (!voiceKeys.has(key) && v.status !== 'loading') this.voices.delete(key);
+    }
   }
 
   visitSequence(seq, t, prefix, depth, ctx) {
@@ -381,16 +392,26 @@ class Playback extends Emitter {
       if (!w.active && !w.preroll) return;
       if (mediaStatus(clip.mediaId) !== 'ready') return;
       const key = prefix + clip.id;
+      if (kind === 'audio' && clip.reverse && !clip.hold) {
+        // media elements cannot play backwards: reversed audio plays from a decoded, reversed buffer
+        if (w.active) this.reverseVoice(key, seq, clip, track, t, anySolo, ctx);
+        return;
+      }
       const pool = kind === 'video' ? this.videoPool : this.audioPool;
       const entry = pool.acquire(clip, key, this.requestRender);
       (kind === 'video' ? ctx.keepV : ctx.keepA).add(key);
       const m = store.project.media[clip.mediaId];
       const { mt, outside } = mediaTime(clip, m, w.active ? t : w.s);
       const el = entry.el;
+      const keepPitch = clip.maintainPitch !== false;
+      if (el.preservesPitch !== keepPitch) el.preservesPitch = keepPitch;
       if (kind === 'audio') this.updateAudioNodes(entry, seq, clip, track, t, anySolo, w.active, ctx);
-      const canRoll = w.active && playingFwd && !clip.hold && !clip.reverse && !outside && clip.enabled !== false;
+      const rawRate = clip.speed * remapSpeedAt(clip, t - clip.start) * ctx.speed * this.rate;
+      const canRoll = w.active && playingFwd && !clip.hold && !clip.reverse && !outside && clip.enabled !== false && rawRate >= 0.0625;
+      const scrubbing = kind === 'audio' && performance.now() < this.scrubUntil;
+      if (scrubbing && !this.playing) return; // let the scrub snippet play
       if (canRoll) {
-        const r = clamp(clip.speed * ctx.speed * this.rate, 0.0625, 16);
+        const r = clamp(rawRate, 0.0625, 16);
         if (Math.abs(el.playbackRate - r) > 1e-3) el.playbackRate = r;
         const drift = el.currentTime - mt;
         if (el.paused) {
@@ -423,10 +444,11 @@ class Playback extends Emitter {
       const { mt } = mediaTime(clip, m, w.active ? t : w.s);
       const sub = {
         ...ctx,
-        speed: ctx.speed * clip.speed,
+        speed: ctx.speed * clip.speed * remapSpeedAt(clip, t - clip.start),
         video: kind === 'video',
         audio: kind === 'audio',
         playing: ctx.playing && w.active && !clip.hold && !clip.reverse && clip.enabled !== false,
+        angle: kind === 'video' && clip.multicam && inner.multicam && !this.multicamPreview ? clip.multicam.angle : null,
       };
       if (kind === 'audio') {
         const trackAudible = depth === 0 ? true : !track.muted && (!anySolo || track.solo);
@@ -438,8 +460,10 @@ class Playback extends Emitter {
     };
 
     if (ctx.video) {
-      for (const tr of videoTracks(seq)) {
-        if (tr.hidden) continue;
+      const vts = videoTracks(seq);
+      for (const tr of vts) {
+        if (tr.hidden && !seq.multicam) continue;
+        if (ctx.angle && vts.indexOf(tr) !== ctx.angle - 1) continue;
         for (const c of clipsOnTrack(seq, tr.id)) {
           if (c.enabled === false) continue;
           if (c.kind === 'video') visit(c, 'video', tr);
@@ -468,7 +492,7 @@ class Playback extends Emitter {
       entry.nodes = { src, gain, pan, bus: null, chain: null, chainSig: '' };
     }
     // (re)build the clip's audio effect chain when its structure changes
-    const sig = chainSignature(clip);
+    const sig = chainSignature(clip, a.ctx);
     if (sig !== entry.nodes.chainSig) {
       const n = entry.nodes;
       try { n.gain.disconnect(); } catch { /* not connected */ }
@@ -498,6 +522,75 @@ class Playback extends Emitter {
     }
     entry.nodes.gain.gain.setTargetAtTime(g, a.ctx.currentTime, 0.01);
     entry.nodes.pan.pan.value = clamp(p, -1, 1);
+  }
+
+  /** Reversed audio clip: play a decoded, reversed copy of the used source range. */
+  reverseVoice(key, seq, clip, track, t, anySolo, ctx) {
+    ctx.voiceKeys.add(key);
+    const a = this.ensureAudio();
+    const lo = clip.inPoint;
+    const hi = sourceOut(clip);
+    const srcKey = `${clip.mediaId}:${lo.toFixed(3)}:${hi.toFixed(3)}`;
+    let v = this.voices.get(key);
+    if (!v || v.srcKey !== srcKey) {
+      if (v) this.stopVoice(v);
+      v = { srcKey, status: 'loading', buffer: null, node: null };
+      this.voices.set(key, v);
+      decodeAudioRange(clip.mediaId, lo, hi).then((buf) => {
+        if (!buf) {
+          v.status = 'empty';
+          return;
+        }
+        for (let c = 0; c < buf.numberOfChannels; c++) buf.getChannelData(c).reverse();
+        v.buffer = buf;
+        v.status = 'ready';
+      }).catch(() => { v.status = 'empty'; });
+    }
+    if (v.status !== 'ready' || !this.playing || this.rate <= 0) {
+      this.stopVoice(v);
+      return;
+    }
+    const mt = clamp(mediaTimeAt(clip, t), lo, hi);
+    const offset = hi - mt; // seconds into the reversed buffer
+    const rate = clamp(clip.speed * remapSpeedAt(clip, t - clip.start) * ctx.speed * this.rate, 0.0625, 16);
+    const expected = v.node ? v.offset0 + (a.ctx.currentTime - v.t0) * v.rate : null;
+    if (!v.node || Math.abs(expected - offset) > 0.15 || Math.abs(v.rate - rate) > 1e-3) {
+      this.stopVoice(v);
+      const src = a.ctx.createBufferSource();
+      src.buffer = v.buffer;
+      src.playbackRate.value = rate;
+      const gain = a.ctx.createGain();
+      const pan = a.ctx.createStereoPanner();
+      src.connect(gain).connect(pan).connect(this.trackBus(ctx.busTrackId || track.id).gain);
+      src.start(0, clamp(offset, 0, v.buffer.duration));
+      Object.assign(v, { node: src, gain, pan, t0: a.ctx.currentTime, offset0: offset, rate });
+    }
+    const nestedTrack = ctx.busTrackId ? (!track.muted && (!anySolo || track.solo) ? dbToGain(track.volume || 0) : 0) : 1;
+    const g = ctx.audible && clip.enabled !== false ? clipGain(seq, clip, t) * ctx.gain * nestedTrack : 0;
+    v.gain.gain.setTargetAtTime(g, a.ctx.currentTime, 0.01);
+    const pfx = clip.effects.find((fx) => fx.type === 'panner' && fx.enabled);
+    v.pan.pan.value = pfx ? clamp(evalEffect(pfx, t - clip.start).balance / 100, -1, 1) : 0;
+  }
+
+  stopVoice(v) {
+    if (v?.node) {
+      try { v.node.stop(); } catch { /* already stopped */ }
+      try { v.node.disconnect(); v.gain.disconnect(); v.pan.disconnect(); } catch { /* ignore */ }
+      v.node = null;
+    }
+  }
+
+  /** Play a short snippet of audio at the playhead while the user drags it (audio scrubbing). */
+  scrubAudio() {
+    if (!store.ui.audioScrub || this.playing) return;
+    this.ensureAudio();
+    this.sync(store.ui.playhead);
+    this.scrubUntil = performance.now() + 90;
+    for (const e of this.audioPool.byClip.values()) {
+      if (e.el.readyState >= 2) e.el.play().catch(() => {});
+    }
+    clearTimeout(this.scrubTimer);
+    this.scrubTimer = setTimeout(() => this.audioPool.pauseAll(), 100);
   }
 
   /** Drop all elements (after load / relink). */

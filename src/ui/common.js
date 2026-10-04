@@ -137,14 +137,19 @@ export function showMenu(items, x, y, { level = 0 } = {}) {
       menu.append(h('div.sep'));
       continue;
     }
+    if (it.group) {
+      menu.append(h('div.group', it.group));
+      continue;
+    }
     const row = h(`div.item${it.disabled ? '.disabled' : ''}${it.checked ? '.checked' : ''}${it.submenu ? '.sub' : ''}`, { role: 'menuitem' },
+      it.swatch ? h('span.swatch', { style: { background: it.swatch } }) : null,
       h('span.label', it.label), it.key ? h('span.key', it.key) : null);
-    if (it.submenu) {
+    if (it.submenu && !it.disabled) {
       row.addEventListener('pointerenter', () => {
         const r = row.getBoundingClientRect();
         showMenu(it.submenu, r.right - 2, r.top - 4, { level: level + 1 });
       });
-    } else {
+    } else if (!it.submenu) {
       row.addEventListener('pointerenter', () => {
         openMenus.slice(level + 1).forEach((m) => m.remove());
         openMenus = openMenus.slice(0, level + 1);
@@ -188,7 +193,7 @@ export const menusOpen = () => openMenus.length > 0;
 
 // ---------------------------------------------------------------- modals
 
-export function openModal({ title, body, buttons = [{ label: 'Close', primary: true }], onClose, width }) {
+export function openModal({ title, body, buttons = [{ label: '닫기', primary: true }], onClose, width }) {
   const footer = h('footer');
   const modal = h('div.modal', { role: 'dialog', 'aria-modal': 'true', style: width ? { width } : null },
     h('header', title), h('div.body', body), footer);
@@ -235,8 +240,8 @@ export function confirmDialog(title, message) {
       title,
       body: h('div', message),
       buttons: [
-        { label: 'Cancel' },
-        { label: 'OK', primary: true, action: () => { result = true; } },
+        { label: '취소' },
+        { label: '확인', primary: true, action: () => { result = true; } },
       ],
       onClose: () => resolve(result),
     });
@@ -250,7 +255,7 @@ export function promptDialog(title, label, value = '') {
     openModal({
       title,
       body: h('div.form-row', h('label', label), input),
-      buttons: [{ label: 'Cancel' }, { label: 'OK', primary: true, action: () => { result = input.value; } }],
+      buttons: [{ label: '취소' }, { label: '확인', primary: true, action: () => { result = input.value; } }],
       onClose: () => resolve(result),
     });
   });
@@ -409,4 +414,35 @@ export function fitCanvasToBox(canvas) {
   const ctx = canvas.getContext('2d');
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   return { ctx, w: r.width, h: r.height, dpr };
+}
+
+// ---------------------------------------------------------------- UI size & focus hygiene
+
+export const UI_SCALES = [[0.9, '작게'], [1, '보통'], [1.15, '크게'], [1.3, '아주 크게']];
+
+export function uiScale() {
+  return loadPref('uiScale', 1);
+}
+
+export function applyUiScale(v = uiScale()) {
+  document.documentElement.style.setProperty('--ui-scale', String(v));
+  savePref('uiScale', v);
+  window.dispatchEvent(new Event('resize'));
+  window.dispatchEvent(new Event('montage:uiscale'));
+}
+
+/**
+ * Keep keyboard shortcuts working after mouse use: clicking a button must not leave it focused
+ * (Space would "click" it again), and a changed dropdown hands focus back to the page.
+ */
+export function installFocusHygiene() {
+  document.addEventListener('mousedown', (e) => {
+    const b = e.target.closest?.('button');
+    if (b && !b.closest('.modal')) e.preventDefault();
+  }, true);
+  document.addEventListener('change', (e) => {
+    const t = e.target;
+    if (t instanceof HTMLSelectElement && !t.closest('.modal')) t.blur();
+    if (t instanceof HTMLInputElement && (t.type === 'range' || t.type === 'checkbox' || t.type === 'color') && !t.closest('.modal')) t.blur();
+  }, true);
 }

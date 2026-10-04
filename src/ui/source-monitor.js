@@ -5,6 +5,7 @@ import { mediaUrl, runtime, mediaEvents, mediaStatus } from '../media.js';
 import * as edit from '../edit.js';
 import { h, clamp, formatTimecode, parseTimecode, snapFrame } from '../util.js';
 import { fitRect, fitCanvasToBox, dnd, inlineEdit } from './common.js';
+import { icon, iconButton } from './icons.js';
 
 export const sourceApi = {};
 
@@ -14,28 +15,29 @@ export function createSourceMonitor() {
   const img = h('img.frame', { style: { position: 'absolute', objectFit: 'contain', display: 'none' } });
   const wave = h('canvas.frame', { style: { display: 'none' } });
   const overlay = h('canvas.overlay');
-  view.append(video, img, wave, overlay);
-  const titleEl = h('span.monitor-title', 'No media');
+  const empty = h('div.monitor-empty', '프로젝트 패널의 영상·소리 항목을 두 번 클릭하면\n여기에서 미리 보고 시작(I)·끝(O)을 표시할 수 있습니다.');
+  view.append(video, img, wave, overlay, empty);
+  const titleEl = h('span.monitor-title', '소스 없음');
   const tcEl = h('span.tc', '00:00:00:00');
   const durEl = h('span.tc.dur', '');
   const scrub = h('canvas');
   const scrubBar = h('div.monitor-scrub', scrub);
-  const btn = (label, title, fn) => h('button', { title, onclick: fn }, label);
-  const playBtn = btn('▶', 'Play/Stop (Space)', () => togglePlay());
-  const dragVideo = h('span.drag-src', { draggable: true, title: 'Drag video only' }, '🎞 Video');
-  const dragAudio = h('span.drag-src', { draggable: true, title: 'Drag audio only' }, '♪ Audio');
+  const playBtn = iconButton('play', '재생 / 정지 (Space)', () => togglePlay(), { cls: 'play' });
+  const dragVideo = h('span.drag-src', { draggable: true, title: '끌어서 영상만 타임라인에 놓기' }, icon('film'), '영상만');
+  const dragAudio = h('span.drag-src', { draggable: true, title: '끌어서 소리만 타임라인에 놓기' }, icon('audio'), '소리만');
   const transport = h('div.transport',
     tcEl,
     h('span.grow'),
-    btn('{', 'Mark In (I)', () => markIn()),
-    btn('}', 'Mark Out (O)', () => markOut()),
-    btn('⇤', 'Go to In (Shift+I)', () => goIn()),
-    btn('◀|', 'Step Back (←)', () => step(-1)),
+    iconButton('markIn', '시작 표시 (I)', () => markIn()),
+    iconButton('markOut', '끝 표시 (O)', () => markOut()),
+    iconButton('goIn', '시작 표시로 이동 (Shift+I)', () => goIn()),
+    iconButton('stepBack', '1프레임 뒤로 (←)', () => step(-1)),
     playBtn,
-    btn('|▶', 'Step Forward (→)', () => step(1)),
-    btn('⇥', 'Go to Out (Shift+O)', () => goOut()),
-    btn('⤓ Insert', 'Insert (,)', () => insert('insert')),
-    btn('⤓ Overwrite', 'Overwrite (.)', () => insert('overwrite')),
+    iconButton('stepForward', '1프레임 앞으로 (→)', () => step(1)),
+    iconButton('goOut', '끝 표시로 이동 (Shift+O)', () => goOut()),
+    h('span.sep'),
+    iconButton('insert', '삽입: 재생헤드 위치에 끼워 넣고 뒤를 밀기 (,)', () => insert('insert'), { label: '삽입' }),
+    iconButton('overwrite', '덮어쓰기: 재생헤드 위치에 덮어 놓기 (.)', () => insert('overwrite'), { label: '덮어쓰기' }),
     dragVideo, dragAudio,
     h('span.grow'),
     durEl);
@@ -59,8 +61,9 @@ export function createSourceMonitor() {
     video.load();
     img.removeAttribute('src');
     video.style.display = img.style.display = wave.style.display = 'none';
+    empty.hidden = !!m;
     if (!m || mediaStatus(id) !== 'ready') {
-      titleEl.textContent = m ? `${m.name} (offline)` : 'No media';
+      titleEl.textContent = m ? `${m.name} (오프라인)` : '소스 없음';
       layout();
       draw();
       return;
@@ -102,7 +105,11 @@ export function createSourceMonitor() {
     const inP = m?.inPoint ?? 0;
     const outP = m?.outPoint ?? duration();
     durEl.textContent = m ? `${formatTimecode(Math.max(0, outP - inP), fps())}` : '';
-    playBtn.textContent = video.paused || !m ? '▶' : '■';
+    const playing = !video.paused && !!m;
+    if (playBtn.dataset.state !== String(playing)) {
+      playBtn.dataset.state = String(playing);
+      playBtn.replaceChildren(icon(playing ? 'stop' : 'play'));
+    }
     // scrub bar
     const { ctx, w, h: hh } = fitCanvasToBox(scrub);
     ctx.clearRect(0, 0, w, hh);
@@ -147,9 +154,9 @@ export function createSourceMonitor() {
     if (m && m.kind !== 'audio' && d > 0) {
       const t = current();
       o.ctx.fillStyle = 'rgba(255,255,255,0.8)';
-      o.ctx.font = '11px sans-serif';
-      if (m.inPoint != null && Math.abs(t - m.inPoint) < 0.5 / fps()) o.ctx.fillText('IN', 8, 16);
-      if (m.outPoint != null && Math.abs(t - m.outPoint) < 0.5 / fps()) o.ctx.fillText('OUT', o.w - 32, 16);
+      o.ctx.font = 'bold 13px sans-serif';
+      if (m.inPoint != null && Math.abs(t - m.inPoint) < 0.5 / fps()) o.ctx.fillText('시작', 8, 18);
+      if (m.outPoint != null && Math.abs(t - m.outPoint) < 0.5 / fps()) o.ctx.fillText('끝', o.w - 24, 18);
     }
   }
 
@@ -205,8 +212,9 @@ export function createSourceMonitor() {
   function setMark(which, t) {
     const id = mediaId;
     if (!id) return;
-    store.transact(which === 'in' ? 'Mark In (Source)' : 'Mark Out (Source)', () => {
+    store.transact(which === 'in' ? '소스 시작 표시' : '소스 끝 표시', () => {
       const m = store.project.media[id];
+      if (!m) return;
       if (which === 'in') {
         m.inPoint = t;
         if (m.outPoint != null && t != null && m.outPoint <= t) m.outPoint = null;
@@ -309,6 +317,9 @@ export function createSourceMonitor() {
   });
 
   store.on('source', () => load(store.ui.sourceMediaId));
+  store.on('change', () => {
+    if (mediaId && !store.project.media[mediaId]) load(null);
+  });
   mediaEvents.on('updated', (id) => {
     if (id === mediaId) {
       if (!video.src && mediaStatus(id) === 'ready') load(id);

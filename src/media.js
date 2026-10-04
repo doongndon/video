@@ -18,9 +18,11 @@ const THUMB_W = 160;
 const VIDEO_EXT = /\.(mp4|m4v|mov|webm|mkv|ogv|avi|3gp|ts|mts|m2ts)$/i;
 const AUDIO_EXT = /\.(mp3|wav|wave|ogg|oga|opus|m4a|aac|flac|weba)$/i;
 const IMAGE_EXT = /\.(png|jpe?g|gif|webp|bmp|svg|avif)$/i;
+const LUT_EXT = /\.cube$/i;
 
 export function guessKind(file) {
   const t = file.type || '';
+  if (LUT_EXT.test(file.name)) return 'lut';
   if (t.startsWith('image/') || IMAGE_EXT.test(file.name)) return 'image';
   if (t.startsWith('audio/') || AUDIO_EXT.test(file.name)) return 'audio';
   if (t.startsWith('video/') || VIDEO_EXT.test(file.name)) return 'video';
@@ -52,19 +54,19 @@ export async function importFiles(files) {
   for (const file of files) {
     const kind = guessKind(file);
     if (!kind) {
-      store.toast(`Unsupported file: ${file.name}`);
+      store.toast(`지원하지 않는 파일입니다: ${file.name}`);
       continue;
     }
     accepted.push({ file, kind });
   }
   if (!accepted.length) return ids;
 
-  store.transact(`Import ${accepted.length} item(s)`, () => {
+  store.transact(`가져오기 (${accepted.length}개)`, () => {
     for (const { file, kind } of accepted) {
       const id = uid('media');
       store.project.media[id] = {
         id, name: file.name, kind, duration: null, width: 0, height: 0, fps: null,
-        hasAudio: kind !== 'image', hasVideo: kind !== 'audio', size: file.size, mime: file.type,
+        hasAudio: kind === 'video' || kind === 'audio', hasVideo: kind === 'video' || kind === 'image', size: file.size, mime: file.type,
         lastModified: file.lastModified, inPoint: null, outPoint: null, analyzed: false,
       };
       store.project.mediaOrder.push(id);
@@ -81,7 +83,7 @@ export async function importFiles(files) {
       const rt = getRuntime(id);
       rt.status = 'error';
       rt.error = String(err?.message || err);
-      store.toast(`Could not read ${store.project.media[id]?.name}: ${rt.error}`);
+      store.toast(`${store.project.media[id]?.name} 파일을 읽을 수 없습니다: ${rt.error}`);
       mediaEvents.emit('updated', id);
     });
   }
@@ -122,8 +124,16 @@ async function probeMedia(id) {
   const media = store.project.media[id];
   const rt = getRuntime(id);
   const info = {};
+  if (!media) return;
 
-  if (media.kind === 'image') {
+  if (media.kind === 'lut') {
+    rt.lut = parseCube(await rt.file.text());
+    info.duration = null;
+    info.width = rt.lut.size;
+    info.height = 0;
+    info.hasAudio = false;
+    info.hasVideo = false;
+  } else if (media.kind === 'image') {
     const img = new Image();
     img.src = mediaUrl(id);
     await img.decode();
@@ -143,7 +153,7 @@ async function probeMedia(id) {
       once(el, 'loadedmetadata', 20000),
       new Promise((resolve) => el.addEventListener('error', () => resolve(false), { once: true })),
     ]);
-    if (!ok) throw new Error('the browser cannot decode this file');
+    if (!ok) throw new Error('이 브라우저가 해석할 수 없는 형식입니다');
     info.duration = Number.isFinite(el.duration) ? el.duration : null;
     info.width = el.videoWidth || 0;
     info.height = el.videoHeight || 0;
@@ -173,15 +183,37 @@ async function probeMedia(id) {
     }
   }
 
-  // write analysed values without creating an undo entry
-  Object.assign(media, info, { analyzed: true });
-  if (info.kind) media.kind = info.kind;
+  // write analysed values without creating an undo entry. The project tree may have been replaced
+  // (undo/redo) while probing, so look the item up again; keep a copy for later restores.
+  rt.info = { ...info, analyzed: true };
+  const current = store.project.media[id];
+  if (current) {
+    Object.assign(current, info, { analyzed: true });
+    if (info.kind) current.kind = info.kind;
+  }
   rt.status = 'ready';
   store.changed('media');
   mediaEvents.emit('updated', id);
 
   enqueueAnalysis(id);
 }
+
+/**
+ * Undo snapshots taken while a file was still being analysed lack its duration / size. After any
+ * restore, put the analysed values back from the runtime.
+ */
+function reapplyAnalysis() {
+  for (const [id, rt] of runtime) {
+    const m = store.project.media[id];
+    if (m && rt.info && !m.analyzed) {
+      Object.assign(m, rt.info);
+      if (rt.info.kind) m.kind = rt.info.kind;
+    }
+  }
+}
+store.on('change', (reason) => {
+  if (reason === 'restore' || reason === 'load') reapplyAnalysis();
+});
 
 // ---------------------------------------------------------------- background analysis
 
@@ -193,7 +225,7 @@ function enqueueAnalysis(id) {
 async function analyse(id) {
   const media = store.project.media[id];
   const rt = getRuntime(id);
-  if (!media || rt.status !== 'ready') return;
+  if (!media || rt.status !== 'ready' || media.kind === 'lut') return;
   if (media.kind === 'video') {
     await buildFilmstrip(id).catch((err) => console.warn('filmstrip failed', err));
     mediaEvents.emit('updated', id);
@@ -269,7 +301,9 @@ async function buildPeaks(id) {
     const input = getInput(rt);
     const at = await input.getPrimaryAudioTrack();
     if (!at) {
-      media.hasAudio = false;
+      if (rt.info) rt.info.hasAudio = false;
+      const cur = store.project.media[id];
+      if (cur) cur.hasAudio = false;
       return;
     }
     if (!(await at.canDecode())) throw new Error('audio codec not decodable');
@@ -416,6 +450,9 @@ export async function detectScenes(id, start, end, { fps = 10, threshold = 0.35,
     }
   } catch (err) {
     console.warn('scene detection via WebCodecs failed, using <video> seeking', err);
+    cuts.length = 0;
+    prev = null;
+    i = 0;
     const el = document.createElement('video');
     el.muted = true;
     el.src = mediaUrl(id);
@@ -449,9 +486,9 @@ export function peakInRange(id, start, end) {
 export function createSyntheticMedia(kind, { name, color, width, height } = {}) {
   const id = uid('media');
   const seq = store.seq;
-  store.transact(`New ${name || kind}`, () => {
+  store.transact(`새 ${name || kind}`, () => {
     store.project.media[id] = {
-      id, kind, name: name || (kind === 'color' ? 'Color Matte' : 'Adjustment Layer'),
+      id, kind, name: name || (kind === 'color' ? '색상 매트' : '조정 레이어'),
       duration: null, width: width || seq.width, height: height || seq.height, fps: null,
       hasAudio: false, hasVideo: true, color: color || '#000000', inPoint: null, outPoint: null, analyzed: true,
     };
@@ -464,11 +501,11 @@ export function removeMedia(ids) {
   const p = store.project;
   const seqIds = ids.map((id) => p.media[id]).filter((m) => m?.kind === 'sequence').map((m) => m.sequenceId);
   if (seqIds.length && seqIds.length >= Object.keys(p.sequences).length) {
-    store.toast('A project needs at least one sequence');
+    store.toast('프로젝트에는 시퀀스가 하나 이상 있어야 합니다');
     ids = ids.filter((id) => p.media[id]?.kind !== 'sequence');
     seqIds.length = 0;
   }
-  store.transact('Clear media', () => {
+  store.transact('미디어 지우기', () => {
     for (const id of ids) {
       delete p.media[id];
       p.mediaOrder = p.mediaOrder.filter((m) => m !== id);
@@ -480,14 +517,270 @@ export function removeMedia(ids) {
     if (!p.sequences[p.activeSequenceId]) p.activeSequenceId = Object.keys(p.sequences)[0];
   });
   store.pruneSelection();
+  // keep the runtime (file, thumbnails, waveform) so that Undo brings the media back online;
+  // only the decoder is released (it is recreated on demand)
   for (const id of ids) {
     const rt = runtime.get(id);
-    if (rt?.url) URL.revokeObjectURL(rt.url);
     if (rt) disposeInput(rt);
-    runtime.delete(id);
   }
   if (ids.includes(store.ui.sourceMediaId)) {
     store.ui.sourceMediaId = null;
     store.emit('source');
   }
+}
+
+// ---------------------------------------------------------------- LUT (.cube)
+
+/** Parse an Adobe/Resolve .cube file (3D or 1D). Returns {size, data: Float32Array(size^3*3)} for a 3D table. */
+export function parseCube(text) {
+  let size3 = 0;
+  let size1 = 0;
+  let dmin = [0, 0, 0];
+  let dmax = [1, 1, 1];
+  const vals = [];
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith('#')) continue;
+    const up = line.toUpperCase();
+    if (up.startsWith('TITLE')) continue;
+    if (up.startsWith('LUT_3D_SIZE')) size3 = parseInt(line.split(/\s+/)[1], 10);
+    else if (up.startsWith('LUT_1D_SIZE')) size1 = parseInt(line.split(/\s+/)[1], 10);
+    else if (up.startsWith('DOMAIN_MIN')) dmin = line.split(/\s+/).slice(1, 4).map(Number);
+    else if (up.startsWith('DOMAIN_MAX')) dmax = line.split(/\s+/).slice(1, 4).map(Number);
+    else if (/^[-+0-9.]/.test(line)) {
+      const p = line.split(/\s+/).map(Number);
+      if (p.length >= 3) vals.push(p[0], p[1], p[2]);
+    }
+  }
+  const norm = (v, c) => (v - dmin[c]) / Math.max(1e-6, dmax[c] - dmin[c]);
+  if (size3 >= 2) {
+    const n = size3 * size3 * size3;
+    if (vals.length < n * 3) throw new Error('LUT 데이터가 부족합니다');
+    const data = new Float32Array(n * 3);
+    for (let i = 0; i < n * 3; i++) data[i] = vals[i];
+    return { size: size3, data, domainMin: dmin, domainMax: dmax };
+  }
+  if (size1 >= 2) {
+    // expand a 1D LUT into a 33^3 table
+    const N = 33;
+    const data = new Float32Array(N * N * N * 3);
+    const look = (x, c) => {
+      const f = Math.min(Math.max(norm(x, c), 0), 1) * (size1 - 1);
+      const i = Math.floor(f);
+      const j = Math.min(size1 - 1, i + 1);
+      const u = f - i;
+      return vals[i * 3 + c] * (1 - u) + vals[j * 3 + c] * u;
+    };
+    let o = 0;
+    for (let b = 0; b < N; b++) for (let g = 0; g < N; g++) for (let r = 0; r < N; r++) {
+      data[o++] = look(r / (N - 1), 0);
+      data[o++] = look(g / (N - 1), 1);
+      data[o++] = look(b / (N - 1), 2);
+    }
+    return { size: N, data, domainMin: [0, 0, 0], domainMax: [1, 1, 1] };
+  }
+  throw new Error('LUT_3D_SIZE 또는 LUT_1D_SIZE가 없는 파일입니다');
+}
+
+// ---------------------------------------------------------------- multicam audio sync
+
+/**
+ * Offsets (seconds) that line up each item's audio with the first one, by cross-correlating the
+ * waveform envelopes. Items without audio get 0. maxLag limits the search window.
+ */
+export function audioSyncOffsets(ids, { maxLag = 30 } = {}) {
+  const RATE = 50;
+  const env = (id) => {
+    const p = getRuntime(id).peaks;
+    if (!p) return null;
+    const step = p.rate / RATE;
+    const out = new Float32Array(Math.floor(p.data.length / step));
+    for (let i = 0; i < out.length; i++) {
+      let m = 0;
+      for (let k = Math.floor(i * step); k < Math.floor((i + 1) * step); k++) m = Math.max(m, p.data[k]);
+      out[i] = m;
+    }
+    // onset-style envelope: positive differences emphasise claps and speech starts
+    const d = new Float32Array(out.length);
+    for (let i = 1; i < out.length; i++) d[i] = Math.max(0, out[i] - out[i - 1]);
+    let mean = 0;
+    for (const v of d) mean += v;
+    mean /= d.length || 1;
+    for (let i = 0; i < d.length; i++) d[i] -= mean;
+    return d;
+  };
+  const ref = env(ids[0]);
+  return ids.map((id, idx) => {
+    if (idx === 0 || !ref) return 0;
+    const e = env(id);
+    if (!e) return 0;
+    const L = Math.round(maxLag * RATE);
+    let best = 0;
+    let bestScore = -Infinity;
+    for (let lag = -L; lag <= L; lag++) {
+      // e[i] aligns with ref[i + lag]: the angle starts `lag` frames after the reference
+      let sum = 0;
+      let n = 0;
+      const i0 = Math.max(0, -lag);
+      const i1 = Math.min(e.length, ref.length - lag);
+      for (let i = i0; i < i1; i += 1) {
+        sum += e[i] * ref[i + lag];
+        n++;
+      }
+      if (n < RATE) continue;
+      const score = sum / Math.sqrt(n);
+      if (score > bestScore) {
+        bestScore = score;
+        best = lag;
+      }
+    }
+    return best / RATE;
+  });
+}
+
+// ---------------------------------------------------------------- stabilization analysis
+
+/**
+ * Track global frame motion (translation + rotation) between [start, end) media seconds.
+ * Returns {fps, t0, x, y, a} cumulative trajectories in source pixels / radians.
+ */
+export async function analyzeMotion(id, start, end, { onProgress = () => {}, token = {} } = {}) {
+  const media = store.project.media[id];
+  const rt = getRuntime(id);
+  const fps = Math.min(30, media.fps || 30);
+  const W = 192;
+  const H = Math.max(36, Math.round((W * (media.height || 1080)) / (media.width || 1920)));
+  const scale = (media.width || 1920) / W;
+  const times = [];
+  for (let t = start; t < end; t += 1 / fps) times.push(t);
+  const gray = (canvas) => {
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    const d = ctx.getImageData(0, 0, W, H).data;
+    const g = new Uint8Array(W * H);
+    for (let i = 0, j = 0; j < g.length; i += 4, j++) g[j] = (d[i] * 77 + d[i + 1] * 150 + d[i + 2] * 29) >> 8;
+    return g;
+  };
+  const B = 16;
+  const R = 10;
+  const blocks = [];
+  const cols = 8;
+  const rows = 5;
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const cx = Math.round(R + B / 2 + ((W - 2 * R - B) * (c + 0.5)) / cols);
+      const cy = Math.round(R + B / 2 + ((H - 2 * R - B) * (r + 0.5)) / rows);
+      blocks.push([cx, cy]);
+    }
+  }
+  const sad = (a, b, cx, cy, dx, dy, limit) => {
+    let s = 0;
+    for (let y = -B / 2; y < B / 2; y++) {
+      const ra = (cy + y) * W + cx;
+      const rb = (cy + y + dy) * W + cx + dx;
+      for (let x = -B / 2; x < B / 2; x++) {
+        const v = a[ra + x] - b[rb + x];
+        s += v < 0 ? -v : v;
+      }
+      if (s > limit) return s;
+    }
+    return s;
+  };
+  const motion = (a, b) => {
+    const vecs = [];
+    for (const [cx, cy] of blocks) {
+      // skip flat blocks (no texture to track)
+      let mn = 255;
+      let mx = 0;
+      for (let y = -B / 2; y < B / 2; y += 2) for (let x = -B / 2; x < B / 2; x += 2) {
+        const v = a[(cy + y) * W + cx + x];
+        if (v < mn) mn = v;
+        if (v > mx) mx = v;
+      }
+      if (mx - mn < 12) continue;
+      let best = [0, 0];
+      let bestS = Infinity;
+      for (let dy = -R; dy <= R; dy += 2) for (let dx = -R; dx <= R; dx += 2) {
+        const v = sad(a, b, cx, cy, dx, dy, bestS);
+        if (v < bestS) { bestS = v; best = [dx, dy]; }
+      }
+      const [bx, by] = best;
+      for (let dy = by - 1; dy <= by + 1; dy++) for (let dx = bx - 1; dx <= bx + 1; dx++) {
+        if (Math.abs(dx) > R || Math.abs(dy) > R) continue;
+        const v = sad(a, b, cx, cy, dx, dy, bestS);
+        if (v < bestS) { bestS = v; best = [dx, dy]; }
+      }
+      vecs.push([cx - W / 2, cy - H / 2, best[0], best[1]]);
+    }
+    if (vecs.length < 3) return [0, 0, 0];
+    const med = (arr) => arr.slice().sort((p, q) => p - q)[arr.length >> 1];
+    const mdx = med(vecs.map((v) => v[2]));
+    const mdy = med(vecs.map((v) => v[3]));
+    let num = 0;
+    let den = 0;
+    for (const [x, y, vx, vy] of vecs) {
+      const ex = vx - mdx;
+      const ey = vy - mdy;
+      if (Math.abs(ex) > 4 || Math.abs(ey) > 4) continue; // outliers (moving subjects)
+      num += x * ey - y * ex;
+      den += x * x + y * y;
+    }
+    return [mdx, mdy, den ? num / den : 0];
+  };
+
+  const xs = [0];
+  const ys = [0];
+  const as = [0];
+  let prev = null;
+  const consume = (canvas, i) => {
+    const g = gray(canvas);
+    if (prev) {
+      const [dx, dy, da] = motion(prev, g);
+      xs.push(xs[xs.length - 1] + dx * scale);
+      ys.push(ys[ys.length - 1] + dy * scale);
+      as.push(as[as.length - 1] + da);
+    }
+    prev = g;
+    if (i % 10 === 0) onProgress(i / times.length);
+  };
+  const frame = document.createElement('canvas');
+  frame.width = W;
+  frame.height = H;
+  const fctx = frame.getContext('2d', { willReadFrequently: true });
+  try {
+    const input = getInput(rt);
+    const vt = await input.getPrimaryVideoTrack();
+    if (!vt || !(await vt.canDecode())) throw new Error('not decodable');
+    const first = await vt.getFirstTimestamp();
+    const sink = new MB.CanvasSink(vt, { width: W, height: H, fit: 'fill' });
+    let i = 0;
+    for await (const wc of sink.canvasesAtTimestamps(times.map((t) => t + first))) {
+      if (token.cancelled) throw new Error('취소되었습니다');
+      if (wc) {
+        fctx.drawImage(wc.canvas, 0, 0, W, H);
+        consume(frame, i);
+      }
+      i++;
+    }
+  } catch (err) {
+    if (token.cancelled) throw err;
+    console.warn('motion analysis via WebCodecs failed, using <video> seeking', err);
+    xs.length = ys.length = as.length = 1;
+    prev = null;
+    const el = document.createElement('video');
+    el.muted = true;
+    el.src = mediaUrl(id);
+    await once(el, 'loadeddata', 15000);
+    for (let i = 0; i < times.length; i++) {
+      if (token.cancelled) throw new Error('취소되었습니다');
+      el.currentTime = times[i];
+      if (!(await once(el, 'seeked', 5000))) continue;
+      fctx.drawImage(el, 0, 0, W, H);
+      consume(frame, i);
+    }
+    el.removeAttribute('src');
+    el.load();
+  }
+  onProgress(1);
+  const round = (arr, k) => arr.map((v) => Math.round(v * k) / k);
+  return { fps, t0: start, x: round(xs, 100), y: round(ys, 100), a: round(as, 100000) };
 }

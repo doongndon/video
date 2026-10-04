@@ -1,153 +1,178 @@
-// Application menu bar.
+// Application menu bar (Korean).
 
 import { store } from '../store.js';
 import { playback } from '../playback.js';
 import { commands as c } from '../commands.js';
 import { h, isMac } from '../util.js';
-import { showMenu } from './common.js';
+import { showMenu, closeMenus, UI_SCALES, uiScale } from './common.js';
+import { LABEL_COLORS } from '../model.js';
+import { TEMPLATES } from '../templates.js';
+import { WORKSPACES } from './workspaces.js';
 
 const mod = isMac ? '⌘' : 'Ctrl+';
 
 export function createMenubar(el) {
   const sel = () => store.selectedClips();
+  const has = () => sel().length > 0;
   const menus = {
-    File: () => [
-      { label: 'New Project', action: c.newProject },
-      { label: 'Open Project…', key: `${mod}O`, action: c.openProject },
-      { label: 'Save Project As File', key: `${mod}S`, action: c.saveProject },
-      { label: 'Rename Project…', action: c.renameProject },
+    '파일': () => [
+      { label: '새 프로젝트', action: c.newProject },
+      { label: '프로젝트 열기…', key: `${mod}O`, action: c.openProject },
+      { label: '프로젝트 파일로 저장', key: `${mod}S`, action: c.saveProject },
+      { label: '프로젝트 이름 바꾸기…', action: c.renameProject },
       '-',
-      { label: 'Import…', key: `${mod}I`, action: c.importMedia },
-      { label: 'Import Captions (.srt)…', action: c.importCaptions },
-      { label: 'Link Media…', action: c.linkMedia },
+      { label: '가져오기… (영상·오디오·이미지·LUT)', key: `${mod}I`, action: c.importMedia },
+      { label: '자막 파일 가져오기 (.srt)…', action: c.importCaptions },
+      { label: '미디어 다시 연결…', action: c.linkMedia },
       '-',
-      { label: 'Export Media…', key: `${mod}M`, action: c.exportMedia },
-      { label: 'Export Frame (PNG)', key: `${mod}Shift+E`, action: c.exportFrame },
-      { label: 'Export Captions (.srt)', action: c.exportCaptions },
+      { label: '내보내기…', key: `${mod}M`, action: c.exportMedia },
+      { label: '현재 프레임 저장 (PNG)', key: `${mod}Shift+E`, action: c.exportFrame },
+      { label: '자막 내보내기 (.srt)', action: c.exportCaptions },
+      '-',
+      { label: '샘플 프로젝트 열기', action: c.loadSample },
     ],
-    Edit: () => [
-      { label: `Undo${store.undoStack.length ? ` ${store.undoStack[store.undoStack.length - 1].label}` : ''}`, key: `${mod}Z`, disabled: !store.undoStack.length, action: c.undo },
-      { label: `Redo${store.redoStack.length ? ` ${store.redoStack[store.redoStack.length - 1].label}` : ''}`, key: `${mod}Shift+Z`, disabled: !store.redoStack.length, action: c.redo },
+    '편집': () => [
+      { label: `실행 취소${store.undoStack.length ? `: ${store.undoStack[store.undoStack.length - 1].label}` : ''}`, key: `${mod}Z`, disabled: !store.undoStack.length, action: c.undo },
+      { label: `다시 실행${store.redoStack.length ? `: ${store.redoStack[store.redoStack.length - 1].label}` : ''}`, key: `${mod}Shift+Z`, disabled: !store.redoStack.length, action: c.redo },
       '-',
-      { label: 'Cut', key: `${mod}X`, disabled: !sel().length, action: c.cut },
-      { label: 'Copy', key: `${mod}C`, disabled: !sel().length, action: c.copy },
-      { label: 'Paste', key: `${mod}V`, disabled: !store.ui.clipboard, action: c.paste },
-      { label: 'Paste Insert', key: `${mod}Shift+V`, disabled: !store.ui.clipboard, action: c.pasteInsert },
-      { label: 'Paste Attributes', key: `${mod}Alt+V`, disabled: !store.ui.clipboard || !sel().length, action: c.pasteAttributes },
-      { label: 'Clear', key: 'Del', action: c.clear },
-      { label: 'Ripple Delete', key: 'Shift+Del', action: c.rippleDelete },
+      { label: '잘라내기', key: `${mod}X`, disabled: !has(), action: c.cut },
+      { label: '복사', key: `${mod}C`, disabled: !has(), action: c.copy },
+      { label: '붙여넣기', key: `${mod}V`, disabled: !store.ui.clipboard, action: c.paste },
+      { label: '삽입하며 붙여넣기', key: `${mod}Shift+V`, disabled: !store.ui.clipboard, action: c.pasteInsert },
+      { label: '효과만 붙여넣기 (특성 붙여넣기)', key: `${mod}Alt+V`, disabled: !store.ui.clipboard || !has(), action: c.pasteAttributes },
       '-',
-      { label: 'Select All', key: `${mod}A`, action: c.selectAll },
-      { label: 'Deselect All', key: `${mod}Shift+A`, action: c.deselectAll },
+      { label: '지우기 (빈자리 남김)', key: 'Delete', action: c.clear },
+      { label: '잔물결 삭제 (빈자리 당김)', key: 'Shift+Delete', action: c.rippleDelete },
       '-',
-      { label: 'Keyboard Shortcuts', key: 'F1', action: c.shortcuts },
+      { label: '모두 선택', key: `${mod}A`, action: c.selectAll },
+      { label: '선택 해제', key: `${mod}Shift+A`, action: c.deselectAll },
     ],
-    Clip: () => [
-      { label: 'Speed/Duration…', key: `${mod}R`, disabled: !sel().length, action: c.speedDuration },
-      { label: 'Reverse Speed', disabled: !sel().length, action: c.reverse },
-      { label: 'Add Frame Hold', disabled: !sel().some((x) => x.kind === 'video'), action: c.frameHold },
-      { label: 'Scene Edit Detection…', disabled: !sel().some((x) => x.kind === 'video'), action: c.sceneDetect },
-      { label: 'Normalize Audio (-1 dB peak)', disabled: !sel().length, action: c.normalize },
+    '클립': () => [
+      { label: '속도/지속 시간…', key: `${mod}R`, disabled: !has(), action: c.speedDuration },
+      { label: '역재생', disabled: !has(), action: c.reverse },
+      { label: '프레임 고정 (정지 화면)', disabled: !sel().some((x) => x.kind === 'video'), action: c.frameHold },
       '-',
-      { label: 'Insert (from Source)', key: ',', action: c.insert },
-      { label: 'Overwrite (from Source)', key: '.', action: c.overwrite },
+      { label: '소스에서 삽입', key: ',', action: c.insert },
+      { label: '소스에서 덮어쓰기', key: '.', action: c.overwrite },
       '-',
-      { label: 'Enable', key: 'Shift+E', checked: sel().length && sel()[0].enabled !== false, disabled: !sel().length, action: c.toggleEnable },
-      { label: 'Link / Unlink', key: `${mod}L`, disabled: !sel().length, action: c.linkToggle },
-      { label: 'Nest…', disabled: !sel().length, action: c.nest },
-      { label: 'Remove Effects', disabled: !sel().length, action: c.removeEffects },
+      { label: '클립 사용', key: 'Shift+E', checked: has() && sel()[0].enabled !== false, disabled: !has(), action: c.toggleEnable },
+      { label: '연결 / 연결 해제', key: `${mod}L`, disabled: !has(), action: c.linkToggle },
+      { label: '중첩 (Nest)…', disabled: !has(), action: c.nest },
+      { label: '레이블 색상', disabled: !has(), submenu: () => LABEL_COLORS.map(([color, name]) => ({ label: name, swatch: color || 'transparent', action: () => c.setLabel(color) })) },
       '-',
-      { label: 'Nudge Left 1 Frame', key: 'Alt+←', action: c.nudgeLeft },
-      { label: 'Nudge Right 1 Frame', key: 'Alt+→', action: c.nudgeRight },
+      { group: '분석' },
+      { label: '장면 전환 자동 감지…', disabled: !sel().some((x) => x.kind === 'video'), action: c.sceneDetect },
+      { label: '멀티캠 소스 시퀀스 만들기…', action: c.multicamCreate },
+      { label: '멀티캠 앵글 바꾸기', submenu: () => [1, 2, 3, 4, 5, 6, 7, 8, 9].map((n) => ({ label: `앵글 ${n}`, key: String(n), action: () => c.switchAngle(n) })) },
+      '-',
+      { group: '오디오' },
+      { label: '오디오 노멀라이즈 (최대 -1 dB)', disabled: !has(), action: c.normalize },
+      { label: '자동 더킹 (말할 때 음악 줄이기)…', action: c.autoDuck },
+      '-',
+      { label: '효과 모두 제거', disabled: !has(), action: c.removeEffects },
+      { label: '왼쪽으로 1프레임 이동', key: 'Alt+←', action: c.nudgeLeft },
+      { label: '오른쪽으로 1프레임 이동', key: 'Alt+→', action: c.nudgeRight },
     ],
-    Sequence: () => [
-      { label: 'New Sequence', action: c.newSequence },
-      { label: 'Duplicate Sequence', action: c.duplicateSequence },
-      { label: 'Delete Sequence', action: c.deleteSequence },
-      { label: 'Sequence Settings…', action: c.sequenceSettings },
+    '시퀀스': () => [
+      { label: '새 시퀀스', action: c.newSequence },
+      { label: '시퀀스 복제', action: c.duplicateSequence },
+      { label: '시퀀스 삭제', action: c.deleteSequence },
+      { label: '시퀀스 설정…', action: c.sequenceSettings },
+      { label: '자동 리프레임 (세로·정사각형 변환)…', action: c.autoReframe },
       '-',
-      { label: 'Match Frame', key: 'F', action: c.matchFrame },
-      { label: 'Add Edit', key: `${mod}K`, action: c.addEdit },
-      { label: 'Add Edit to All Tracks', key: `${mod}Shift+K`, action: c.addEditAll },
-      { label: 'Ripple Trim Previous Edit to Playhead', key: 'Q', action: c.rippleTrimPrev },
-      { label: 'Ripple Trim Next Edit to Playhead', key: 'W', action: c.rippleTrimNext },
+      { label: '원본 프레임 찾기 (매치 프레임)', key: 'F', action: c.matchFrame },
+      { label: '편집점 추가 (자르기)', key: `${mod}K`, action: c.addEdit },
+      { label: '모든 트랙에 편집점 추가', key: `${mod}Shift+K`, action: c.addEditAll },
+      { label: '앞쪽을 재생헤드까지 잔물결 트림', key: 'Q', action: c.rippleTrimPrev },
+      { label: '뒤쪽을 재생헤드까지 잔물결 트림', key: 'W', action: c.rippleTrimNext },
       '-',
-      { label: 'Apply Video Transition', key: `${mod}D`, action: c.applyVideoTransition },
-      { label: 'Apply Audio Transition', key: `${mod}Shift+D`, action: c.applyAudioTransition },
-      { label: 'Apply Default Transitions to Selection', key: 'Shift+D', action: c.applyDefaultTransitions },
+      { label: '기본 영상 전환 적용', key: `${mod}D`, action: c.applyVideoTransition },
+      { label: '기본 오디오 전환 적용', key: `${mod}Shift+D`, action: c.applyAudioTransition },
+      { label: '선택한 클립에 기본 전환 적용', key: 'Shift+D', action: c.applyDefaultTransitions },
       '-',
-      { label: 'Lift', key: ';', action: c.lift },
-      { label: 'Extract', key: "'", action: c.extract },
-      { label: 'Close All Gaps', action: c.closeGaps },
+      { label: '들어올리기 (시작~끝 지우기)', key: ';', action: c.lift },
+      { label: '추출 (시작~끝 지우고 당기기)', key: "'", action: c.extract },
+      { label: '모든 빈자리 닫기', action: c.closeGaps },
       '-',
-      { label: 'Snap in Timeline', key: 'S', checked: store.ui.snapping, action: c.toggleSnap },
-      { label: 'Linked Selection', checked: store.ui.linkedSelection, action: c.toggleLinked },
+      { label: '스냅', key: 'S', checked: store.ui.snapping, action: c.toggleSnap },
+      { label: '연결된 선택', checked: store.ui.linkedSelection, action: c.toggleLinked },
       '-',
-      { label: 'Add Video Track', action: c.addVideoTrack },
-      { label: 'Add Audio Track', action: c.addAudioTrack },
+      { label: '비디오 트랙 추가', action: c.addVideoTrack },
+      { label: '오디오 트랙 추가', action: c.addAudioTrack },
+      { label: '보이스오버 녹음 (대상 오디오 트랙)', action: c.voiceover },
       '-',
-      { label: 'Zoom In', key: '=', action: c.zoomIn },
-      { label: 'Zoom Out', key: '-', action: c.zoomOut },
-      { label: 'Zoom to Sequence', key: '\\', action: c.zoomFit },
+      { label: '타임라인 확대', key: '=', action: c.zoomIn },
+      { label: '타임라인 축소', key: '-', action: c.zoomOut },
+      { label: '시퀀스 전체 보기', key: '\\', action: c.zoomFit },
     ],
-    Markers: () => [
-      { label: 'Mark In', key: 'I', action: c.markIn },
-      { label: 'Mark Out', key: 'O', action: c.markOut },
-      { label: 'Mark Clip', key: 'X', action: c.markClip },
+    '마커': () => [
+      { label: '시작 표시 (In)', key: 'I', action: c.markIn },
+      { label: '끝 표시 (Out)', key: 'O', action: c.markOut },
+      { label: '클립 범위로 표시', key: 'X', action: c.markClip },
       '-',
-      { label: 'Go to In', key: 'Shift+I', action: c.goIn },
-      { label: 'Go to Out', key: 'Shift+O', action: c.goOut },
+      { label: '시작 표시로 이동', key: 'Shift+I', action: c.goIn },
+      { label: '끝 표시로 이동', key: 'Shift+O', action: c.goOut },
       '-',
-      { label: 'Clear In', key: `${mod}Shift+I`, action: c.clearIn },
-      { label: 'Clear Out', key: `${mod}Shift+O`, action: c.clearOut },
-      { label: 'Clear In and Out', key: `${mod}Shift+X`, action: c.clearInOut },
+      { label: '시작 표시 지우기', key: `${mod}Shift+I`, action: c.clearIn },
+      { label: '끝 표시 지우기', key: `${mod}Shift+O`, action: c.clearOut },
+      { label: '시작/끝 모두 지우기', key: `${mod}Shift+X`, action: c.clearInOut },
       '-',
-      { label: 'Add Marker', key: 'M', action: c.addMarker },
-      { label: 'Go to Next Marker', key: 'Shift+M', action: c.nextMarker },
-      { label: 'Go to Previous Marker', key: `${mod}Shift+M`, action: c.prevMarker },
-      { label: 'Edit Marker…', action: c.editMarker },
-      { label: 'Clear All Markers', action: c.clearMarkers },
+      { label: '마커 추가', key: 'M', action: c.addMarker },
+      { label: '다음 마커로', key: 'Shift+M', action: c.nextMarker },
+      { label: '이전 마커로', key: `${mod}Shift+M`, action: c.prevMarker },
+      { label: '마커 편집…', action: c.editMarker },
+      { label: '마커 모두 지우기', action: c.clearMarkers },
     ],
-    Graphics: () => [
-      { label: 'New Text Layer', action: c.newText },
-      { label: 'Type Tool', key: 'T', action: () => store.setTool('type') },
-      { label: 'New Rectangle', action: c.newRectangle },
-      { label: 'New Ellipse', action: c.newEllipse },
-      { label: 'New Triangle', action: c.newTriangle },
-      { label: 'New Line', action: c.newLine },
+    '그래픽': () => [
+      { label: '새 텍스트', action: c.newText },
+      { label: '문자 도구 (모니터를 클릭해 입력)', key: 'T', action: () => store.setTool('type') },
+      { label: '타이틀 템플릿', submenu: () => TEMPLATES.map((t) => ({ label: t.name, action: () => c.template(t.id) })) },
       '-',
-      { label: 'New Color Matte…', action: c.newColorMatte },
-      { label: 'New Black Video', action: c.newBlack },
-      { label: 'New Adjustment Layer', action: c.newAdjustment },
+      { label: '새 사각형', action: c.newRectangle },
+      { label: '새 타원', action: c.newEllipse },
+      { label: '새 삼각형', action: c.newTriangle },
+      { label: '새 선', action: c.newLine },
       '-',
-      { label: 'Import Captions (.srt)…', action: c.importCaptions },
-      { label: 'Export Captions (.srt)', action: c.exportCaptions },
+      { label: '새 색상 매트…', action: c.newColorMatte },
+      { label: '새 블랙 비디오', action: c.newBlack },
+      { label: '새 조정 레이어', action: c.newAdjustment },
+      '-',
+      { label: '자동 자막 만들기 (음성 인식)…', action: c.autoCaptions },
+      { label: '자막 파일 가져오기 (.srt)…', action: c.importCaptions },
+      { label: '자막 내보내기 (.srt)', action: c.exportCaptions },
     ],
-    View: () => [
-      { label: 'Play / Stop', key: 'Space', action: c.playStop },
-      { label: 'Play In to Out', key: `${mod}Shift+Space`, action: c.playInToOut },
-      { label: 'Loop Playback', checked: playback.loop, action: c.toggleLoop },
+    '보기': () => [
+      { label: '재생 / 정지', key: 'Space', action: c.playStop },
+      { label: '시작~끝 표시 구간 재생', key: `${mod}Shift+Space`, action: c.playInToOut },
+      { label: '반복 재생', key: `${mod}Shift+L`, checked: playback.loop, action: c.toggleLoop },
+      { label: '오디오 스크러빙 (끌 때 소리 듣기)', checked: !!store.ui.audioScrub, action: c.toggleAudioScrub },
       '-',
-      { label: 'Maximize Panel', key: '`', action: c.maximizePanel },
+      { label: '화면 크기', submenu: () => UI_SCALES.map(([v, name]) => ({ label: name, checked: Math.abs(uiScale() - v) < 0.01, action: () => c.uiScale(v) })) },
+      { label: '패널 최대화 / 복원', key: '`', action: c.maximizePanel },
     ],
-    Window: () => [
-      { label: 'Source Monitor', action: () => c.showPanel('source') },
-      { label: 'Effect Controls', action: () => c.showPanel('effectControls') },
-      { label: 'Audio Track Mixer', action: () => c.showPanel('mixer') },
-      { label: 'Scopes', action: () => c.showPanel('scopes') },
-      { label: 'Program Monitor', action: () => c.showPanel('program') },
-      { label: 'Project', action: () => c.showPanel('project') },
-      { label: 'Effects', action: () => c.showPanel('effects') },
-      { label: 'Markers', action: () => c.showPanel('markers') },
-      { label: 'History', action: () => c.showPanel('history') },
-      { label: 'Timeline', action: () => c.showPanel('timeline') },
+    '창': () => [
+      { label: '작업 영역', submenu: () => WORKSPACES.map((w) => ({ label: w.name, action: () => c.workspace(w.id) })) },
       '-',
-      { label: 'Reset Layout', action: c.resetLayout },
+      { label: '소스 모니터', action: () => c.showPanel('source') },
+      { label: '효과 컨트롤', action: () => c.showPanel('effectControls') },
+      { label: '오디오 트랙 믹서', action: () => c.showPanel('mixer') },
+      { label: '멀티캠', action: () => c.showPanel('multicam') },
+      { label: '스코프', action: () => c.showPanel('scopes') },
+      { label: '프로그램 모니터', action: () => c.showPanel('program') },
+      { label: '프로젝트', action: () => c.showPanel('project') },
+      { label: '효과', action: () => c.showPanel('effects') },
+      { label: '마커', action: () => c.showPanel('markers') },
+      { label: '작업 내역', action: () => c.showPanel('history') },
+      { label: '타임라인', action: () => c.showPanel('timeline') },
+      '-',
+      { label: '레이아웃 초기화', action: c.resetLayout },
     ],
-    Help: () => [
-      { label: 'Keyboard Shortcuts', key: 'F1', action: c.shortcuts },
-      { label: 'Load Sample Project', action: c.loadSample },
-      { label: 'About Montage', action: c.about },
+    '도움말': () => [
+      { label: '시작 가이드', action: c.guide },
+      { label: '단축키 목록', key: 'F1', action: c.shortcuts },
+      { label: '샘플 프로젝트 열기', action: c.loadSample },
+      '-',
+      { label: 'Montage 정보', action: c.about },
     ],
   };
 
@@ -157,16 +182,14 @@ export function createMenubar(el) {
     const b = h('button.menu-btn', name);
     const open = () => {
       const r = b.getBoundingClientRect();
-      showMenu(items, r.left, r.bottom + 1);
+      showMenu(items, r.left, r.bottom + 2);
       buttons.forEach((x) => x.classList.remove('open'));
       b.classList.add('open');
     };
     b.addEventListener('click', (e) => {
       e.stopPropagation();
-      if (b.classList.contains('open')) {
-        document.querySelectorAll('.menu').forEach((m) => m.remove());
-        b.classList.remove('open');
-      } else open();
+      if (b.classList.contains('open')) closeMenus();
+      else open();
     });
     b.addEventListener('pointerenter', () => {
       if (buttons.some((x) => x.classList.contains('open') && x !== b) && document.querySelector('.menu')) open();
@@ -175,10 +198,12 @@ export function createMenubar(el) {
     el.append(b);
   }
   const name = h('span.project-name');
-  const saved = h('span', { style: { color: 'var(--text-faint)', fontSize: '11px' } });
-  el.append(h('span.spacer'), name, saved, h('button.primary', { onclick: c.exportMedia, style: { marginLeft: '8px' } }, 'Export'));
+  const saved = h('span.saved');
+  el.append(h('span.spacer'), name, saved,
+    h('button', { onclick: c.guide, title: '처음 쓰는 분을 위한 안내', style: { marginLeft: '8px' } }, '시작 가이드'),
+    h('button.primary', { onclick: c.exportMedia, style: { marginLeft: '6px' } }, '내보내기'));
   const refresh = () => { name.textContent = store.project.name; };
   store.on('change', refresh);
-  store.on('saved', (d) => { saved.textContent = `Autosaved ${d.toLocaleTimeString()}`; });
+  store.on('saved', (d) => { saved.textContent = `자동 저장됨 ${d.toLocaleTimeString('ko-KR')}`; });
   refresh();
 }
