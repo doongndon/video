@@ -99,7 +99,7 @@ label.ph-prow > span:first-child { min-width: calc(76px * var(--ui-scale)); }
 .ph-lhead { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 6px 8px; border-bottom: 1px solid var(--line); }
 .ph-blend { min-height: 0 !important; height: calc(26px * var(--ui-scale)); padding: 0 4px !important; max-width: 130px; }
 .ph-op { display: inline-flex; align-items: center; gap: 4px; font-size: var(--fs-xs); color: var(--text-dim); flex: 1; min-width: 120px; }
-.ph-op input[type=range] { flex: 1; min-width: 40px; }
+.ph-op input[type=range] { flex: 1; min-width: 96px; }
 .ph-op .ph-num { width: 52px; }
 .ph-lock { min-width: 28px; }
 .ph-lock.on { background: var(--accent-soft); border-color: var(--accent); color: var(--value); }

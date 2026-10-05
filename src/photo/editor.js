@@ -351,7 +351,12 @@ export function createPhotoEditor(root) {
   let compRev = -1;
   let compFloat = null;
   let compMask = null;
+  let compVersion = 0;
   let frame = 0;
+  // the picture as last drawn at screen size: reused while neither the picture nor the view changes
+  const viewCache = makeCanvas(1, 1);
+  viewCache.key = '';
+  let vidCounter = 0;
   let checker = null;
   P.composite = () => {
     const doc = P.doc;
@@ -360,9 +365,11 @@ export function createPhotoEditor(root) {
       comp.height = doc.height;
       compRev = -1;
     }
-    if (compRev !== doc.rev || compFloat !== P.float || compMask !== P.showMaskOnly) {
+    // a view-only float (a live preview on the top layer) is drawn over the view in draw(), not here
+    const fl = P.float?.viewOnly ? null : P.float;
+    if (compRev !== doc.rev || compFloat !== fl || compMask !== P.showMaskOnly) {
       compMask = P.showMaskOnly;
-      doc.render(comp.getContext('2d'), { float: P.float, fg: P.fg, bg: P.bg });
+      doc.render(comp.getContext('2d'), { float: fl, fg: P.fg, bg: P.bg });
       // Alt+click on a mask thumbnail: look at the mask itself
       const ml = P.showMaskOnly && doc.layer(P.showMaskOnly);
       if (ml?.mask) {
@@ -380,7 +387,8 @@ export function createPhotoEditor(root) {
         g.restore();
       }
       compRev = doc.rev;
-      compFloat = P.float;
+      compFloat = fl;
+      compVersion++;
     }
     return comp;
   };
@@ -427,24 +435,48 @@ export function createPhotoEditor(root) {
     const w = doc.width * v.zoom;
     const hh = doc.height * v.zoom;
     // transparency checkerboard
-    if (!checker) {
-      const c = makeCanvas(16, 16);
-      const cg = c.getContext('2d');
-      cg.fillStyle = '#ffffff';
-      cg.fillRect(0, 0, 16, 16);
-      cg.fillStyle = '#cccccc';
-      cg.fillRect(0, 0, 8, 8);
-      cg.fillRect(8, 8, 8, 8);
-      checker = g.createPattern(c, 'repeat');
+    const src = P.displayCanvas ? P.displayCanvas(P.composite()) : P.composite();
+    if (!src._vid) src._vid = ++vidCounter;
+    const vkey = `${src._vid}|${compVersion}|${v.zoom}|${v.x}|${v.y}|${dpr}|${view.width}x${view.height}`;
+    if (viewCache.key !== vkey) {
+      // scaling a big picture down to the screen is the costly part of a redraw: do it only when
+      // the picture or the view changed (not for marching ants, cursors or overlays)
+      if (viewCache.width !== view.width || viewCache.height !== view.height) {
+        viewCache.width = view.width;
+        viewCache.height = view.height;
+      }
+      const vg = viewCache.getContext('2d');
+      vg.setTransform(1, 0, 0, 1, 0, 0);
+      vg.clearRect(0, 0, viewCache.width, viewCache.height);
+      vg.setTransform(dpr, 0, 0, dpr, 0, 0);
+      if (!checker) {
+        const c = makeCanvas(16, 16);
+        const cg = c.getContext('2d');
+        cg.fillStyle = '#ffffff';
+        cg.fillRect(0, 0, 16, 16);
+        cg.fillStyle = '#cccccc';
+        cg.fillRect(0, 0, 8, 8);
+        cg.fillRect(8, 8, 8, 8);
+        checker = vg.createPattern(c, 'repeat');
+      }
+      vg.save();
+      vg.fillStyle = checker;
+      vg.translate(x, y);
+      vg.fillRect(0, 0, w, hh);
+      vg.restore();
+      vg.imageSmoothingEnabled = v.zoom < 2;
+      vg.imageSmoothingQuality = 'high';
+      vg.drawImage(src, x, y, w, hh);
+      viewCache.key = vkey;
     }
-    g.save();
-    g.fillStyle = checker;
-    g.translate(x, y);
-    g.fillRect(0, 0, w, hh);
-    g.restore();
-    g.imageSmoothingEnabled = v.zoom < 2;
-    g.imageSmoothingQuality = 'high';
-    g.drawImage(P.displayCanvas ? P.displayCanvas(P.composite()) : P.composite(), x, y, w, hh);
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    g.drawImage(viewCache, 0, 0);
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    // live preview on the top layer: made at screen size and drawn straight over the picture
+    if (P.float?.viewOnly) {
+      g.imageSmoothingEnabled = true;
+      g.drawImage(P.float.canvas, x, y, w, hh);
+    }
     g.strokeStyle = 'rgba(0,0,0,0.5)';
     g.strokeRect(x - 0.5, y - 0.5, w + 1, hh + 1);
     // overlay: selection ants, tool overlay, transform handles, brush cursor

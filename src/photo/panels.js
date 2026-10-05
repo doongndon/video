@@ -137,7 +137,11 @@ export function buildToolStrip(P) {
 
 export function buildOptionsBar(P) {
   const el = h('div.ph-opts');
+  // a slider or number in the bar changing its own option must not rebuild the bar under the pointer
+  // (the slider being dragged would be replaced and the drag would stop after the first step)
+  let selfChange = false;
   const render = () => {
+    if (selfChange) return;
     const t = TOOL_BY_ID[P.tool];
     const o = P.opts(t.id);
     const ctrls = [];
@@ -151,7 +155,12 @@ export function buildOptionsBar(P) {
         const n = h('input.ph-num', { type: 'number', min, max, value: o[key], 'aria-label': label });
         const set = (v) => {
           const val = clamp(Math.round(+v), min, max);
-          P.setOpt(t.id, key, val);
+          selfChange = true;
+          try {
+            P.setOpt(t.id, key, val);
+          } finally {
+            selfChange = false;
+          }
           if (r) r.value = val;
           n.value = val;
         };

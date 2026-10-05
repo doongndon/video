@@ -3,6 +3,7 @@
 
 import { makeCanvas, cloneCanvas, newLayer, boxCorners, SHAPES } from './doc.js';
 import * as SEL from './selection.js';
+import { hasFx } from './styles.js';
 import { mixIntoMask } from './selectx.js';
 import { FONT_CATEGORIES } from '../fonts.js';
 
@@ -1238,10 +1239,19 @@ export const TOOLS = [
     move(E, p) {
       if (!this.d) return;
       this.d.b = p;
-      this.paint(E);
+      // pointers report far more often than the screen updates: paint once per frame
+      if (!this.raf) {
+        this.raf = requestAnimationFrame(() => {
+          this.raf = 0;
+          if (this.d) this.paint(E);
+        });
+      }
     },
     up(E) {
       if (!this.d) return;
+      cancelAnimationFrame(this.raf);
+      this.raf = 0;
+      if (this.d.floating) E.float = null;
       if (dist(this.d.a, this.d.b) > 1) {
         this.d.final = true;
         this.paint(E);
@@ -1255,8 +1265,14 @@ export const TOOLS = [
       const doc = E.doc;
       const l = doc.active;
       const o = E.opts('gradient');
+      // while dragging over a plain layer, the gradient floats just above it instead of being
+      // painted into the layer every frame; on the top layer it is made at screen size
+      const plain = !this.d.mt && !this.d.final && !l.lockAlpha && (l.blend || 'normal') === 'normal' && !l.mask && !l.vmask && !l.clip && !hasFx(l.fx) && (l.fillOpacity ?? 1) === 1;
+      const li = doc.layers.indexOf(l);
+      const top = plain && !l.parent && doc.layers.slice(li + 1).every((x) => !doc.shown(x));
+      const scale = top ? Math.min(1, doc.view.zoom * (window.devicePixelRatio || 1)) : 1;
       // presets, five styles, reverse and dither come from paint2.js
-      const gc = E.gradientCanvas ? E.gradientCanvas(a, b, { ...o, final: !!this.d.final }) : makeCanvas(doc.width, doc.height);
+      const gc = E.gradientCanvas ? E.gradientCanvas(a, b, { ...o, final: !!this.d.final, scale }) : makeCanvas(doc.width, doc.height);
       const gg = gc.getContext('2d');
       if (!E.gradientCanvas) {
         const len = Math.max(1, dist(a, b));
@@ -1277,7 +1293,8 @@ export const TOOLS = [
       }
       if (doc.selection) {
         gg.globalCompositeOperation = 'destination-in';
-        gg.drawImage(doc.selection.canvas, 0, 0);
+        gg.drawImage(doc.selection.canvas, 0, 0, gc.width, gc.height);
+        gg.globalCompositeOperation = 'source-over';
       }
       if (this.d.mt) {
         // on a mask: the gradient's grey levels (and transparency) become mask amounts
@@ -1311,6 +1328,34 @@ export const TOOLS = [
         E.redraw();
         return;
       }
+      if (plain) {
+        const op = (o.opacity ?? 100) / 100;
+        if (op < 1) {
+          gg.globalCompositeOperation = 'destination-in';
+          gg.fillStyle = `rgba(0,0,0,${op})`;
+          gg.fillRect(0, 0, gc.width, gc.height);
+          gg.globalCompositeOperation = 'source-over';
+        }
+        if (!this.d.floating) {
+          // the layer shows its pre-gradient pixels under the float
+          const lg = l.canvas.getContext('2d');
+          lg.save();
+          lg.globalCompositeOperation = 'copy';
+          lg.drawImage(base, 0, 0);
+          lg.restore();
+          doc.touch(l);
+          this.d.floating = true;
+        }
+        // on the top layer nothing covers the gradient: it is drawn straight over the view
+        E.float = { layerId: l.id, canvas: gc, x: 0, y: 0, preview: true, viewOnly: top };
+        if (!top) doc.rev++;
+        E.redraw();
+        return;
+      }
+      if (this.d.floating) {
+        E.float = null;
+        this.d.floating = false;
+      }
       const g = l.canvas.getContext('2d');
       g.save();
       g.globalCompositeOperation = 'copy';
@@ -1321,6 +1366,15 @@ export const TOOLS = [
       g.restore();
       l._styled = null;
       doc.touch(l);
+      E.redraw();
+    },
+    cancel(E) {
+      if (!this.d) return;
+      cancelAnimationFrame(this.raf);
+      this.raf = 0;
+      if (this.d.floating) E.float = null;
+      E.doc.restore(this.d.before);
+      this.d = null;
       E.redraw();
     },
     overlay(E, g) {

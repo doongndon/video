@@ -5,7 +5,7 @@ import { h } from '../util.js';
 import { toast, promptDialog, loadPref, savePref } from '../ui/common.js';
 import { makeCanvas } from './doc.js';
 import { TOOLS, TOOL_BY_ID, TOOL_GROUPS, Stroke, brushOpts, needRaster } from './tools.js';
-import { GRADIENTS, GRADIENT_STYLES, paintGradient, gradientSwatch, listPatterns, patternCanvas, definePattern, paintPattern, userPatterns } from './resources.js';
+import { GRADIENTS, GRADIENT_STYLES, paintGradient, gradientLut, gradientSwatch, listPatterns, patternCanvas, definePattern, paintPattern, userPatterns } from './resources.js';
 
 const patternList = () => listPatterns().map((p) => [p.id, p.name]);
 
@@ -38,11 +38,62 @@ export function installPaint2(P) {
       },
     }, sw), h('span.ph-opt.ph-hint', 'Shift: 45° 단위')];
   };
+  let preview = null;
+  /**
+   * While dragging: the browser's own (GPU) gradients with stops sampled from the gradient, drawn
+   * into one reused canvas. Returns null for styles it can't draw (diamond).
+   */
+  const fastGradient = (W, H, gr, a, b, opts, s = 1) => {
+    const style = opts.style;
+    if (style === 'diamond') return null;
+    const cw = Math.max(1, Math.round(W * s));
+    const ch = Math.max(1, Math.round(H * s));
+    if (!preview || preview.width !== cw || preview.height !== ch) preview = makeCanvas(cw, ch);
+    const g = preview.getContext('2d');
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    g.globalCompositeOperation = 'source-over';
+    g.clearRect(0, 0, cw, ch);
+    g.setTransform(cw / W, 0, 0, ch / H, 0, 0);
+    const lut = gradientLut(gr, { fg: opts.fg, bg: opts.bg, reverse: opts.reverse });
+    const at = (t) => {
+      const k = Math.max(0, Math.min(255, Math.round(t * 255))) * 4;
+      return `rgba(${lut[k]},${lut[k + 1]},${lut[k + 2]},${lut[k + 3] / 255})`;
+    };
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const len = Math.max(1, Math.hypot(dx, dy));
+    let grad;
+    const N = 32;
+    if (style === 'radial') grad = g.createRadialGradient(a.x, a.y, 0, a.x, a.y, len);
+    else if (style === 'angle') {
+      if (!g.createConicGradient) return null;
+      grad = g.createConicGradient(Math.atan2(dy, dx), a.x, a.y);
+    } else if (style === 'reflected') {
+      grad = g.createLinearGradient(a.x - dx, a.y - dy, b.x, b.y);
+      for (let k = 0; k <= N; k++) grad.addColorStop(k / N, at(Math.abs((2 * k) / N - 1)));
+    } else grad = g.createLinearGradient(a.x, a.y, b.x, b.y);
+    if (style !== 'reflected') for (let k = 0; k <= N; k++) grad.addColorStop(k / N, at(k / N));
+    g.fillStyle = grad;
+    g.fillRect(0, 0, W, H);
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    return preview;
+  };
   P.gradientCanvas = (a, b, o) => {
     const doc = P.doc;
     const W = doc.width;
     const H = doc.height;
     const opts = { style: o.style || 'linear', fg: P.fg, bg: P.bg, reverse: !!o.reverse, dither: o.dither !== false };
+    if (!o.final) {
+      const s = Math.min(1, o.scale || 1);
+      const fast = fastGradient(W, H, current(o), a, b, opts, s);
+      if (fast) return fast;
+      if (s < 1) {
+        // diamond: computed straight at screen size
+        const sw = Math.max(1, Math.round(W * s));
+        const sh = Math.max(1, Math.round(H * s));
+        return paintGradient(sw, sh, current(o), { x: a.x * (sw / W), y: a.y * (sh / H) }, { x: b.x * (sw / W), y: b.y * (sh / H) }, { ...opts, dither: false });
+      }
+    }
     // while dragging a big picture, a smaller preview keeps up with the pointer
     const k = o.final ? 1 : Math.min(1, Math.sqrt(1.5e6 / (W * H)));
     if (k >= 1) return paintGradient(W, H, current(o), a, b, opts);
