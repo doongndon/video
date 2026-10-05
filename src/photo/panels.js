@@ -408,7 +408,22 @@ export function buildLayersPanel(P) {
     footBtn('plus', '새 레이어', () => P.cmd.newLayer()),
     footBtn('trash', '레이어 삭제', () => P.cmd.deleteLayer()));
   const head = h('div.ph-lhead');
-  const el = h('div.ph-panel.layers', head, list, foot);
+  // find layers by name or kind (Photoshop's layer filter); kept out of `head` so typing keeps focus
+  const fq = h('input.ph-lfind', { type: 'search', placeholder: '레이어 찾기', 'aria-label': '레이어 이름으로 찾기' });
+  const fk = h('select.ph-lkind', { 'aria-label': '종류로 거르기', title: '종류로 거르기' },
+    [['all', '모든 종류'], ['raster', '이미지'], ['adjust', '조정 · 칠'], ['text', '글자'], ['shape', '모양'], ['smart', '고급 개체'], ['group', '그룹 · 프레임'], ['fx', '효과 있음'], ['hidden', '숨김']].map(([v, n]) => h('option', { value: v }, n)));
+  for (const c of [fq, fk]) c.addEventListener('input', () => render());
+  const KINDS = {
+    raster: (l) => l.kind === 'raster', adjust: (l) => l.kind === 'adjust' || l.kind === 'fill', text: (l) => l.kind === 'text', shape: (l) => l.kind === 'shape',
+    smart: (l) => l.kind === 'smart', group: (l) => l.kind === 'group', fx: (l) => hasFx(l.fx), hidden: (l) => !l.visible,
+  };
+  P.focusLayerFilter = () => {
+    P.showPanel('layers');
+    fq.focus();
+    fq.select();
+  };
+  let filterOn = false;
+  const el = h('div.ph-panel.layers', h('div.ph-lfilter', icon('zoom', 13), fq, fk), head, list, foot);
 
   let opBefore = null;
   const setNum = (key, v, done) => {
@@ -582,7 +597,7 @@ export function buildLayersPanel(P) {
         rows.push(h('div.ph-subrow', { style: { paddingLeft: `${46 + depth * 16}px` }, title: '두 번 클릭: 설정 바꾸기', ondblclick: () => { P.selectLayer(l.id); P.editSmartFilter?.(l, i); } }, ey, h('span', P.filterName?.(f.id) || f.id), del));
       });
     }
-    if (l.kind === 'group' && !l.collapsed) renderLevel(l.id, depth + 1, rows);
+    if (l.kind === 'group' && !l.collapsed && !filterOn) renderLevel(l.id, depth + 1, rows);
   };
   const renderLevel = (pid, depth, rows) => {
     const kids = P.doc.children(pid);
@@ -620,7 +635,15 @@ export function buildLayersPanel(P) {
       h('div.ph-lrow', blend, h('label.ph-op', '불투명도', opRange, opacity)),
       h('div.ph-lrow', h('span.ph-lockl', '잠그기:'), ...locks, h('label.ph-op.fill', '칠', fillNum)));
     const rows = [];
-    renderLevel(null, 0, rows);
+    const q = fq.value.trim().toLowerCase();
+    const kind = fk.value;
+    if (q || kind !== 'all') {
+      // a flat list of the matching layers, top first
+      filterOn = true;
+      for (const l of [...doc.layers].reverse()) if ((!q || l.name.toLowerCase().includes(q)) && (kind === 'all' || KINDS[kind](l))) rowsFor(l, 0, rows);
+      filterOn = false;
+      if (!rows.length) rows.push(h('div.empty-hint', '맞는 레이어가 없습니다'));
+    } else renderLevel(null, 0, rows);
     list.append(...rows);
   };
   P.on('layers', render);

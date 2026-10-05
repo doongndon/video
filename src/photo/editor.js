@@ -28,6 +28,9 @@ import { installViewExtras, buildNavigatorPanel, buildInfoPanel, buildHistogramP
 import { installPhotoAI, buildAiPanel } from './photoai.js';
 import { filterGalleryDialog } from './gallery.js';
 import { installImage2 } from './image2.js';
+import { installTools3 } from './tools3.js';
+import { installView3 } from './view3.js';
+import { buildSwatchesPanel, buildGlyphsPanel, buildAdjustmentsPanel, buildToolPresetsPanel, buildTimelinePanel, installGlyphs } from './panels3.js';
 import { mixIntoMask } from './selectx.js';
 import { buildPathsPanel, buildCharacterPanel, installTypeCommands, warpTextDialog } from './panels2.js';
 import * as PT from './paths.js';
@@ -137,6 +140,8 @@ export function createPhotoEditor(root) {
   };
   P.newText = (o, color, extra) => newText(o, color, extra);
   P.nearestOnPath = (sps, x, y) => nearestOnPath(sps, x, y);
+  // Edit ▸ Preferences (view3.js): pasteboard colour, transparency grid, brush cursor, wheel, autosave
+  P.prefs = { pasteboard: '#1f2125', checker: 'medium', checkerTone: 'light', cursor: 'outline', wheelZoom: false, autosave: true, historyMB: isMobile() ? 350 : 900, ...loadPref('photo.prefs', {}) };
   P.exportDialog = () => (P.doc ? D.exportDialog(P) : toast('내보낼 문서가 없습니다. 먼저 사진을 열거나 새 문서를 만드세요.'));
 
   // ---------------------------------------------------------------- DOM
@@ -156,8 +161,14 @@ export function createPhotoEditor(root) {
   const toolbar = buildToolbar(P);
   const strip = buildToolStrip(P);
   const opts = buildOptionsBar(P);
+  installGlyphs(P);
   const panels = {
     color: { title: '색상', el: buildColorPanel(P) },
+    swatches: { title: '견본', el: buildSwatchesPanel(P) },
+    adjustments: { title: '조정', el: buildAdjustmentsPanel(P) },
+    glyphs: { title: '글리프', el: buildGlyphsPanel(P) },
+    presets: { title: '도구 사전 설정', el: buildToolPresetsPanel(P) },
+    timeline: { title: '타임라인', el: buildTimelinePanel(P) },
     props: { title: '속성', el: buildPropertiesPanel(P) },
     layers: { title: '레이어', el: buildLayersPanel(P) },
     history: { title: '작업 내역', el: buildHistoryPanel(P) },
@@ -189,8 +200,8 @@ export function createPhotoEditor(root) {
     show(ids.includes(cur) ? cur : ids[0]);
     return { el: h('div.ph-pgroup', bar, body), show, ids };
   };
-  const groupsTop = sideTabs(['color', 'props', 'ai', 'char', 'history', 'nav', 'info', 'histo']);
-  const groupLayers = sideTabs(['layers', 'channels', 'paths', 'actions', 'comps']);
+  const groupsTop = sideTabs(['color', 'swatches', 'props', 'adjustments', 'ai', 'char', 'glyphs', 'history', 'presets', 'nav', 'info', 'histo']);
+  const groupLayers = sideTabs(['layers', 'channels', 'paths', 'timeline', 'actions', 'comps']);
   const side = h('div.ph-side', groupsTop.el, groupLayers.el);
   // phone: a sheet that shows one panel at a time
   const sheetBody = h('div.ph-sheet-body');
@@ -240,6 +251,10 @@ export function createPhotoEditor(root) {
       { label: '영상 편집으로 보내기…', action: () => D.sendToVideoDialog(P) },
       '-',
       { label: '문자 · 단락 패널', action: () => openSheet('char') },
+      { label: '글리프 (특수 문자)', action: () => openSheet('glyphs') },
+      { label: '견본 패널', action: () => openSheet('swatches') },
+      { label: '도구 사전 설정', action: () => openSheet('presets') },
+      { label: '타임라인 (움직이는 GIF)', action: () => openSheet('timeline') },
       { label: '패스 패널', action: () => openSheet('paths') },
       '-',
       { label: '자유 변형', action: () => P.cmd.freeTransform() },
@@ -254,7 +269,9 @@ export function createPhotoEditor(root) {
   // ---------------------------------------------------------------- documents
 
   P.openDoc = (doc) => {
-    doc.history = new History(doc, { budgetBytes: isMobile() ? 350e6 : 900e6 });
+    doc.history = new History(doc, { budgetBytes: (P.prefs.historyMB || (isMobile() ? 350 : 900)) * 1e6 });
+    // File ▸ Revert goes back to how the document was opened (or last saved)
+    doc.openState = doc.capture();
     doc.view = { zoom: 1, x: 0, y: 0 };
     P.docs.push(doc);
     P.index = P.docs.length - 1;
@@ -381,6 +398,13 @@ export function createPhotoEditor(root) {
   // the view cache key the screen canvas shows as it is (no live preview over it), so an unchanged
   // picture isn't copied again and a changed part is copied alone
   let viewShows = '';
+  /** Draw everything again (after a preference that changes how the picture is shown). */
+  P.invalidateView = () => {
+    viewCache.key = '';
+    viewShows = '';
+    checker = null;
+    P.redraw();
+  };
   let vidCounter = 0;
   let checker = null;
   P.composite = () => {
@@ -528,7 +552,7 @@ export function createPhotoEditor(root) {
     og.setTransform(1, 0, 0, 1, 0, 0);
     og.clearRect(0, 0, over.width, over.height);
     if (!doc) {
-      g.fillStyle = '#1f2125';
+      g.fillStyle = P.prefs.pasteboard || '#1f2125';
       g.fillRect(0, 0, view.width, view.height);
       viewShows = '';
       return;
@@ -595,13 +619,16 @@ export function createPhotoEditor(root) {
       if (!none) {
         vg.setTransform(dpr, 0, 0, dpr, 0, 0);
         if (!checker) {
-          const c = makeCanvas(16, 16);
+          // transparency grid (Preferences: size and colours)
+          const cs = { small: 4, medium: 8, large: 16 }[P.prefs.checker] || 8;
+          const [c0, c1] = { light: ['#ffffff', '#cccccc'], mid: ['#bfbfbf', '#8f8f8f'], dark: ['#666666', '#4d4d4d'] }[P.prefs.checkerTone] || ['#ffffff', '#cccccc'];
+          const c = makeCanvas(cs * 2, cs * 2);
           const cg = c.getContext('2d');
-          cg.fillStyle = '#ffffff';
-          cg.fillRect(0, 0, 16, 16);
-          cg.fillStyle = '#cccccc';
-          cg.fillRect(0, 0, 8, 8);
-          cg.fillRect(8, 8, 8, 8);
+          cg.fillStyle = c0;
+          cg.fillRect(0, 0, cs * 2, cs * 2);
+          cg.fillStyle = c1;
+          cg.fillRect(0, 0, cs, cs);
+          cg.fillRect(cs, cs, cs, cs);
           checker = vg.createPattern(c, 'repeat');
         }
         vg.save();
@@ -627,7 +654,7 @@ export function createPhotoEditor(root) {
         g.rect(blit.x, blit.y, blit.w, blit.h);
         g.clip();
       }
-      g.fillStyle = '#1f2125';
+      g.fillStyle = P.prefs.pasteboard || '#1f2125';
       g.fillRect(0, 0, view.width, view.height);
       if (blit) g.drawImage(viewCache, blit.x, blit.y, blit.w, blit.h, blit.x, blit.y, blit.w, blit.h);
       else g.drawImage(viewCache, 0, 0);
@@ -643,7 +670,7 @@ export function createPhotoEditor(root) {
     viewShows = live ? '' : vkey;
     // overlay: selection ants, tool overlay, transform handles, brush cursor
     og.setTransform(dpr, 0, 0, dpr, 0, 0);
-    if (doc.selection && !P.float) {
+    if (doc.selection && !P.float && P.extrasOn !== false) {
       const ants = SEL.antsImage(doc.selection, { zoom: v.zoom * dpr, x: v.x * dpr, y: v.y * dpr }, over.width, over.height, antsPhase);
       if (ants) {
         og.setTransform(1, 0, 0, 1, 0, 0);
@@ -670,14 +697,30 @@ export function createPhotoEditor(root) {
     if (hover && TOOL_BY_ID[P.tool].cursor === 'brush' && !P.transform) {
       const r = (P.opts(P.tool).size * v.zoom) / 2;
       const [cx, cy] = P.toScreen(hover.x, hover.y);
-      og.strokeStyle = 'rgba(0,0,0,0.7)';
-      og.beginPath();
-      og.arc(cx, cy, Math.max(1.5, r), 0, Math.PI * 2);
-      og.stroke();
-      og.strokeStyle = 'rgba(255,255,255,0.9)';
-      og.beginPath();
-      og.arc(cx, cy, Math.max(1.5, r - 1), 0, Math.PI * 2);
-      og.stroke();
+      // Preferences ▸ brush cursor: the brush outline, a precise cross, or both
+      if (P.prefs.cursor !== 'cross') {
+        og.strokeStyle = 'rgba(0,0,0,0.7)';
+        og.beginPath();
+        og.arc(cx, cy, Math.max(1.5, r), 0, Math.PI * 2);
+        og.stroke();
+        og.strokeStyle = 'rgba(255,255,255,0.9)';
+        og.beginPath();
+        og.arc(cx, cy, Math.max(1.5, r - 1), 0, Math.PI * 2);
+        og.stroke();
+      }
+      if (P.prefs.cursor !== 'outline') {
+        for (const [col, w] of [['rgba(0,0,0,0.8)', 3], ['rgba(255,255,255,0.95)', 1]]) {
+          og.strokeStyle = col;
+          og.lineWidth = w;
+          og.beginPath();
+          og.moveTo(cx - 7, cy);
+          og.lineTo(cx + 7, cy);
+          og.moveTo(cx, cy - 7);
+          og.lineTo(cx, cy + 7);
+          og.stroke();
+        }
+        og.lineWidth = 1;
+      }
     }
     P.drawViewExtras?.(og);
     updateStatus();
@@ -808,7 +851,7 @@ export function createPhotoEditor(root) {
   P.layerAt = (p, filter = () => true) => {
     const doc = P.doc;
     for (const l of [...doc.layers].reverse()) {
-      if (!doc.shown(l) || l.kind === 'adjust' || l.kind === 'group' || !filter(l)) continue;
+      if (!doc.shown(l) || l.kind === 'adjust' || l.kind === 'group' || !filter(l) || P.hiddenByFrame?.(l, p)) continue;
       if (l.kind === 'text' || l.kind === 'shape') {
         const b = l.kind === 'text' ? textBox(l) : { w: l.shape.w, h: l.shape.h };
         const cs = boxCorners(l, b.w, b.h);
@@ -886,7 +929,7 @@ export function createPhotoEditor(root) {
         finishText();
       }
     });
-    textBox2.replaceChildren(h('div.ph-tehead', h('span', '글자 입력'), h('button.primary.small', { onclick: () => finishText() }, '완료')), ta, h('div.note', 'Ctrl+Enter 또는 Esc로 마칩니다. 글꼴·크기·색은 위 옵션 막대나 속성 패널에서 바꿉니다.'));
+    textBox2.replaceChildren(h('div.ph-tehead', h('span', '글자 입력'), h('button.small', { title: '특수 문자 (글리프)', onclick: () => P.toggleGlyphs?.(ta) }, '기호'), h('button.primary.small', { onclick: () => finishText() }, '완료')), ta, h('div.note', 'Ctrl+Enter 또는 Esc로 마칩니다. 글꼴·크기·색은 위 옵션 막대나 속성 패널에서 바꿉니다.'));
     textBox2.hidden = false;
     placeTextBox();
     setTimeout(() => ta.focus(), 0);
@@ -1178,7 +1221,9 @@ export function createPhotoEditor(root) {
   stage.addEventListener('wheel', (e) => {
     if (!P.doc) return;
     e.preventDefault();
-    if (e.ctrlKey || e.metaKey || e.altKey) P.zoomAt(Math.exp(-e.deltaY * (e.ctrlKey && !e.metaKey && Math.abs(e.deltaY) < 50 ? 0.01 : 0.002)), e.clientX, e.clientY);
+    // Preferences ▸ zoom with the scroll wheel (then Shift scrolls sideways)
+    if (P.prefs.wheelZoom && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) P.zoomAt(Math.exp(-e.deltaY * 0.002), e.clientX, e.clientY);
+    else if (e.ctrlKey || e.metaKey || e.altKey) P.zoomAt(Math.exp(-e.deltaY * (e.ctrlKey && !e.metaKey && Math.abs(e.deltaY) < 50 ? 0.01 : 0.002)), e.clientX, e.clientY);
     else {
       P.doc.view.auto = false;
       P.doc.view.x -= e.shiftKey ? e.deltaY : e.deltaX;
@@ -1200,7 +1245,10 @@ export function createPhotoEditor(root) {
     if (!files.length) return;
     e.preventDefault();
     e.stopPropagation();
-    if (P.doc && e.shiftKey) P.cmd.placeFiles(files);
+    // onto a frame (frame tool): the picture goes into it; Shift: as new layers
+    const at = P.doc ? P.toDoc(e.clientX, e.clientY) : null;
+    const frame = at && P.frameAt?.(at);
+    if (P.doc && (e.shiftKey || frame)) P.cmd.placeFiles(files, { frame });
     else P.openFiles(files);
   }, true);
   new ResizeObserver(() => {
@@ -1236,7 +1284,7 @@ export function createPhotoEditor(root) {
     if (!mod && P.doc && TOOL_BY_ID[P.tool].onKey?.(P, e) === true) return done();
     const map = {
       KeyZ: () => (mod ? (e.shiftKey ? P.redo() : P.undo()) : P.setTool('zoom')),
-      KeyY: () => (mod ? (e.shiftKey ? P.cmd.gamutWarning?.() : P.redo()) : P.setTool('historyBrush')),
+      KeyY: () => (mod ? (e.shiftKey ? P.cmd.gamutWarning?.() : P.redo()) : cycle(['historyBrush', 'artHistory'], e.shiftKey)),
       KeyA: () => (mod && e.altKey ? P.cmd.selectAllLayers() : mod ? P.cmd.selectAll() : cycle(['pathSelect', 'directSelect'], e.shiftKey)),
       KeyP: () => (mod ? (e.shiftKey ? null : P.cmd.print?.()) : cycle(['pen', 'freePen'], e.shiftKey)),
       KeyD: () => (mod ? (e.shiftKey ? P.cmd.reselect() : P.cmd.deselect()) : P.defaultColors()),
@@ -1245,7 +1293,8 @@ export function createPhotoEditor(root) {
       KeyJ: () => (mod && e.shiftKey ? P.cmd.layerVia(true) : mod ? P.cmd.duplicateLayer() : cycle(['heal', 'healBrush', 'patch', 'contentMove', 'remove', 'redEye'], e.shiftKey)),
       KeyE: () => (mod && e.shiftKey && e.altKey ? P.cmd.stampVisible() : mod ? (e.shiftKey ? P.cmd.mergeVisible() : P.cmd.mergeDown()) : cycle(['eraser', 'bgEraser', 'magicEraser'], e.shiftKey)),
       KeyN: () => (mod && e.shiftKey ? P.cmd.newLayer() : mod ? D.newDocDialog(P) : null),
-      KeyO: () => (mod ? P.cmd.open() : P.setTool(P.tool === 'dodge' ? 'burn' : 'dodge')),
+      KeyO: () => (mod ? P.cmd.open() : cycle(['dodge', 'burn', 'sponge'], e.shiftKey)),
+      KeyK: () => (mod ? P.cmd.preferences?.() : P.setTool('frame')),
       KeyS: () => (mod ? P.cmd.saveProject() : cycle(['clone', 'patternStamp'], e.shiftKey)),
       KeyC: () => (mod ? P.cmd.copy(e.shiftKey) : P.setTool('crop')),
       KeyX: () => (mod && e.shiftKey ? P.cmd.liquify() : mod ? P.cmd.cut() : P.swapColors()),
@@ -1374,9 +1423,11 @@ export function createPhotoEditor(root) {
   installSelectionTools(P);
   installBrushTools(P);
   installPaint2(P);
+  installTools3(P);
   installEdit2(P);
   installExtra3(P);
   installViewExtras(P, { stage });
+  installView3(P);
   installTypeCommands(P, PT);
   installPhotoAI(P);
   P.cmd.filterGallery = () => filterGalleryDialog(P);
@@ -1406,6 +1457,7 @@ export function createPhotoEditor(root) {
   let saveTimer = null;
   function scheduleSave() {
     clearTimeout(saveTimer);
+    if (P.prefs.autosave === false) return;
     saveTimer = setTimeout(() => {
       IO.saveSession(P.docs, P.index).then(() => P.emit('saved')).catch((err) => console.warn('photo autosave failed', err));
     }, 2500);
@@ -1471,11 +1523,16 @@ function installCommands(P) {
     const files = await pickFiles({ accept: IO.OPEN_ACCEPT, multiple: true });
     if (files.length) await P.openFiles(files);
   };
-  C.placeFiles = async (files) => {
+  C.placeFiles = async (files, { frame = null } = {}) => {
     if (!need()) return;
     for (const f of files) {
       try {
         const c = f.name.toLowerCase().endsWith('.psd') ? (await IO.openFile(f)).flatten() : await IO.canvasFromFile(f);
+        if (frame && P.doc.layer(frame.id)) {
+          P.run('프레임에 이미지 넣기', () => P.placeInFrame(frame, c, f.name.replace(/\.[^.]+$/, '')));
+          frame = null;
+          continue;
+        }
         P.run('가져오기 (레이어로)', () => {
           const l = newLayer('raster', { name: f.name.replace(/\.[^.]+$/, ''), canvas: c });
           l.x = Math.round((P.doc.width - c.width) / 2);
@@ -1515,6 +1572,7 @@ function installCommands(P) {
       downloadBlob(blob, `${doc.name}.psd`).then((ok) => {
         if (ok) {
           doc.saved = true;
+          doc.openState = doc.capture();
           P.renderTabs();
           toast(`${doc.name}.psd 저장${notes.length ? ` (${notes.join(', ')})` : ''}`);
         }
@@ -1531,6 +1589,7 @@ function installCommands(P) {
     const blob = new Blob([JSON.stringify(await IO.docToProject(doc))], { type: 'application/json' });
     if (await downloadBlob(blob, `${doc.name}.mphoto`)) {
       doc.saved = true;
+      doc.openState = doc.capture();
       P.renderTabs();
       toast(`${doc.name}.mphoto 저장 (모든 레이어를 그대로 다시 열 수 있는 Montage 사진 파일)`);
     }
@@ -2182,7 +2241,12 @@ function buildMenus(P) {
     ],
     '창': () => [
       { label: '색상', action: () => P.showPanel('color') },
+      { label: '견본', action: () => P.showPanel('swatches') },
       { label: '속성', action: () => P.showPanel('props') },
+      { label: '조정', action: () => P.showPanel('adjustments') },
+      { label: '글리프', action: () => P.showPanel('glyphs') },
+      { label: '도구 사전 설정', action: () => P.showPanel('presets') },
+      { label: '타임라인 (프레임 애니메이션)', action: () => P.showPanel('timeline') },
       { label: '작업 내역', action: () => P.showPanel('history') },
       { label: '레이어', action: () => P.showPanel('layers') },
       { label: '채널', action: () => P.showPanel('channels') },

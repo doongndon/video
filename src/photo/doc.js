@@ -91,7 +91,7 @@ function snapshotLayer(l) {
   return o;
 }
 
-const DOC_ARRAYS = ['selectedIds', 'guides', 'channels', 'paths', 'notes', 'counts', 'samplers', 'comps'];
+const DOC_ARRAYS = ['selectedIds', 'guides', 'channels', 'paths', 'notes', 'counts', 'samplers', 'comps', 'frames'];
 
 export class PhotoDoc {
   constructor({ name = '제목 없음', width = 1920, height = 1080, background = '#ffffff' } = {}) {
@@ -112,6 +112,9 @@ export class PhotoDoc {
     this.counts = [];
     this.samplers = [];
     this.comps = []; // layer comps { id, name, state }
+    this.frames = []; // animation frames { id, delay (s), state: { layerId: { v, o, p } } }
+    this.frameIndex = 0;
+    this.frameLoop = 0; // 0: forever, n: times
     this.mode = 'rgb';
     this.resolution = 72;
     this.sourceMediaId = null;
@@ -395,7 +398,7 @@ export class PhotoDoc {
     const st = {
       name: this.name, width: this.width, height: this.height, activeId: this.activeId, selection: this.selection, quickMask: this.quickMask || null,
       workPath: this.workPath && structuredClone(this.workPath), mode: this.mode, resolution: this.resolution,
-      info: this.info ? { ...this.info } : null, hideFx: !!this.hideFx,
+      info: this.info ? { ...this.info } : null, hideFx: !!this.hideFx, frameIndex: this.frameIndex || 0, frameLoop: this.frameLoop || 0,
       layers: this.layers.map(snapshotLayer),
     };
     for (const k of DOC_ARRAYS) st[k] = (this[k] || []).map((v) => (v && typeof v === 'object' ? { ...v } : v));
@@ -414,6 +417,8 @@ export class PhotoDoc {
     this.resolution = st.resolution || 72;
     this.info = st.info ? { ...st.info } : null;
     this.hideFx = !!st.hideFx;
+    this.frameIndex = st.frameIndex || 0;
+    this.frameLoop = st.frameLoop || 0;
     for (const k of DOC_ARRAYS) this[k] = (st[k] || []).map((v) => (v && typeof v === 'object' ? { ...v } : v));
     this.layers = st.layers.map((l) => ({ ...snapshotLayer(l), rev: (l.rev || 0) + 1 }));
     this.rev++;

@@ -473,7 +473,7 @@ export async function serializeDoc(doc, enc) {
   for (const ch of doc.channels || []) channels.push({ ...ch, canvas: await enc(ch.canvas) });
   return {
     name: doc.name, width: doc.width, height: doc.height, activeId: doc.activeId, selectedIds: doc.selectedIds, sourceMediaId: doc.sourceMediaId,
-    guides: doc.guides, paths: doc.paths, workPath: doc.workPath, notes: doc.notes, counts: doc.counts, samplers: doc.samplers, comps: doc.comps, mode: doc.mode, resolution: doc.resolution, info: doc.info || null, hideFx: !!doc.hideFx,
+    guides: doc.guides, paths: doc.paths, workPath: doc.workPath, notes: doc.notes, counts: doc.counts, samplers: doc.samplers, comps: doc.comps, frames: doc.frames || [], frameLoop: doc.frameLoop || 0, mode: doc.mode, resolution: doc.resolution, info: doc.info || null, hideFx: !!doc.hideFx,
     channels, layers,
   };
 }
@@ -488,7 +488,8 @@ export async function deserializeDoc(o, dec) {
   }
   doc.activeId = o.activeId || doc.layers[doc.layers.length - 1]?.id || null;
   doc.selectedIds = o.selectedIds?.length ? o.selectedIds : doc.activeId ? [doc.activeId] : [];
-  for (const k of ['guides', 'paths', 'notes', 'counts', 'samplers', 'comps']) doc[k] = o[k] || [];
+  for (const k of ['guides', 'paths', 'notes', 'counts', 'samplers', 'comps', 'frames']) doc[k] = o[k] || [];
+  doc.frameLoop = o.frameLoop || 0;
   doc.workPath = o.workPath || null;
   doc.mode = o.mode || 'rgb';
   doc.resolution = o.resolution || 72;

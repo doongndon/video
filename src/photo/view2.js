@@ -26,7 +26,31 @@ export function installViewExtras(P, { stage }) {
     const W = g.canvas.width / (window.devicePixelRatio || 1);
     const H = g.canvas.height / (window.devicePixelRatio || 1);
     g.save();
-    if (vx.grid) {
+    const extras = P.extrasOn !== false;
+    // pixel grid: very close up, a line between pixels (like Photoshop above 800%)
+    if (vx.pixelGrid !== false && extras && v.zoom * (window.devicePixelRatio || 1) >= 8) {
+      const x0 = Math.max(0, Math.floor(-v.x / v.zoom));
+      const y0 = Math.max(0, Math.floor(-v.y / v.zoom));
+      const x1 = Math.min(doc.width, Math.ceil((W - v.x) / v.zoom));
+      const y1 = Math.min(doc.height, Math.ceil((H - v.y) / v.zoom));
+      if ((x1 - x0) + (y1 - y0) < 1200) {
+        g.strokeStyle = 'rgba(128,128,128,.35)';
+        g.lineWidth = 1;
+        g.beginPath();
+        for (let x = x0; x <= x1; x++) {
+          const sx = Math.round(v.x + x * v.zoom) + 0.5;
+          g.moveTo(sx, v.y + y0 * v.zoom);
+          g.lineTo(sx, v.y + y1 * v.zoom);
+        }
+        for (let y = y0; y <= y1; y++) {
+          const sy = Math.round(v.y + y * v.zoom) + 0.5;
+          g.moveTo(v.x + x0 * v.zoom, sy);
+          g.lineTo(v.x + x1 * v.zoom, sy);
+        }
+        g.stroke();
+      }
+    }
+    if (vx.grid && extras) {
       const step = vx.gridStep;
       const sub = step / Math.max(1, vx.gridSub);
       const [x0, y0] = P.toScreen(0, 0);
@@ -51,7 +75,7 @@ export function installViewExtras(P, { stage }) {
       lines(sub, 'rgba(120,120,120,.25)');
       lines(step, 'rgba(120,120,120,.6)');
     }
-    if (vx.guides) {
+    if (vx.guides && extras) {
       g.strokeStyle = vx.guideColor;
       g.lineWidth = 1;
       for (const gd of [...doc.guides, ...(drag?.kind === 'guide' && drag.live ? [drag.live] : [])]) {
@@ -465,6 +489,18 @@ export function installViewExtras(P, { stage }) {
     });
   };
 
+  C.togglePixelGrid = () => {
+    vx.pixelGrid = vx.pixelGrid === false;
+    save();
+    P.redraw();
+    toast(vx.pixelGrid ? '픽셀 격자 켬 (800% 이상에서 보임)' : '픽셀 격자 끔');
+  };
+  /** View ▸ Extras (Ctrl+H): hide selection edges, guides, grids and frame outlines while looking. */
+  C.toggleExtras = () => {
+    P.extrasOn = P.extrasOn === false;
+    P.redraw();
+    toast(P.extrasOn ? '표시 요소 보임' : '표시 요소 숨김 (Ctrl+H로 다시 보기)');
+  };
   P.viewMenuItems = (mod, no) => [
     '-',
     { label: '눈금자', key: `${mod}R`, checked: vx.rulers, disabled: no(), action: () => C.toggleRulers() },
@@ -472,6 +508,9 @@ export function installViewExtras(P, { stage }) {
       { label: '안내선', key: `${mod};`, checked: vx.guides, action: () => C.toggleGuides() },
       { label: '격자', key: `${mod}'`, checked: vx.grid, action: () => C.toggleGrid() },
       { label: '스마트 안내선 (레이어 맞춰 붙기)', checked: vx.smart !== false, action: () => C.toggleSmartGuides() },
+      { label: '픽셀 격자 (800% 이상 확대했을 때)', checked: vx.pixelGrid !== false, action: () => C.togglePixelGrid() },
+      '-',
+      { label: '표시 요소 모두 (선택 테두리·안내선·격자)', key: `${mod}H`, checked: P.extrasOn !== false, action: () => C.toggleExtras() },
     ] },
     { label: '스냅 (자석처럼 붙기)', key: `${mod}Shift+;`, checked: vx.snap, disabled: no(), action: () => C.toggleSnap() },
     '-',
@@ -488,6 +527,7 @@ export function installViewExtras(P, { stage }) {
     if (e.code === 'KeyR' && !e.shiftKey && !e.altKey) return C.toggleRulers(), true;
     if (e.code === 'Semicolon') return (e.altKey ? C.toggleGuideLock() : e.shiftKey ? C.toggleSnap() : C.toggleGuides()), true;
     if (e.code === 'Quote' && !e.shiftKey) return C.toggleGrid(), true;
+    if (e.code === 'KeyH' && !e.shiftKey && !e.altKey) return C.toggleExtras(), true;
     return false;
   };
 }

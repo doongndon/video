@@ -360,6 +360,8 @@ class Retouch {
     this.g = E.doc.editPixels(this.layer, { x: 0, y: 0, w: E.doc.width, h: E.doc.height });
     this.last = null;
     this.carry = null;
+    // the part of the document changed since the last redraw (doc coords)
+    this.dirty = null;
   }
 
   to(p) {
@@ -378,7 +380,9 @@ class Retouch {
     }
     this.last = p;
     this.layer._styled = null;
-    this.E.doc.touch(this.layer);
+    // only the brushed part is redrawn (unless styles spread it further)
+    this.E.doc.touch(this.layer, this.dirty && changedRect(this.E.doc, this.layer, this.dirty));
+    this.dirty = null;
     this.E.redraw();
   }
 
@@ -395,10 +399,15 @@ class Retouch {
     const w = x1 - x0;
     const h = y1 - y0;
     if (w <= 2 || h <= 2) return;
+    const r0 = { x: x0 + this.layer.x, y: y0 + this.layer.y, w, h };
+    this.dirty = this.dirty ? union(this.dirty, r0) : r0;
     const img = g.getImageData(x0, y0, w, h);
     const d = img.data;
     const src = new Uint8ClampedArray(d);
     const k = (this.o.strength ?? 50) / 100;
+    // dodge and burn work on one tonal range (shadows, midtones, highlights), like Photoshop
+    const range = this.o.range || 'midtones';
+    const tone = (l) => (range === 'shadows' ? (1 - l) * (1 - l) : range === 'highlights' ? l * l : 1 - (2 * l - 1) * (2 * l - 1));
     const hard = this.o.hardness ?? 0.5;
     const sel = this.E.doc.selection ? this.E.selAlpha(x0 + this.layer.x, y0 + this.layer.y, w, h) : null;
     for (let y = 1; y < h - 1; y++) {
@@ -414,10 +423,26 @@ class Retouch {
             d[o + c] = src[o + c] + (v - src[o + c]) * wgt * (this.kind === 'sharpen' ? 0.6 : 1);
           }
         } else if (this.kind === 'dodge' || this.kind === 'burn') {
+          const tw = tone((src[o] * 0.299 + src[o + 1] * 0.587 + src[o + 2] * 0.114) / 255) * wgt * 0.35;
           for (let c = 0; c < 3; c++) {
             const v = src[o + c];
-            d[o + c] = this.kind === 'dodge' ? v + (255 - v) * wgt * 0.25 : v - v * wgt * 0.25;
+            d[o + c] = this.kind === 'dodge' ? v + (255 - v) * tw : v - v * tw;
           }
+        } else if (this.kind === 'sponge') {
+          // sponge: push the colour away from (saturate) or towards (desaturate) its own grey
+          const r = src[o];
+          const gg = src[o + 1];
+          const b = src[o + 2];
+          const lum = r * 0.299 + gg * 0.587 + b * 0.114;
+          let t = wgt * 0.3;
+          if (this.o.mode !== 'desaturate') {
+            // vibrance: colours that are already strong change less (and skin keeps from clipping)
+            if (this.o.vibrance) t *= 1 - (Math.max(r, gg, b) - Math.min(r, gg, b)) / 255;
+            t = -t;
+          }
+          d[o] = r + (lum - r) * t;
+          d[o + 1] = gg + (lum - gg) * t;
+          d[o + 2] = b + (lum - b) * t;
         } else if (this.kind === 'smudge' || this.kind === 'push') {
           // sample from behind the brush movement
           const sx = Math.round(x - mv.x * (this.kind === 'push' ? 1 : 1));
@@ -807,10 +832,12 @@ function strokeTool(id, name, key, icon, mode, extra = {}) {
   };
 }
 
-function retouchTool(id, name, key, icon, kind) {
+const TONE_RANGE = ['range', '범위', 'select', null, null, 'midtones', [['shadows', '어두운 영역'], ['midtones', '중간 영역'], ['highlights', '밝은 영역']]];
+
+function retouchTool(id, name, key, icon, kind, extra = [], strengthLabel = '강도') {
   return {
     id, name, key, icon, group: 'retouch', cursor: 'brush',
-    options: [['size', '크기', 'range', 1, 500, 60], ['strength', '강도', 'range', 1, 100, 50, '%'], ['hardness', '경도', 'range', 0, 100, 40, '%']],
+    options: [['size', '크기', 'range', 1, 500, 60], ['strength', strengthLabel, 'range', 1, 100, 50, '%'], ['hardness', '경도', 'range', 0, 100, 40, '%'], ...extra],
     down(E, p) {
       const mk = E.maskTarget?.()?.kind;
       if (mk === 'quick' || mk === 'channel') {
@@ -823,7 +850,7 @@ function retouchTool(id, name, key, icon, kind) {
         return;
       }
       const o = E.opts(id);
-      this.r = new Retouch(E, kind, { size: o.size, strength: o.strength, hardness: (o.hardness ?? 40) / 100, label: name });
+      this.r = new Retouch(E, kind, { ...o, size: o.size, strength: o.strength, hardness: (o.hardness ?? 40) / 100, label: name });
       this.r.to(p);
       E.redraw();
     },
@@ -920,6 +947,13 @@ export const TOOLS = [
       const doc = E.doc;
       let hit = E.layerAt(p);
       if (hit && isBackdrop(doc, hit)) hit = null;
+      // frames (frame tool): an empty frame is picked by its shape, a picture in a frame by its frame
+      // (moving it moves the picture too) unless that picture is the layer already picked
+      const fr = E.frameAt?.(p);
+      if (fr && (!hit || doc.index(fr.id) > doc.index(hit.id))) {
+        const inner = hit && doc.ancestors(hit).includes(fr);
+        if (!(inner && doc.activeId === hit.id)) hit = fr;
+      }
       if (hit && E.opts('move').autoTarget === 'group') {
         const top = doc.ancestors(hit).pop();
         if (top) hit = top;
@@ -1593,8 +1627,9 @@ export const TOOLS = [
   retouchTool('sharpen', '선명 효과 브러시', null, 'sharpenTool', 'sharpen'),
   retouchTool('smudge', '손가락 (문지르기)', null, 'smudge', 'smudge'),
   retouchTool('push', '픽셀 유동화 (밀기)', null, 'push', 'push'),
-  retouchTool('dodge', '닷지 (밝게)', 'O', 'dodge', 'dodge'),
-  retouchTool('burn', '번 (어둡게)', 'O', 'burn', 'burn'),
+  retouchTool('dodge', '닷지 (밝게)', 'O', 'dodge', 'dodge', [TONE_RANGE], '노출'),
+  retouchTool('burn', '번 (어둡게)', 'O', 'burn', 'burn', [TONE_RANGE], '노출'),
+  retouchTool('sponge', '스펀지 (채도)', 'O', 'sponge', 'sponge', [['mode', '모드', 'select', null, null, 'desaturate', [['desaturate', '채도 감소'], ['saturate', '채도 증가']]], ['vibrance', '활기 (강한 색은 덜)', 'bool', null, null, true]], '흐름'),
   // ---- text
   typeTool('text', '수평 문자', 'T', 'text', { vertical: false, mask: false }),
   typeTool('verticalText', '세로 문자', 'T', 'verticalText', { vertical: true, mask: false }),
@@ -1707,7 +1742,7 @@ export const TOOL_BY_ID = Object.fromEntries(TOOLS.map((t) => [t.id, t]));
 /** Toolbar groups (like Photoshop's tool slots), in order. */
 export const TOOL_GROUPS = [
   ['move'], ['rect', 'ellipse'], ['lasso'], ['wand'], ['crop', 'perspCrop'], ['eyedropper'], ['heal'], ['brush', 'pencil'], ['clone'], ['eraser'],
-  ['gradient', 'bucket'], ['blur', 'sharpen', 'smudge', 'push'], ['dodge', 'burn'], ['text', 'verticalText', 'textMask', 'verticalTextMask'], ['shape'], ['hand'], ['zoom'],
+  ['gradient', 'bucket'], ['blur', 'sharpen', 'smudge', 'push'], ['dodge', 'burn', 'sponge'], ['text', 'verticalText', 'textMask', 'verticalTextMask'], ['shape'], ['hand'], ['zoom'],
 ];
 
 const inside = (p, r) => p.x >= r.x && p.y >= r.y && p.x <= r.x + r.w && p.y <= r.y + r.h;
