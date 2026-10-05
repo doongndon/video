@@ -319,11 +319,12 @@ export function createPhotoEditor(root) {
 
   // ---------------------------------------------------------------- history
 
-  P.commit = (label, before) => {
+  P.commit = (label, before, { touched = false } = {}) => {
     const doc = P.doc;
     if (!doc) return;
-    // whatever the step changed, the picture is redrawn (some commands swap layers without touching them)
-    doc.rev++;
+    // whatever the step changed, the picture is redrawn (some commands swap layers without touching
+    // them), unless the step marked every change itself (a move: only where the object was and is)
+    if (!touched) doc.rev++;
     doc.history.push(label, before);
     doc.saved = false;
     P.afterHistory();
@@ -375,6 +376,11 @@ export function createPhotoEditor(root) {
   // the picture as last drawn at screen size: reused while neither the picture nor the view changes
   const viewCache = makeCanvas(1, 1);
   viewCache.key = '';
+  // what changed in the composite since the view cache was drawn: null, a rectangle, or 'all'
+  let viewDirty = null;
+  // the view cache key the screen canvas shows as it is (no live preview over it), so an unchanged
+  // picture isn't copied again and a changed part is copied alone
+  let viewShows = '';
   let vidCounter = 0;
   let checker = null;
   P.composite = () => {
@@ -387,17 +393,26 @@ export function createPhotoEditor(root) {
     // a view-only float (a live preview on the top layer) is drawn over the view in draw(), not here
     const fl = P.float?.viewOnly ? null : P.float;
     if (compRev !== doc.rev || compDoc !== doc || compFloat !== fl || compMask !== P.showMaskOnly) {
-      // only part of the picture changed (a brush stroke): redo just that rectangle
-      const dirty = compDoc === doc && compFloat === fl && compMask === P.showMaskOnly && !P.showMaskOnly ? doc.takeDirty(compRev) : doc.takeDirty(NaN);
+      // only part of the picture changed (a brush stroke, a moved layer or selection): redo just that
+      const same = compDoc === doc && compMask === P.showMaskOnly && !P.showMaskOnly;
+      const moved = same && compFloat !== fl ? doc.floatMoveArea(compFloat, fl) : null;
+      let dirty;
+      if (same && compFloat === fl) dirty = doc.takeDirty(compRev);
+      else if (moved) {
+        dirty = compRev === doc.rev ? moved : doc.takeDirty(compRev);
+        if (dirty) dirty = unionRect(dirty, moved);
+      } else dirty = doc.takeDirty(NaN);
       const clip = dirty && clipRect(dirty, doc.width, doc.height);
       compMask = P.showMaskOnly;
       compDoc = doc;
       if (clip && clip.w * clip.h < doc.width * doc.height * 0.6) {
         doc.render(comp.getContext('2d'), { float: fl, fg: P.fg, bg: P.bg, clip });
         if (mipDirty !== 'all') mipDirty = mipDirty ? unionRect(mipDirty, clip) : clip;
+        if (viewDirty !== 'all') viewDirty = viewDirty ? unionRect(viewDirty, clip) : clip;
       } else {
         doc.render(comp.getContext('2d'), { float: fl, fg: P.fg, bg: P.bg });
         mipDirty = 'all';
+        viewDirty = 'all';
       }
       // Alt+click on a mask thumbnail: look at the mask itself
       const ml = P.showMaskOnly && doc.layer(P.showMaskOnly);
@@ -508,15 +523,17 @@ export function createPhotoEditor(root) {
     const dpr = sizeCanvases();
     const g = view.getContext('2d');
     g.setTransform(1, 0, 0, 1, 0, 0);
-    g.fillStyle = '#1f2125';
-    g.fillRect(0, 0, view.width, view.height);
     const doc = P.doc;
     const og = over.getContext('2d');
     og.setTransform(1, 0, 0, 1, 0, 0);
     og.clearRect(0, 0, over.width, over.height);
-    if (!doc) return;
+    if (!doc) {
+      g.fillStyle = '#1f2125';
+      g.fillRect(0, 0, view.width, view.height);
+      viewShows = '';
+      return;
+    }
     const v = doc.view;
-    g.setTransform(dpr, 0, 0, dpr, 0, 0);
     const [x, y] = [v.x, v.y];
     const w = doc.width * v.zoom;
     const hh = doc.height * v.zoom;
@@ -526,49 +543,104 @@ export function createPhotoEditor(root) {
     // zoomed out, a smaller copy of the picture looks the same and draws much faster
     const src = shown === full ? P.viewSource(v.zoom * dpr) : shown;
     if (!src._vid) src._vid = ++vidCounter;
-    const vkey = `${src._vid}|${compVersion}|${v.zoom}|${v.x}|${v.y}|${dpr}|${view.width}x${view.height}`;
+    const vbase = `${src._vid}|${v.zoom}|${v.x}|${v.y}|${dpr}|${view.width}x${view.height}`;
+    const vkey = `${vbase}|${compVersion}`;
+    // the part of the screen to paint again: null for all of it, 'none' for nothing
+    let blit = viewShows === vkey ? 'none' : null;
     if (viewCache.key !== vkey) {
+      const wasShown = viewShows === viewCache.key;
       // scaling a big picture down to the screen is the costly part of a redraw: do it only when
-      // the picture or the view changed (not for marching ants, cursors or overlays)
+      // the picture or the view changed (not for marching ants, cursors or overlays), and when only
+      // a part of the picture changed (moving an object, a brush stroke) only that part
+      const part = viewCache.base === vbase && viewDirty && viewDirty !== 'all' && shown === full ? viewDirty : null;
+      viewDirty = null;
+      viewCache.base = vbase;
       if (viewCache.width !== view.width || viewCache.height !== view.height) {
         viewCache.width = view.width;
         viewCache.height = view.height;
       }
       const vg = viewCache.getContext('2d');
       vg.setTransform(1, 0, 0, 1, 0, 0);
-      vg.clearRect(0, 0, viewCache.width, viewCache.height);
-      vg.setTransform(dpr, 0, 0, dpr, 0, 0);
-      if (!checker) {
-        const c = makeCanvas(16, 16);
-        const cg = c.getContext('2d');
-        cg.fillStyle = '#ffffff';
-        cg.fillRect(0, 0, 16, 16);
-        cg.fillStyle = '#cccccc';
-        cg.fillRect(0, 0, 8, 8);
-        cg.fillRect(8, 8, 8, 8);
-        checker = vg.createPattern(c, 'repeat');
-      }
       vg.save();
-      vg.fillStyle = checker;
-      vg.translate(x, y);
-      vg.fillRect(0, 0, w, hh);
+      // only the screen pixels the changed source pixels (and the filter around them) reach; the whole
+      // picture is still drawn into that clip, since drawing a cut-out of it filters its edges differently
+      let none = false;
+      if (part) {
+        const kx = src.width / doc.width;
+        const ky = src.height / doc.height;
+        // shrinking, the filter blends several source pixels (through the browser's own smaller copies)
+        const ratio = (w * dpr) / src.width;
+        const m = 2 + (ratio < 1 ? 4 * Math.ceil(1 / ratio) : 0);
+        const px0 = Math.floor(part.x * kx) - m;
+        const py0 = Math.floor(part.y * ky) - m;
+        const px1 = Math.ceil((part.x + part.w) * kx) + m;
+        const py1 = Math.ceil((part.y + part.h) * ky) + m;
+        const toX = (sx) => (x + (sx * w) / src.width) * dpr;
+        const toY = (sy) => (y + (sy * hh) / src.height) * dpr;
+        const rx = Math.max(0, Math.floor(toX(px0)) - 1);
+        const ry = Math.max(0, Math.floor(toY(py0)) - 1);
+        const rw = Math.min(viewCache.width, Math.ceil(toX(px1)) + 1) - rx;
+        const rh = Math.min(viewCache.height, Math.ceil(toY(py1)) + 1) - ry;
+        if (rw > 0 && rh > 0) {
+          vg.beginPath();
+          vg.rect(rx, ry, rw, rh);
+          vg.clip();
+          vg.clearRect(rx, ry, rw, rh);
+          if (wasShown) blit = { x: rx, y: ry, w: rw, h: rh };
+        } else {
+          none = true;
+          if (wasShown) blit = 'none';
+        }
+      } else vg.clearRect(0, 0, viewCache.width, viewCache.height);
+      if (!none) {
+        vg.setTransform(dpr, 0, 0, dpr, 0, 0);
+        if (!checker) {
+          const c = makeCanvas(16, 16);
+          const cg = c.getContext('2d');
+          cg.fillStyle = '#ffffff';
+          cg.fillRect(0, 0, 16, 16);
+          cg.fillStyle = '#cccccc';
+          cg.fillRect(0, 0, 8, 8);
+          cg.fillRect(8, 8, 8, 8);
+          checker = vg.createPattern(c, 'repeat');
+        }
+        vg.save();
+        vg.fillStyle = checker;
+        vg.translate(x, y);
+        vg.fillRect(0, 0, w, hh);
+        vg.restore();
+        vg.imageSmoothingEnabled = v.zoom < 2;
+        // within 2× of the source size bilinear filtering is enough (and several times faster)
+        vg.imageSmoothingQuality = (w * dpr) / src.width >= 0.5 ? 'low' : 'high';
+        vg.drawImage(src, x, y, w, hh);
+      }
       vg.restore();
-      vg.imageSmoothingEnabled = v.zoom < 2;
-      // within 2× of the source size bilinear filtering is enough (and several times faster)
-      vg.imageSmoothingQuality = (w * dpr) / src.width >= 0.5 ? 'low' : 'high';
-      vg.drawImage(src, x, y, w, hh);
       viewCache.key = vkey;
     }
-    g.setTransform(1, 0, 0, 1, 0, 0);
-    g.drawImage(viewCache, 0, 0);
-    g.setTransform(dpr, 0, 0, dpr, 0, 0);
     // live preview on the top layer: made at screen size and drawn straight over the picture
-    if (P.float?.viewOnly) {
-      g.imageSmoothingEnabled = true;
-      g.drawImage(P.float.canvas, x, y, w, hh);
+    const live = P.float?.viewOnly ? P.float.canvas : null;
+    if (live) blit = null;
+    if (blit !== 'none') {
+      g.save();
+      if (blit) {
+        g.beginPath();
+        g.rect(blit.x, blit.y, blit.w, blit.h);
+        g.clip();
+      }
+      g.fillStyle = '#1f2125';
+      g.fillRect(0, 0, view.width, view.height);
+      if (blit) g.drawImage(viewCache, blit.x, blit.y, blit.w, blit.h, blit.x, blit.y, blit.w, blit.h);
+      else g.drawImage(viewCache, 0, 0);
+      g.setTransform(dpr, 0, 0, dpr, 0, 0);
+      if (live) {
+        g.imageSmoothingEnabled = true;
+        g.drawImage(live, x, y, w, hh);
+      }
+      g.strokeStyle = 'rgba(0,0,0,0.5)';
+      g.strokeRect(x - 0.5, y - 0.5, w + 1, hh + 1);
+      g.restore();
     }
-    g.strokeStyle = 'rgba(0,0,0,0.5)';
-    g.strokeRect(x - 0.5, y - 0.5, w + 1, hh + 1);
+    viewShows = live ? '' : vkey;
     // overlay: selection ants, tool overlay, transform handles, brush cursor
     og.setTransform(dpr, 0, 0, dpr, 0, 0);
     if (doc.selection && !P.float) {
@@ -1199,10 +1271,10 @@ export function createPhotoEditor(root) {
       Backspace: () => (e.altKey ? P.fill(P.fg, 1) : mod ? P.fill(P.bg, 1) : P.cmd.clear()),
       Enter: () => (mod && P.getPath?.().length ? P.cmd.pathToSelection() : P.tool === 'crop' ? TOOL_BY_ID.crop.apply(P) : null),
       Escape: () => (P.tool === 'crop' ? TOOL_BY_ID.crop.activate(P) : null),
-      ArrowLeft: () => nudge(-1, 0),
-      ArrowRight: () => nudge(1, 0),
-      ArrowUp: () => nudge(0, -1),
-      ArrowDown: () => nudge(0, 1),
+      ArrowLeft: () => nudge(-1, 0, e.shiftKey),
+      ArrowRight: () => nudge(1, 0, e.shiftKey),
+      ArrowUp: () => nudge(0, -1, e.shiftKey),
+      ArrowDown: () => nudge(0, 1, e.shiftKey),
     };
     if (/^Digit[0-9]$/.test(k) && !mod && !e.altKey) {
       const v = k === 'Digit0' ? 100 : +k.slice(5) * 10;
@@ -1251,16 +1323,20 @@ export function createPhotoEditor(root) {
     P.setOpt(P.tool, key, nv);
     return undefined;
   }
-  function nudge(dx, dy) {
-    if (P.tool !== 'move' || !P.doc?.active) return null;
-    const l = P.doc.active;
-    const k = 1;
-    P.run('이동', () => {
-      l.x += dx * k;
-      l.y += dy * k;
-      if (l.mask && l.mask.linked !== false) l.mask = { ...l.mask, x: l.mask.x + dx * k, y: l.mask.y + dy * k };
-      P.doc.touch(l);
-    });
+  // arrow keys with the move tool: 1 pixel, 10 with Shift; the selected layers move like a drag
+  function nudge(dx, dy, big) {
+    const doc = P.doc;
+    if (P.tool !== 'move' || !doc?.active) return null;
+    const k = big ? 10 : 1;
+    const layers = doc.selectedLayers.filter((x) => x.kind !== 'adjust' || x.mask);
+    if (!layers.length) return undefined;
+    if (layers.some((x) => x.locked || x.lockPos)) {
+      P.toast('위치가 잠긴 레이어가 있습니다 (레이어 패널에서 잠금 해제)');
+      return undefined;
+    }
+    const before = doc.capture();
+    doc.translateLayers(layers, dx * k, dy * k);
+    P.commit('이동', before, { touched: true });
     return undefined;
   }
 
@@ -2133,7 +2209,7 @@ function photoShortcuts() {
       ['V', '이동'], ['M / Shift+M', '사각형 · 원형 선택'], ['L', '올가미'], ['W', '자동 선택(마술봉)'], ['C', '자르기'], ['I / Shift+I', '스포이드 · 색상 샘플러 · 눈금자 · 메모 · 카운트'],
       ['J / Shift+J', '복구 도구들 (스팟 복구 · 복구 · 패치 · 내용 인식 이동 · 제거 · 적목)'], ['B / Shift+B', '브러시 · 연필 · 색상 대체 · 혼합 브러시'], ['Y', '작업 내역 브러시'], ['S', '복제 도장 (Alt+클릭으로 원본)'], ['E / Shift+E', '지우개 · 배경 지우개 · 자동 지우개'], ['G / Shift+G', '그레이디언트 · 페인트 통'],
       ['O', '닷지 · 번'], ['R', '흐림 브러시'], ['T', '문자'], ['U', '모양'], ['H / Space 누른 채 끌기', '화면 이동'], ['Z', '돋보기'],
-      ['[ / ]', '브러시 크기'], ['Shift+[ / ]', '브러시 경도'], ['1~9, 0', '불투명도 10~90%, 100% (칠하기 도구는 도구의, 이동 도구 등은 레이어의)'], ['X / D', '색 바꾸기 / 기본 색'],
+      ['[ / ]', '브러시 크기'], ['Shift+[ / ]', '브러시 경도'], ['1~9, 0', '불투명도 10~90%, 100% (칠하기 도구는 도구의, 이동 도구 등은 레이어의)'], ['← → ↑ ↓', '이동 도구: 레이어 1픽셀 이동 (Shift: 10픽셀)'], ['X / D', '색 바꾸기 / 기본 색'],
       ['Ctrl+Z / Ctrl+Shift+Z', '실행 취소 / 다시 실행'], ['Ctrl+A / Ctrl+D / Ctrl+Shift+I', '모두 선택 / 해제 / 반전'],
       ['Ctrl+T', '자유 변형 (브라우저가 막으면 편집 메뉴 사용)'], ['Ctrl+J / Ctrl+E', '레이어 복제 / 아래로 병합'],
       ['Ctrl+L / M / U / B / I', '레벨 / 곡선 / 색조·채도 / 색상 균형 / 반전'], ['Alt+Backspace / Ctrl+Backspace', '전경색 / 배경색으로 칠'],

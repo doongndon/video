@@ -46,6 +46,30 @@ export function newLayer(kind, props = {}) {
 // adjustments whose result at a pixel depends only on that pixel (they can redraw a rectangle alone)
 const LOCAL_ADJ = new Set(['brightness', 'levels', 'curves', 'exposure', 'vibrance', 'hueSat', 'colorBalance', 'bw', 'photoFilter', 'invert', 'posterize', 'threshold', 'gradientMap', 'desaturate', 'selectiveColor', 'channelMixer', 'replaceColor', 'colorLookup']);
 
+const styledKey = (rev, p) => `${rev}:${p.extraKey}:${p.cx},${p.cy},${p.w},${p.h}:${p.fx}:${p.fill}`;
+const textKey = (l, rev, x, y) => `${rev}:${JSON.stringify(l.text)}:${l.rotation}:${x},${y}`;
+const shapeKey = (l, rev, x, y) => `${rev}:${JSON.stringify(l.shape)}:${l.rotation}:${x},${y}`;
+
+/**
+ * Before a layer's revision changes for a pure move by (dx, dy): which caches were valid for the old
+ * place. Returns a function that, given the new revision, re-keys them for the new place.
+ */
+function carryCaches(l, from, dx, dy) {
+  const shift = (o) => (o ? { ...o, x: o.x + dx, y: o.y + dy } : o);
+  const st = l._styled?.parts && l._styled.key === styledKey(from.rev, l._styled.parts) ? l._styled : null;
+  const tx = l.kind === 'text' && l._text?.key === textKey(l, from.rev, from.x, from.y) ? l._text : null;
+  const sh = l.kind === 'shape' && l._shape?.key === shapeKey(l, from.rev, from.x, from.y) ? l._shape : null;
+  if (!st && !tx && !sh) return null;
+  return (rev) => {
+    if (st) {
+      const parts = { ...st.parts, cx: st.parts.cx + dx, cy: st.parts.cy + dy };
+      l._styled = { key: styledKey(rev, parts), parts, out: shift(st.out) };
+    } else l._styled = null;
+    if (tx) l._text = { key: textKey(l, rev, l.x, l.y), out: shift(tx.out) };
+    if (sh) l._shape = { key: shapeKey(l, rev, l.x, l.y), out: shift(sh.out) };
+  };
+}
+
 export function unionRect(a, b) {
   // an empty rectangle adds nothing
   if (!(a.w > 0 && a.h > 0)) return b;
@@ -267,6 +291,7 @@ export class PhotoDoc {
         }
       } else {
         const r0 = this.movedArea(l);
+        const before = { rev: l.rev, x: l.x, y: l.y };
         if (l.kind === 'smart') {
           const m = l.smart.m;
           l.smart = { ...l.smart, m: [m[0], m[1], m[2], m[3], m[4] + dx, m[5] + dy], corners: l.smart.corners?.map(([x, y]) => [x + dx, y + dy]) };
@@ -275,14 +300,20 @@ export class PhotoDoc {
           l.y += dy;
         }
         area = r0 && unionRect(r0, { x: r0.x + dx, y: r0.y + dy, w: r0.w, h: r0.h });
+        l._moveFrom = before;
       }
       if (l.mask && l.mask.linked !== false) l.mask = { ...l.mask, x: l.mask.x + dx, y: l.mask.y + dy };
       if (l.vmask && l.vmask.linked !== false) l.vmask = { ...l.vmask, dx: (l.vmask.dx || 0) + dx, dy: (l.vmask.dy || 0) + dy };
-      l._styled = null;
-      // moving doesn't change the pixels: keep the remembered bounds
+      // moving doesn't change the pixels: keep the remembered bounds, and the rendered text, shape,
+      // mask and styles, just shifted (when the masks move along with the layer)
       const ob = l._ob?.rev === l.rev ? l._ob : null;
+      const from = l._moveFrom;
+      l._moveFrom = null;
+      const keep = from && l.kind !== 'smart' && (!l.mask || l.mask.linked !== false) && (!l.vmask || l.vmask.linked !== false) ? carryCaches(l, from, dx, dy) : null;
+      if (!keep) l._styled = null;
       this.touch(l, area || null);
       if (ob) ob.rev = l.rev;
+      if (keep) keep(l.rev);
       return area || null;
     };
     for (const l of layers) {
@@ -292,12 +323,27 @@ export class PhotoDoc {
     }
   }
 
+  /**
+   * Where the picture changes when floating pixels (a selection dragged by the move tool) only moved
+   * from `a` to `b`; null when that isn't known (redraw everything).
+   */
+  floatMoveArea(a, b) {
+    if (!a || !b || a.canvas !== b.canvas || a.layerId !== b.layerId || a.tint !== b.tint || a.viewOnly || b.viewOnly) return null;
+    if (this.layers.some((l) => l.kind === 'adjust' && l.visible && !LOCAL_ADJ.has(l.adjust?.type))) return null;
+    // a group's styles (a shadow, a glow) spread what is inside it
+    if (!this.hideFx) for (let g = this.layer(a.layerId)?.parent; g; g = this.layer(g)?.parent) if (hasFx(this.layer(g)?.fx)) return null;
+    const r = (f) => ({ x: Math.floor(f.x) - 1, y: Math.floor(f.y) - 1, w: f.canvas.width + 3, h: f.canvas.height + 3 });
+    return unionRect(r(a), r(b));
+  }
+
   /** What a layer covers before a move, when moving it changes nothing outside (no styles). */
   movedArea(l) {
-    if (hasFx(l.fx) || l.kind === 'fill' || l.kind === 'adjust') return null;
+    if (l.kind === 'fill' || l.kind === 'adjust') return null;
     const b = this.opaqueBounds(l);
     if (!b) return { x: 0, y: 0, w: 0, h: 0 };
-    return { x: Math.floor(b.x) - 2, y: Math.floor(b.y) - 2, w: Math.ceil(b.w) + 4, h: Math.ceil(b.h) + 4 };
+    // styles (a shadow, a glow, an outside stroke) reach this far around the pixels
+    const pad = 2 + (!this.hideFx && hasFx(l.fx) ? fxPad(l.fx) : 0);
+    return { x: Math.floor(b.x) - pad, y: Math.floor(b.y) - pad, w: Math.ceil(b.w) + pad * 2, h: Math.ceil(b.h) + pad * 2 };
   }
 
   // ---------------------------------------------------------------- copy-on-write editing
@@ -545,17 +591,29 @@ export class PhotoDoc {
     const fxOn = !this.hideFx && hasFx(fx);
     const masked = (l.mask && l.mask.enabled) || (l.vmask && l.vmask.enabled !== false && l.vmask.subpaths?.length);
     if (!fxOn && !masked) return c;
-    const key = `${l.rev}:${extraKey}:${c.x},${c.y},${c.canvas.width},${c.canvas.height}:${fxOn ? JSON.stringify(fx) : ''}:${l.fillOpacity}`;
+    const parts = { extraKey, cx: c.x, cy: c.y, w: c.canvas.width, h: c.canvas.height, fx: fxOn ? JSON.stringify(fx) : '', fill: l.fillOpacity };
+    const key = styledKey(l.rev, parts);
     if (l._styled?.key === key) return l._styled.out;
     const pad = fxOn ? fxPad(fx) : 0;
-    const ox = c.x - pad;
-    const oy = c.y - pad;
-    const body = makeCanvas(c.canvas.width + pad * 2, c.canvas.height + pad * 2);
+    // work only on the part of a big layer that has pixels (a small object on a page-size layer);
+    // gradient and pattern overlays are laid out on the whole layer, so those keep it
+    let cut = { x: 0, y: 0, w: c.canvas.width, h: c.canvas.height };
+    if (l.kind === 'raster' && c.canvas === l.canvas && !(fxOn && (fx.gradientOverlay?.enabled || fx.patternOverlay?.enabled))) {
+      const b = this.opaqueBounds(l);
+      if (!b) cut = { x: 0, y: 0, w: 1, h: 1 };
+      else cut = { x: b.x - c.x, y: b.y - c.y, w: b.w, h: b.h };
+    }
+    const ox = c.x + cut.x - pad;
+    const oy = c.y + cut.y - pad;
+    const body = makeCanvas(cut.w + pad * 2, cut.h + pad * 2);
     const bg = body.getContext('2d');
-    bg.drawImage(c.canvas, pad, pad);
+    bg.drawImage(c.canvas, pad - cut.x, pad - cut.y);
     if (l.mask && l.mask.enabled) {
       bg.globalCompositeOperation = 'destination-in';
-      bg.drawImage(maskAlpha(this, l.mask), -ox, -oy);
+      // a plain mask is drawn where it is (no page-size copy); density and feather need maskAlpha
+      const m = l.mask;
+      if (!m.feather && (m.density ?? 1) >= 1) bg.drawImage(m.canvas, m.x - ox, m.y - oy);
+      else bg.drawImage(maskAlpha(this, l.mask), -ox, -oy);
       bg.globalCompositeOperation = 'source-over';
     }
     if (l.vmask && l.vmask.enabled !== false && l.vmask.subpaths?.length && vectorMaskRenderer) {
@@ -576,7 +634,7 @@ export class PhotoDoc {
       }
       out = { passes, x: ox, y: oy };
     }
-    l._styled = { key, out };
+    l._styled = { key, out, parts };
     return out;
   }
 
@@ -736,36 +794,47 @@ export class PhotoDoc {
 export function alphaBox(canvas) {
   const { width: w, height: h } = canvas;
   if (!w || !h) return null;
-  const d = canvas.getContext('2d').getImageData(0, 0, w, h).data;
-  // alpha is the high byte of each little-endian 32-bit pixel
-  const u = new Uint32Array(d.buffer, d.byteOffset, w * h);
-  const rowHas = (y) => {
-    for (let i = y * w, e = i + w; i < e; i++) if (u[i] >>> 24) return true;
-    return false;
+  const g = canvas.getContext('2d');
+  // read strips from the edges inward: a layer that reaches its edges (a photo) is answered
+  // after a few rows instead of reading every pixel
+  const S = 32;
+  const strip = (x, y, sw, sh) => {
+    const d = g.getImageData(x, y, sw, sh).data;
+    // alpha is the high byte of each little-endian 32-bit pixel
+    const u = new Uint32Array(d.buffer, d.byteOffset, sw * sh);
+    return u;
   };
-  let y0 = 0;
-  while (y0 < h && !rowHas(y0)) y0++;
-  if (y0 === h) return null;
-  let y1 = h - 1;
-  while (y1 > y0 && !rowHas(y1)) y1--;
-  let x0 = w;
-  let x1 = -1;
-  for (let y = y0; y <= y1; y++) {
-    const row = y * w;
-    for (let x = 0; x < x0; x++) {
-      if (u[row + x] >>> 24) {
-        x0 = x;
-        break;
-      }
-    }
-    for (let x = w - 1; x > x1; x--) {
-      if (u[row + x] >>> 24) {
-        x1 = x;
-        break;
-      }
-    }
+  let y0 = -1;
+  for (let y = 0; y < h && y0 < 0; y += S) {
+    const sh = Math.min(S, h - y);
+    const u = strip(0, y, w, sh);
+    for (let r = 0; r < sh && y0 < 0; r++) for (let i = r * w, e = i + w; i < e; i++) if (u[i] >>> 24) { y0 = y + r; break; }
   }
-  return { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 };
+  if (y0 < 0) return null;
+  let y1 = -1;
+  for (let y = h; y > y0 && y1 < 0; y -= S) {
+    const top = Math.max(y0, y - S);
+    const sh = y - top;
+    const u = strip(0, top, w, sh);
+    for (let r = sh - 1; r >= 0 && y1 < 0; r--) for (let i = r * w, e = i + w; i < e; i++) if (u[i] >>> 24) { y1 = top + r; break; }
+  }
+  if (y1 < 0) y1 = y0;
+  const hh = y1 - y0 + 1;
+  let x0 = -1;
+  for (let x = 0; x < w && x0 < 0; x += S) {
+    const sw = Math.min(S, w - x);
+    const u = strip(x, y0, sw, hh);
+    for (let c = 0; c < sw && x0 < 0; c++) for (let r = 0; r < hh; r++) if (u[r * sw + c] >>> 24) { x0 = x + c; break; }
+  }
+  let x1 = -1;
+  for (let x = w; x > x0 && x1 < 0; x -= S) {
+    const left = Math.max(x0, x - S);
+    const sw = x - left;
+    const u = strip(left, y0, sw, hh);
+    for (let c = sw - 1; c >= 0 && x1 < 0; c--) for (let r = 0; r < hh; r++) if (u[r * sw + c] >>> 24) { x1 = left + c; break; }
+  }
+  if (x1 < 0) x1 = x0;
+  return { x: x0, y: y0, w: x1 - x0 + 1, h: hh };
 }
 
 /** The mask as a doc-size alpha canvas (outside the mask canvas counts as hidden). */
@@ -923,7 +992,7 @@ export function textBox(layer) {
 const fontWaits = new Set();
 function renderTextLayer(doc, layer) {
   const t = layer.text;
-  const key = `${layer.rev}:${JSON.stringify(t)}:${layer.rotation}:${layer.x},${layer.y}`;
+  const key = textKey(layer, layer.rev, layer.x, layer.y);
   if (layer._text?.key === key) return layer._text.out;
   // load the web font (and its Korean subsets) for this text, then redraw
   const fk = `${t.font}|${t.bold}|${t.italic}|${t.content}`;
@@ -1009,7 +1078,7 @@ export function shapePath(s) {
 
 function renderShapeLayer(layer) {
   const s = layer.shape;
-  const key = `${layer.rev}:${JSON.stringify(s)}:${layer.rotation}:${layer.x},${layer.y}`;
+  const key = shapeKey(layer, layer.rev, layer.x, layer.y);
   if (layer._shape?.key === key) return layer._shape.out;
   const pad = s.stroke && s.strokeWidth ? Math.ceil(s.strokeWidth) : 0;
   const out = rotatedBox(layer, s.w, s.h, (g) => {

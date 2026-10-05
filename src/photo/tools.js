@@ -1107,12 +1107,14 @@ export const TOOLS = [
           c.getContext('2d').drawImage(d.sel.canvas, off.dx, off.dy);
           E.doc.selection = { canvas: c };
         }
+        E.doc.touch(E.doc.active);
       } else if (!d.last.dx && !d.last.dy) {
         E.redraw();
         return;
       }
-      E.doc.touch(E.doc.active);
-      E.commit('이동', d.before);
+      // a plain move touched the layers while dragging: touching again would redo masks and styles,
+      // and redrawing the whole picture would stall the end of the drag
+      E.commit('이동', d.before, { touched: true });
     },
     cancel(E) {
       if (!this.d) return;
