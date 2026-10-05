@@ -24,6 +24,7 @@ import { installActions, buildActionsPanel } from './actions.js';
 import { installEdit2 } from './edit2.js';
 import { installExtra3, buildCompsPanel } from './extra3.js';
 import { installViewExtras, buildNavigatorPanel, buildInfoPanel, buildHistogramPanel } from './view2.js';
+import { installPhotoAI, buildAiPanel } from './photoai.js';
 import { mixIntoMask } from './selectx.js';
 import { buildPathsPanel, buildCharacterPanel, installTypeCommands, warpTextDialog } from './panels2.js';
 import * as PT from './paths.js';
@@ -158,6 +159,7 @@ export function createPhotoEditor(root) {
     histo: { title: '히스토그램', el: buildHistogramPanel(P) },
     actions: { title: '액션', el: buildActionsPanel(P) },
     comps: { title: '레이어 구성요소', el: buildCompsPanel(P) },
+    ai: { title: 'AI', el: buildAiPanel(P) },
   };
   const sideTabs = (ids) => {
     let cur = loadPref(`photo.side.${ids[0]}`, ids[0]);
@@ -177,7 +179,7 @@ export function createPhotoEditor(root) {
     show(ids.includes(cur) ? cur : ids[0]);
     return { el: h('div.ph-pgroup', bar, body), show, ids };
   };
-  const groupsTop = sideTabs(['color', 'props', 'char', 'history', 'nav', 'info', 'histo']);
+  const groupsTop = sideTabs(['color', 'props', 'ai', 'char', 'history', 'nav', 'info', 'histo']);
   const groupLayers = sideTabs(['layers', 'channels', 'paths', 'actions', 'comps']);
   const side = h('div.ph-side', groupsTop.el, groupLayers.el);
   // phone: a sheet that shows one panel at a time
@@ -185,7 +187,7 @@ export function createPhotoEditor(root) {
   const sheetTitle = h('b');
   const sheet = h('div.ph-sheet', h('div.ph-sheet-head', sheetTitle, h('button.m-icon', { 'aria-label': '닫기', onclick: () => closeSheet() }, icon('close', 20))), sheetBody);
   const mnav = h('div.ph-mnav',
-    ...[['layers', '레이어', 'grid'], ['props', '속성', 'sliders'], ['color', '색', 'filter'], ['adjust', '조정', 'sparkle'], ['filter', '필터', 'wand'], ['history', '내역', 'undo'], ['more', '더보기', 'more']].map(([id, label, ic]) => h('button.m-tool', { onclick: () => mobileAction(id) }, icon(ic, 20), h('span', label))));
+    ...[['layers', '레이어', 'grid'], ['props', '속성', 'sliders'], ['color', '색', 'filter'], ['adjust', '조정', 'sparkle'], ['filter', '필터', 'wand'], ['ai', 'AI', 'ai'], ['history', '내역', 'undo'], ['more', '더보기', 'more']].map(([id, label, ic]) => h('button.m-tool', { onclick: () => mobileAction(id) }, icon(ic, 20), h('span', label))));
   const center = h('div.ph-center', tabs, stage);
   const bodyEl = h('div.ph-body', toolbar, center, side);
   const textBox2 = h('div.ph-textedit', { hidden: true });
@@ -1167,6 +1169,7 @@ export function createPhotoEditor(root) {
   installExtra3(P);
   installViewExtras(P, { stage });
   installTypeCommands(P, PT);
+  installPhotoAI(P);
   installActions(P); // last: it wraps every command so it can record them
   P.emit('tool', P.tool);
   P.emit('channels');
@@ -1955,6 +1958,7 @@ function buildMenus(P) {
       { label: '픽셀 유동화…', key: `${mod}Shift+X`, disabled: no(), action: () => C.liquify() },
       ...filterGroups(),
     ],
+    'AI': () => P.aiMenu(),
     '보기': () => [
       { label: '확대', key: `${mod}+`, disabled: no(), action: () => P.zoomStep(1) },
       { label: '축소', key: `${mod}-`, disabled: no(), action: () => P.zoomStep(-1) },
@@ -1974,6 +1978,7 @@ function buildMenus(P) {
       { label: '히스토그램', action: () => P.showPanel('histo') },
       { label: '액션', action: () => P.showPanel('actions') },
       { label: '레이어 구성요소', action: () => P.showPanel('comps') },
+      { label: 'AI (자동 보정 · 편집 도우미)', action: () => P.showPanel('ai') },
     ],
     '도움말': () => [
       { label: '설명서 (모든 기능)', action: () => import('../docs/viewer.js').then((m) => m.openDocs('p-start')) },

@@ -129,14 +129,16 @@
       <div class="wrap">
         <p class="kicker ai"><i data-icon="ai"></i>AI 편집</p>
         <h2 id="ai-title">말로 부탁하면 편집 도구를 골라 실행해요</h2>
-        <p class="intro">영상 편집기의 AI 탭은 Google의 Gemini를 써요. 내 API 키를 넣으면 켜지고, 자동 자막은 음성 인식 모델을 브라우저 안에서 돌려요.</p>
+        <p class="intro">영상 편집기와 사진 편집기의 AI 탭은 Google의 Gemini를 써요. 내 API 키를 넣으면 켜지고, 자동 자막과 사진의 "키 없이 자동 보정"은 키 없이 브라우저 안에서 돌아가요.</p>
         <div class="grid-2">
           <div class="tile"><h3><span class="ico ai"><i data-icon="wand" data-size="18"></i></span>AI로 전체 편집</h3><p>스타일(브이로그, 쇼츠 등)과 길이만 고르면 말 없는 구간 자르기, 자막, 제목, 전환, 색 필터, 배경음악까지 순서대로 편집해요. 실행 취소 한 번으로 모두 되돌아가요.</p></div>
           <div class="tile"><h3><span class="ico ai"><i data-icon="chat" data-size="18"></i></span>편집 도우미</h3><p>"앞 3초 잘라 줘", "자막 맞춤법 고쳐 줘"처럼 말하면 맞는 편집 도구를 골라 실행해요. 설정에서 켜면 장면 사진도 보고 골라요.</p></div>
           <div class="tile"><h3><span class="ico ai"><i data-icon="script" data-size="18"></i></span>대본으로 편집</h3><p>자막을 글처럼 고치고, 줄을 지우면 그 부분의 영상도 함께 잘려요.</p></div>
           <div class="tile"><h3><span class="ico ai"><i data-icon="text" data-size="18"></i></span>자동 자막</h3><p>말소리를 자막으로 바꿔요. 처음 한 번 음성 인식 모델(약 40~250MB)을 받고, 그 뒤로는 브라우저 안에서 처리해요.</p></div>
+          <div class="tile"><h3><span class="ico ai"><i data-icon="image" data-size="18"></i></span>사진 자동 보정</h3><p>스타일(자연스럽게, 따뜻하게, 영화처럼 등)을 고르면 Gemini가 사진을 보고 노출, 색온도, 대비, 룩, 수평을 골라 새 레이어에 보정해요. 키가 없으면 히스토그램으로 계산해요.</p></div>
+          <div class="tile"><h3><span class="ico ai"><i data-icon="chat" data-size="18"></i></span>사진 편집 도우미</h3><p>"배경 흐리게 하고 제목 넣어 줘"처럼 말하면 선택, 조정 레이어, 배경 지우기, 글자, 자르기 같은 도구로 편집해요. 선택한 곳을 다시 그리는 생성형 채우기(실험적)도 있어요.</p></div>
         </div>
-        <div class="note"><i data-icon="info"></i><span>AI 편집(Gemini)을 쓰면 자막 글자와, 켰을 때만 장면 사진을 Google로 보내요. 내 API 키가 필요하고, claude.ai 아티팩트 화면에서는 외부 연결이 막혀 쓸 수 없어요. 자세한 내용은 <a href="docs.html#ai-start">AI 편집 시작하기</a>에 있어요.</span></div>
+        <div class="note"><i data-icon="info"></i><span>AI 편집(Gemini)을 쓰면 영상은 자막 글자와 켰을 때만 장면 사진을, 사진은 최대 768px로 줄인 사진을 Google로 보내요. 내 API 키가 필요하고, claude.ai 아티팩트 화면에서는 외부 연결이 막혀 쓸 수 없어요. 자세한 내용은 <a href="docs.html#ai-start">AI 편집 시작하기</a>와 <a href="docs.html#p-ai">사진 AI 자동 편집</a>에 있어요.</span></div>
       </div>
     </section>
 
@@ -150,7 +152,7 @@
         </div>
         <ul class="leave" aria-label="인터넷을 쓰는 경우">
           <li><span class="ico accent"><i data-icon="audio" data-size="18"></i></span><div><b>자동 자막을 처음 쓸 때</b><span>음성 인식 모델을 인터넷에서 받아요. 영상과 소리는 보내지 않아요.</span></div></li>
-          <li><span class="ico ai"><i data-icon="ai" data-size="18"></i></span><div><b>AI 편집(Gemini)을 쓸 때</b><span>자막 글자와, 켰을 때만 장면 사진을 Google로 보내요.</span></div></li>
+          <li><span class="ico ai"><i data-icon="ai" data-size="18"></i></span><div><b>AI 편집(Gemini)을 쓸 때</b><span>영상은 자막 글자와 켰을 때만 장면 사진을, 사진은 줄인 사진을 Google로 보내요.</span></div></li>
           <li><span class="ico video"><i data-icon="save" data-size="18"></i></span><div><b>그 밖에는</b><span>글꼴을 불러오는 것 말고는 파일이 컴퓨터 밖으로 나가지 않아요.</span></div></li>
         </ul>
       </div>

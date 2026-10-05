@@ -139,6 +139,24 @@ export async function generate(body, signal) {
   return call(`models/${encodeURIComponent(model)}:generateContent`, { method: 'POST', body, signal });
 }
 
+/** generateContent with a given model (e.g. an image-capable one for the photo editor). */
+export function generateWith(model, body, signal) {
+  return call(`models/${encodeURIComponent(model)}:generateContent`, { method: 'POST', body, signal });
+}
+
+/** Every Gemini model this key can call with generateContent (ids), including image models. */
+export async function listAllGeminiModels(signal) {
+  const all = [];
+  let token = '';
+  for (let page = 0; page < 5; page++) {
+    const d = await call(`models?pageSize=1000${token ? `&pageToken=${encodeURIComponent(token)}` : ''}`, { signal });
+    all.push(...(d?.models || []));
+    token = d?.nextPageToken;
+    if (!token) break;
+  }
+  return all.filter((m) => (m.supportedGenerationMethods || []).includes('generateContent') && /^models\/gemini/.test(m.name || '')).map((m) => m.name.replace(/^models\//, ''));
+}
+
 function firstCandidate(d) {
   const c = d?.candidates?.[0];
   if (!c?.content) {

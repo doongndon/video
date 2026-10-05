@@ -353,3 +353,34 @@ body.mobile .ph-samview { max-height: 50vh; }
 .ph-act-step { display: flex; align-items: center; gap: 6px; color: var(--text-dim); }
 .ph-act-step span { flex: 1; min-width: 0; }
 .ph-act-more { align-self: flex-start; margin-top: 4px; }
+
+/* ---------------------------------------------------------------- AI panel */
+.ph-ai { overflow-y: auto; font-size: var(--fs-s); }
+.ph-aih { margin: 8px 0 0; font-size: var(--fs-s); color: var(--text); letter-spacing: .02em; }
+.ph-aih:first-of-type { margin-top: 4px; }
+.ph-airow { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.ph-airow > span:first-child { color: var(--text-dim); min-width: 34px; }
+.ph-airow input[type=range] { flex: 1; min-width: 96px; }
+.ph-airow select { flex: 1; min-width: 0; }
+.ph-aikeystate { justify-content: space-between; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text-dim); }
+.ph-aikeystate span { flex: 1; min-width: 0; }
+.ph-aikey { display: grid; gap: 6px; padding: 8px; border: 1px solid var(--line-2); border-radius: 6px; background: var(--bg-3); }
+.ph-aikey[hidden] { display: none; }
+.ph-aichk { display: flex; align-items: center; gap: 6px; color: var(--text-dim); cursor: pointer; }
+.ph-ainote { margin: 0; color: var(--text-faint); font-size: var(--fs-xs); line-height: 1.5; }
+.ph-ainote a { color: var(--accent); }
+.ph-aistyles, .ph-aichips { display: flex; flex-wrap: wrap; gap: 4px; }
+.ph-aival { min-width: 38px; text-align: right; font-variant-numeric: tabular-nums; color: var(--value); }
+.ph-airesult { margin: 0; color: var(--text-dim); line-height: 1.5; white-space: pre-wrap; }
+.ph-airesult:empty, .ph-aistatus:empty { display: none; }
+.ph-ailog { min-height: 60px; max-height: 220px; overflow-y: auto; display: flex; flex-direction: column; gap: 5px; padding: 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); }
+.ph-ailog:empty::before { content: '요청을 쓰면 AI가 도구로 직접 편집합니다. 예: "배경을 흐리게 하고 제목을 넣어 줘"'; color: var(--text-faint); font-size: var(--fs-xs); line-height: 1.5; }
+.ph-aimsg { padding: 6px 9px; border-radius: 9px; max-width: 94%; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.5; }
+.ph-aimsg.me { align-self: flex-end; background: var(--accent-soft); color: var(--text); }
+.ph-aimsg.ai { align-self: flex-start; background: var(--bg-4); }
+.ph-aimsg.tool { align-self: flex-start; padding: 0 4px; color: #8ee3a5; font-size: var(--fs-xs); }
+.ph-aimsg.err { color: var(--danger); }
+.ph-aimsg.ai.err { align-self: stretch; background: #3a1f22; color: #ffb4b6; }
+.ph-aiask { resize: vertical; min-height: 44px; font: inherit; }
+.ph-aistatus { margin: 0; color: var(--text-faint); font-size: var(--fs-xs); }
+body.mobile .ph-ai .ph-aistyles button, body.mobile .ph-ai .ph-aichips button { height: 32px; }
