@@ -9,11 +9,11 @@ import { inline } from '../docs/render.js';
 
 const GROUPS = {
   video: [
-    { id: 'video', title: '영상 편집', kind: 'video', pages: VIDEO, intro: '미디어를 가져와 타임라인에 놓고, 자르고, 움직이고, 색과 소리를 고친 뒤 내보내는 과정 전체를 담았어요.' },
-    { id: 'ai', title: 'AI 편집', kind: 'ai', pages: AI, intro: 'Google Gemini에 내 API 키를 넣으면 켜져요. 자동 자막은 키 없이도 브라우저 안에서 돌아가요.' },
+    { id: 'video', title: '영상 편집', kind: 'video', pages: VIDEO, intro: '미디어를 가져와 타임라인에 놓고, 자르고, 움직이고, 색과 소리를 고친 뒤 내보내는 과정 전체를 담았다.' },
+    { id: 'ai', title: 'AI 편집', kind: 'ai', pages: AI, intro: 'Google Gemini에 내 API 키를 넣으면 켜진다. 자동 자막은 키 없이도 브라우저 안에서 돌아간다.' },
   ],
   photo: [
-    { id: 'photo', title: '사진 편집', kind: 'photo', pages: PHOTO, intro: '문서를 만들고, 레이어를 쌓고, 고르고, 고치고, 꾸민 뒤 저장하는 과정 전체를 담았어요.' },
+    { id: 'photo', title: '사진 편집', kind: 'photo', pages: PHOTO, intro: '문서를 만들고, 레이어를 쌓고, 고르고, 고치고, 꾸민 뒤 저장하는 과정 전체를 담았다.' },
   ],
 };
 const RELATED = {

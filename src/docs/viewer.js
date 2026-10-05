@@ -237,7 +237,7 @@ function build() {
     const terms = q.toLowerCase().split(/\s+/).filter(Boolean);
     results.replaceChildren(...(found.length ? found.map((r, k) => h(`button.docs-result${k === sel ? '.on' : ''}`, { role: 'option', onmousedown: (e) => e.preventDefault(), onclick: () => pick(k) },
       h('span.docs-result-title', svg(r.p.icon), marked(r.p.title, terms), h('small', r.p.group.title)),
-      h('span.docs-result-snip', marked(r.snip, terms)))) : [h('div.docs-noresult', `"${q}"에 맞는 쪽이 없어요. 다른 말로 찾아보세요.`)]));
+      h('span.docs-result-snip', marked(r.snip, terms)))) : [h('div.docs-noresult', `"${q}"에 맞는 쪽이 없다. 다른 말로 찾아본다.`)]));
   };
   const pick = (k) => {
     const r = found[k];
