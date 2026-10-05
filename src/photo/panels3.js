@@ -704,15 +704,16 @@ export function buildTimelinePanel(P) {
   const stop = () => {
     if (!playing) return;
     clearTimeout(playing.timer);
-    const back = playing.back;
+    const { back, doc } = playing;
     playing = null;
-    go(back);
+    // back to the frame shown before playing (only on that document: the user may have switched tabs)
+    if (doc === d()) go(back);
   };
   const play = () => {
     const doc = d();
     if (!doc?.frames?.length) return;
     if (playing) return stop();
-    playing = { back: cur(), loops: 0 };
+    playing = { back: cur(), loops: 0, doc };
     let i = cur();
     const step = () => {
       if (!playing || P.doc !== doc) return void (playing = null);

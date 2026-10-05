@@ -47,7 +47,9 @@ export function installView3(P) {
   P.viewKeys = (e, mod) => {
     if (!mod && !e.altKey) {
       if (e.code === 'KeyF' && !e.shiftKey && P.doc) return C.screenMode(), true;
-      if (e.code === 'Tab') return (e.shiftKey ? C.toggleSidePanels() : C.togglePanels()), true;
+      // Tab hides panels only while the picture has the focus; on a button it still moves the focus
+      const ae = document.activeElement;
+      if (e.code === 'Tab' && (!ae || ae === document.body || ae.closest?.('.ph-stage'))) return (e.shiftKey ? C.toggleSidePanels() : C.togglePanels()), true;
       if (e.code === 'Escape' && mode !== 'standard' && !P.transform && !P.editingText && P.tool !== 'crop') return C.screenMode('standard'), true;
     }
     // Ctrl+Alt+Shift+F: find layers
