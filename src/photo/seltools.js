@@ -6,7 +6,7 @@
 import { h, clamp } from '../util.js';
 import { toast, promptDialog, openModal, loadPref, savePref } from '../ui/common.js';
 import { makeCanvas, cloneCanvas } from './doc.js';
-import { TOOLS, TOOL_BY_ID, TOOL_GROUPS, SEL_MODE_OPT, selMode } from './tools.js';
+import { TOOLS, TOOL_BY_ID, TOOL_GROUPS, SEL_MODE_OPT, selMode, tinyOutline, deselectByClick } from './tools.js';
 import * as SEL from './selection.js';
 import * as SX from './selectx.js';
 
@@ -189,8 +189,8 @@ const magLasso = {
       if (p2) for (const q of p2.slice(1)) d.pts.push(q);
     }
     this.d = null;
-    if (d.pts.length < 3) {
-      E.overlay();
+    if (d.pts.length < 3 || tinyOutline(d.pts, E.view.zoom)) {
+      deselectByClick(E, d.mode);
       return;
     }
     const before = E.doc.capture();
@@ -382,9 +382,20 @@ export function installSelectionTools(P) {
   // option bar extras for the selection tools
   const samBtn = () => h('button.small', { onclick: () => C.selectAndMask(), title: '선택 및 마스크 (Alt+Ctrl+R)' }, '선택 및 마스크…');
   const subjBtn = () => h('button.small', { onclick: () => C.selectSubject() }, '피사체 선택');
+  // also stops an outline being drawn (phones have no Ctrl+D or Esc)
+  const deselectBtn = (t) => h('button.small', {
+    title: '선택 해제 (Ctrl+D)',
+    onclick: () => {
+      if (t.cancel) t.cancel(P);
+      else t.d = null;
+      C.deselect();
+      P.overlay();
+    },
+  }, '선택 해제');
   for (const id of ['rect', 'ellipse', 'row', 'col', 'lasso', 'polyLasso', 'magLasso', 'quickSel', 'objSel', 'wand']) {
     const t = TOOL_BY_ID[id];
     t.optionButtons = () => [
+      deselectBtn(t),
       id === 'polyLasso' ? h('button.small', { onclick: () => t.finish?.(P) }, '다각형 닫기') : null,
       id === 'magLasso' ? h('button.small', { onclick: () => t.finish?.(P) }, '닫기') : null,
       ['quickSel', 'objSel', 'wand'].includes(id) ? subjBtn() : null,

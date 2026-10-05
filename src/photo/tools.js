@@ -650,11 +650,19 @@ function lassoTool(id, name, icon, forcePoly) {
       } else return false;
       return true;
     },
+    // switching tools drops an outline that was being drawn
+    deactivate(E) {
+      this.d = null;
+      E.overlay?.();
+    },
     finish(E) {
       const d = this.d;
       this.d = null;
-      if (!d || d.pts.length < 3) {
-        E.overlay();
+      if (!d) return;
+      // a click (or a shape too small to see) with a new-selection lasso removes the selection,
+      // like a click with the marquee
+      if (d.pts.length < 3 || tinyOutline(d.pts.map((q) => [q.x, q.y]), E.view.zoom)) {
+        deselectByClick(E, d.mode);
         return;
       }
       const before = E.doc.capture();
@@ -677,6 +685,32 @@ function lassoTool(id, name, icon, forcePoly) {
       g.restore();
     },
   };
+}
+
+/** True when an outline (doc points) spans less than a few screen pixels: a click, not a shape. */
+export function tinyOutline(pts, zoom) {
+  let x0 = Infinity;
+  let y0 = Infinity;
+  let x1 = -Infinity;
+  let y1 = -Infinity;
+  for (const [x, y] of pts) {
+    x0 = Math.min(x0, x);
+    y0 = Math.min(y0, y);
+    x1 = Math.max(x1, x);
+    y1 = Math.max(y1, y);
+  }
+  return Math.max(x1 - x0, y1 - y0) * zoom < 6;
+}
+
+/** A click with a selection tool in "new selection" mode: drop the selection (one undo step). */
+export function deselectByClick(E, mode) {
+  if (mode === 'new' && E.doc.selection) {
+    const before = E.doc.capture();
+    E.doc.lastSelection = E.doc.selection;
+    E.doc.selection = null;
+    E.commit('선택 해제', before);
+  }
+  E.overlay();
 }
 
 function rectOf(d) {
