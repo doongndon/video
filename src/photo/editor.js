@@ -66,6 +66,13 @@ export const P = {
 };
 
 const toolOpts = loadPref('photo.opts', {});
+// once: the move tool picks the layer under the pointer and shows its box (the options used to be
+// off, and the box option did nothing)
+if ((toolOpts._v || 0) < 2) {
+  toolOpts.move = { ...(toolOpts.move || {}), autoSelect: true, showTransform: true };
+  toolOpts._v = 2;
+  savePref('photo.opts', toolOpts);
+}
 
 export function createPhotoEditor(root) {
   // ---------------------------------------------------------------- state helpers
@@ -698,6 +705,28 @@ export function createPhotoEditor(root) {
     P.editMask = false;
     P.emit('layers');
   };
+  /**
+   * Where a layer sits on the canvas: `quad` (its four corners in doc coords, clockwise from the
+   * top left; turned with the layer for text and shapes) and `box` (axis-aligned bounds), or null.
+   */
+  P.layerFrame = (l) => {
+    const doc = P.doc;
+    if (!doc || !l || l.kind === 'adjust') return null;
+    let quad = null;
+    if (l.kind === 'text' || l.kind === 'shape') {
+      const b = l.kind === 'text' ? textBox(l) : { w: l.shape.w, h: l.shape.h };
+      quad = boxCorners(l, b.w, b.h);
+    } else {
+      const b = doc.opaqueBounds(l);
+      if (b) quad = [[b.x, b.y], [b.x + b.w, b.y], [b.x + b.w, b.y + b.h], [b.x, b.y + b.h]];
+    }
+    if (!quad) return null;
+    const xs = quad.map((q) => q[0]);
+    const ys = quad.map((q) => q[1]);
+    const x = Math.min(...xs);
+    const y = Math.min(...ys);
+    return { quad, box: { x, y, w: Math.max(...xs) - x, h: Math.max(...ys) - y } };
+  };
   /** Topmost visible layer with a pixel (or box) at p. */
   P.layerAt = (p, filter = () => true) => {
     const doc = P.doc;
@@ -968,6 +997,11 @@ export function createPhotoEditor(root) {
       P.overlay();
       return;
     }
+    // the move tool's transform handles (Show Transform Controls) start a free transform
+    if (TOOL_BY_ID[P.tool].grab?.(P, p, e)) {
+      active = 'transform';
+      return;
+    }
     active = 'tool';
     TOOL_BY_ID[P.tool].down?.(P, snap(p), e);
   });
@@ -1036,8 +1070,11 @@ export function createPhotoEditor(root) {
     if (!active) return;
     const p = P.toDoc(e.clientX, e.clientY);
     if (active === 'tool') TOOL_BY_ID[P.tool].up?.(P, snap(p), e);
-    else if (active === 'transform') P.transform?.up();
-    else if (active === 'extras') P.viewExtrasUp(e, p);
+    else if (active === 'transform') {
+      P.transform?.up();
+      // started from the move tool's handles: done when the handle is let go (like Canva)
+      if (P.transform?.autoCommit) P.applyTransform();
+    } else if (active === 'extras') P.viewExtrasUp(e, p);
     P.clearSnapMark?.();
     active = null;
     updateCursor();
@@ -1147,7 +1184,7 @@ export function createPhotoEditor(root) {
       F6: () => (e.shiftKey && !mod ? P.cmd.feather() : null),
       KeyH: () => (mod ? null : P.setTool('hand')),
       KeyR: () => (mod && e.altKey ? P.cmd.selectAndMask() : mod ? null : P.setTool('blur')),
-      Digit0: () => (mod ? P.fit() : P.setOpt(P.tool, 'opacity', 100)),
+      Digit0: () => (mod ? P.fit() : null),
       Digit1: () => (mod ? P.setZoom(1) : null),
       Equal: () => (mod ? P.zoomStep(1) : null),
       Minus: () => (mod ? P.zoomStep(-1) : null),
@@ -1162,9 +1199,24 @@ export function createPhotoEditor(root) {
       ArrowUp: () => nudge(0, -1),
       ArrowDown: () => nudge(0, 1),
     };
-    if (/^Digit[1-9]$/.test(k) && !mod && !e.altKey && TOOL_BY_ID[P.tool].options.some((o) => o[0] === 'opacity')) {
-      P.setOpt(P.tool, 'opacity', +k.slice(5) * 10);
-      return done();
+    if (/^Digit[0-9]$/.test(k) && !mod && !e.altKey) {
+      const v = k === 'Digit0' ? 100 : +k.slice(5) * 10;
+      // painting tools: their own opacity; other tools (move…): the selected layers', like Photoshop
+      if (TOOL_BY_ID[P.tool].options.some((o) => o[0] === 'opacity')) {
+        P.setOpt(P.tool, 'opacity', v);
+        return done();
+      }
+      const ls = P.doc?.selectedLayers.filter((l) => !l.locked) || [];
+      if (ls.length) {
+        P.run(`불투명도 ${v}%`, () => {
+          for (const l of ls) {
+            l.opacity = v / 100;
+            P.doc.touch(l);
+          }
+        });
+        toast(`레이어 불투명도 ${v}%`);
+        return done();
+      }
     }
     const fn = map[k];
     if (!fn || !P.doc && !['KeyN', 'KeyO'].includes(k)) return;
@@ -2071,7 +2123,7 @@ function photoShortcuts() {
       ['V', '이동'], ['M / Shift+M', '사각형 · 원형 선택'], ['L', '올가미'], ['W', '자동 선택(마술봉)'], ['C', '자르기'], ['I / Shift+I', '스포이드 · 색상 샘플러 · 눈금자 · 메모 · 카운트'],
       ['J / Shift+J', '복구 도구들 (스팟 복구 · 복구 · 패치 · 내용 인식 이동 · 제거 · 적목)'], ['B / Shift+B', '브러시 · 연필 · 색상 대체 · 혼합 브러시'], ['Y', '작업 내역 브러시'], ['S', '복제 도장 (Alt+클릭으로 원본)'], ['E / Shift+E', '지우개 · 배경 지우개 · 자동 지우개'], ['G / Shift+G', '그레이디언트 · 페인트 통'],
       ['O', '닷지 · 번'], ['R', '흐림 브러시'], ['T', '문자'], ['U', '모양'], ['H / Space 누른 채 끌기', '화면 이동'], ['Z', '돋보기'],
-      ['[ / ]', '브러시 크기'], ['Shift+[ / ]', '브러시 경도'], ['1~9, 0', '불투명도 10~90%, 100%'], ['X / D', '색 바꾸기 / 기본 색'],
+      ['[ / ]', '브러시 크기'], ['Shift+[ / ]', '브러시 경도'], ['1~9, 0', '불투명도 10~90%, 100% (칠하기 도구는 도구의, 이동 도구 등은 레이어의)'], ['X / D', '색 바꾸기 / 기본 색'],
       ['Ctrl+Z / Ctrl+Shift+Z', '실행 취소 / 다시 실행'], ['Ctrl+A / Ctrl+D / Ctrl+Shift+I', '모두 선택 / 해제 / 반전'],
       ['Ctrl+T', '자유 변형 (브라우저가 막으면 편집 메뉴 사용)'], ['Ctrl+J / Ctrl+E', '레이어 복제 / 아래로 병합'],
       ['Ctrl+L / M / U / B / I', '레벨 / 곡선 / 색조·채도 / 색상 균형 / 반전'], ['Alt+Backspace / Ctrl+Backspace', '전경색 / 배경색으로 칠'],

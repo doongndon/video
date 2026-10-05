@@ -243,6 +243,27 @@ function E_lum(hex) {
   return 0.299 * r + 0.587 * g + 0.114 * b;
 }
 
+/** Point in a convex quad (any winding). */
+function insideQuad(pt, q) {
+  let sign = 0;
+  for (let i = 0; i < 4; i++) {
+    const [ax, ay] = q[i];
+    const [bx, by] = q[(i + 1) % 4];
+    const c = (bx - ax) * (pt[1] - ay) - (by - ay) * (pt[0] - ax);
+    if (c === 0) continue;
+    if (sign && Math.sign(c) !== sign) return false;
+    sign = Math.sign(c);
+  }
+  return true;
+}
+
+/** The bottom layer that fills the canvas under everything else: auto-select leaves it alone. */
+function isBackdrop(doc, l) {
+  if (l !== doc.layers[0] || l.parent || doc.layers.length < 2 || l.kind !== 'raster') return false;
+  const b = doc.opaqueBounds(l);
+  return !!b && b.x <= 0 && b.y <= 0 && b.x + b.w >= doc.width && b.y + b.h >= doc.height;
+}
+
 const sameGeometry = (c, x, y, l) => !!c && c !== l.canvas && c.width === l.canvas.width && c.height === l.canvas.height && x === l.x && y === l.y;
 
 /** `r` when a change inside it shows only inside it: no layer styles on the layer or its groups. */
@@ -893,17 +914,144 @@ export const TOOLS = [
   // ---- move
   {
     id: 'move', name: '이동', key: 'V', icon: 'move', group: 'move', cursor: 'move',
-    options: [['autoSelect', '자동 선택', 'bool', null, null, false], ['autoTarget', '대상', 'select', null, null, 'layer', [['layer', '레이어'], ['group', '그룹']]], ['showTransform', '변형 컨트롤 표시', 'bool', null, null, false]],
+    options: [['autoSelect', '자동 선택', 'bool', null, null, true], ['autoTarget', '대상', 'select', null, null, 'layer', [['layer', '레이어'], ['group', '그룹']]], ['showTransform', '변형 컨트롤 표시', 'bool', null, null, true]],
+    /** With auto-select: the layer a click picks (not the background under everything). */
+    pick(E, p) {
+      const doc = E.doc;
+      let hit = E.layerAt(p);
+      if (hit && isBackdrop(doc, hit)) hit = null;
+      if (hit && E.opts('move').autoTarget === 'group') {
+        const top = doc.ancestors(hit).pop();
+        if (top) hit = top;
+      }
+      return hit;
+    },
+    /** The active layer's frame with its handles (screen tolerance), when they are shown. */
+    handlesOf(E) {
+      const doc = E.doc;
+      const l = doc.active;
+      if (!E.opts('move').showTransform || E.transform || doc.selectedLayers.length !== 1 || !l || l.kind === 'adjust' || l.kind === 'fill' || isBackdrop(doc, l)) return null;
+      const f = E.layerFrame(l);
+      if (!f || f.box.w < 1 || f.box.h < 1) return null;
+      const q = f.quad;
+      const mid = (a, b) => [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+      const pts = { c0: q[0], c1: q[1], c2: q[2], c3: q[3], e0: mid(q[0], q[1]), e1: mid(q[1], q[2]), e2: mid(q[2], q[3]), e3: mid(q[3], q[0]) };
+      // the turning handle sits a little below the bottom edge, square to it
+      const c = mid(q[0], q[2]);
+      const bm = pts.e2;
+      const len = Math.hypot(bm[0] - c[0], bm[1] - c[1]) || 1;
+      const off = 26 / E.view.zoom;
+      pts.rotate = [bm[0] + ((bm[0] - c[0]) / len) * off, bm[1] + ((bm[1] - c[1]) / len) * off];
+      return { frame: f, pts };
+    },
+    grab(E, p, e) {
+      const hs = this.handlesOf(E);
+      if (!hs) return false;
+      // a finger gets a wider reach, but only outside the box: inside it a drag moves the layer
+      const inside = insideQuad([p.x, p.y], hs.frame.quad);
+      const tol = (e?.pointerType === 'touch' && !inside ? 20 : 9) / E.view.zoom;
+      let key = null;
+      let best = tol;
+      for (const [k, q] of Object.entries(hs.pts)) {
+        const d = Math.hypot(q[0] - p.x, q[1] - p.y);
+        if (d <= best) {
+          best = d;
+          key = k;
+        }
+      }
+      if (!key) return false;
+      E.cmd.freeTransform();
+      const t = E.transform;
+      if (!t) return false;
+      t.autoCommit = true;
+      t.down(p, e);
+      if (t.d) {
+        if (key === 'rotate') t.d.h = 'rotate';
+        else {
+          // the transform's own corners match ours; take its nearest one
+          const th = t.handles();
+          let k2 = null;
+          let b2 = Infinity;
+          for (const k of ['c0', 'c1', 'c2', 'c3', 'e0', 'e1', 'e2', 'e3']) {
+            const d = Math.hypot(th[k][0] - p.x, th[k][1] - p.y);
+            if (d < b2) {
+              b2 = d;
+              k2 = k;
+            }
+          }
+          t.d.h = k2;
+        }
+      }
+      return true;
+    },
+    hover(E, p) {
+      const id = E.opts('move').autoSelect ? this.pick(E, p)?.id || null : null;
+      if (id !== this.hoverId) {
+        this.hoverId = id;
+        E.overlay();
+      }
+    },
+    deactivate() {
+      this.hoverId = null;
+    },
+    overlay(E, g) {
+      const doc = E.doc;
+      if (!doc || E.transform || this.d) return;
+      const outline = (quad, color, width = 1) => {
+        g.save();
+        g.strokeStyle = color;
+        g.lineWidth = width;
+        g.beginPath();
+        quad.forEach((q, i) => {
+          const [x, y] = E.toScreen(q[0], q[1]);
+          if (i) g.lineTo(x, y);
+          else g.moveTo(x, y);
+        });
+        g.closePath();
+        g.stroke();
+        g.restore();
+      };
+      // the layer under the pointer (what a click would pick)
+      if (this.hoverId && !doc.selectedLayers.some((l) => l.id === this.hoverId)) {
+        const f = E.layerFrame(doc.layer(this.hoverId));
+        if (f) outline(f.quad, 'rgba(74,163,255,.85)', 1);
+      }
+      // selected layers
+      for (const l of doc.selectedLayers) {
+        if (isBackdrop(doc, l) || l.kind === 'adjust') continue;
+        const f = E.layerFrame(l);
+        if (f) outline(f.quad, '#4aa3ff', 1.5);
+      }
+      const hs = this.handlesOf(E);
+      if (!hs) return;
+      const [bx, by] = E.toScreen(...hs.pts.e2);
+      const [rx, ry] = E.toScreen(...hs.pts.rotate);
+      g.save();
+      g.strokeStyle = '#4aa3ff';
+      g.beginPath();
+      g.moveTo(bx, by);
+      g.lineTo(rx, ry);
+      g.stroke();
+      g.fillStyle = '#ffffff';
+      g.lineWidth = 1.5;
+      for (const [k, q] of Object.entries(hs.pts)) {
+        const [x, y] = E.toScreen(q[0], q[1]);
+        g.beginPath();
+        if (k === 'rotate') g.arc(x, y, 6, 0, Math.PI * 2);
+        else g.rect(x - 4.5, y - 4.5, 9, 9);
+        g.fill();
+        g.stroke();
+      }
+      g.restore();
+    },
     down(E, p, e) {
       const doc = E.doc;
       // Ctrl (⌘) inverts auto-select for one click, like Photoshop
       if (!!E.opts('move').autoSelect !== !!(e?.ctrlKey || e?.metaKey)) {
-        let hit = E.layerAt(p);
-        if (hit && E.opts('move').autoTarget === 'group') {
-          const top = doc.ancestors(hit).pop();
-          if (top) hit = top;
-        }
+        const hit = this.pick(E, p);
         if (hit) E.selectLayer(hit.id, e?.shiftKey ? 'add' : 'single');
+        // nothing but the background there: don't drag along the layer picked before
+        else if (!doc.selection) return;
       }
       const l = doc.active;
       if (!l || l.kind === 'adjust' && !l.mask) return;
@@ -940,7 +1088,7 @@ export const TOOLS = [
         E.float = { ...d.float, x: d.float.x + dx, y: d.float.y + dy };
         d.offset = { dx, dy };
       } else {
-        const sx = E.snapMove ? E.snapMove(d.moving, dx, dy) : { dx, dy };
+        const sx = E.snapMove ? E.snapMove(d.moving, dx, dy, e) : { dx, dy };
         E.doc.translateLayers(d.moving, sx.dx - d.last.dx, sx.dy - d.last.dy);
         d.last = sx;
       }

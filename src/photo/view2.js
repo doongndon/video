@@ -21,6 +21,7 @@ export function installViewExtras(P, { stage }) {
   P.drawViewExtras = (g) => {
     const doc = P.doc;
     if (!doc) return;
+    drawSmart(g);
     const v = doc.view;
     const W = g.canvas.width / (window.devicePixelRatio || 1);
     const H = g.canvas.height / (window.devicePixelRatio || 1);
@@ -175,6 +176,101 @@ export function installViewExtras(P, { stage }) {
   };
   P.clearSnapMark = () => {
     snapMark = null;
+    smart = null;
+  };
+
+  // ---------------------------------------------------------------- smart guides (moving layers)
+  // Like Canva and Photoshop's smart guides: while layers are dragged, their edges and centre stick
+  // to the canvas edges and centre, to other layers' edges and centres and to guides, and pink
+  // lines show what lines up. Ctrl (⌘) while dragging turns it off for the moment.
+  let smart = null;
+  const SMART_TOL = 6;
+  const buildSmart = (moving) => {
+    const doc = P.doc;
+    const ids = new Set();
+    for (const l of moving) {
+      ids.add(l.id);
+      if (l.kind === 'group') for (const d of doc.descendants(l.id)) ids.add(d.id);
+    }
+    let box = null;
+    for (const l of moving) {
+      const f = P.layerFrame(l);
+      if (!f) continue;
+      const b = f.box;
+      box = box ? { x: Math.min(box.x, b.x), y: Math.min(box.y, b.y), x1: Math.max(box.x1, b.x + b.w), y1: Math.max(box.y1, b.y + b.h) } : { x: b.x, y: b.y, x1: b.x + b.w, y1: b.y + b.h };
+    }
+    const W = doc.width;
+    const H = doc.height;
+    const xs = [{ v: 0, a: 0, b: H, page: true }, { v: W / 2, a: 0, b: H, page: true }, { v: W, a: 0, b: H, page: true }];
+    const ys = [{ v: 0, a: 0, b: W, page: true }, { v: H / 2, a: 0, b: W, page: true }, { v: H, a: 0, b: W, page: true }];
+    if (vx.guides && vx.snap) for (const gd of doc.guides) (gd.axis === 'x' ? xs : ys).push({ v: gd.pos, a: 0, b: gd.axis === 'x' ? H : W, page: true });
+    let n = 0;
+    for (const l of [...doc.layers].reverse()) {
+      if (n > 150) break;
+      if (ids.has(l.id) || l.kind === 'adjust' || l.kind === 'group' || !doc.shown(l)) continue;
+      const f = P.layerFrame(l);
+      if (!f) continue;
+      const b = f.box;
+      // a layer that fills the canvas adds nothing the canvas edges don't
+      if (b.x <= 0 && b.y <= 0 && b.x + b.w >= W && b.y + b.h >= H) continue;
+      n++;
+      for (const v of [b.x, b.x + b.w / 2, b.x + b.w]) xs.push({ v, a: b.y, b: b.y + b.h });
+      for (const v of [b.y, b.y + b.h / 2, b.y + b.h]) ys.push({ v, a: b.x, b: b.x + b.w });
+    }
+    return { moving, box, xs, ys, marks: [] };
+  };
+  P.snapMove = (moving, dx, dy, e) => {
+    const doc = P.doc;
+    if (!doc) return { dx, dy };
+    if (!smart || smart.moving !== moving) smart = buildSmart(moving);
+    smart.marks = [];
+    const b = smart.box;
+    if (vx.smart === false || !b || e?.ctrlKey || e?.metaKey) return { dx, dy };
+    const tol = SMART_TOL / doc.view.zoom;
+    const axis = (d, lo, hi, targets) => {
+      const cands = [lo + d, (lo + hi) / 2 + d, hi + d];
+      let best = null;
+      for (const c of cands) {
+        for (const t of targets) {
+          const off = t.v - c;
+          if (Math.abs(off) <= tol && (!best || Math.abs(off) < Math.abs(best))) best = off;
+        }
+      }
+      return best == null ? d : d + best;
+    };
+    const sdx = Math.round(axis(dx, b.x, b.x1, smart.xs));
+    const sdy = Math.round(axis(dy, b.y, b.y1, smart.ys));
+    // lines for everything that now lines up (within half a pixel)
+    const mx = [b.x + sdx, (b.x + b.x1) / 2 + sdx, b.x1 + sdx];
+    const my = [b.y + sdy, (b.y + b.y1) / 2 + sdy, b.y1 + sdy];
+    const [top, bottom, left, right] = [b.y + sdy, b.y1 + sdy, b.x + sdx, b.x1 + sdx];
+    for (const t of smart.xs) if (mx.some((c) => Math.abs(c - t.v) < 0.75)) smart.marks.push({ axis: 'x', v: t.v, a: t.page ? t.a : Math.min(t.a, top), b: t.page ? t.b : Math.max(t.b, bottom) });
+    for (const t of smart.ys) if (my.some((c) => Math.abs(c - t.v) < 0.75)) smart.marks.push({ axis: 'y', v: t.v, a: t.page ? t.a : Math.min(t.a, left), b: t.page ? t.b : Math.max(t.b, right) });
+    return { dx: sdx, dy: sdy };
+  };
+  /** The lines shown right now (for tests and the status bar). */
+  P.smartGuideMarks = () => smart?.marks || [];
+  const drawSmart = (g) => {
+    if (!smart?.marks.length) return;
+    g.save();
+    g.strokeStyle = '#ff3d9a';
+    g.lineWidth = 1;
+    g.beginPath();
+    for (const m of smart.marks) {
+      if (m.axis === 'x') {
+        const [x, y0] = P.toScreen(m.v, m.a);
+        const [, y1] = P.toScreen(m.v, m.b);
+        g.moveTo(Math.round(x) + 0.5, y0);
+        g.lineTo(Math.round(x) + 0.5, y1);
+      } else {
+        const [x0, y] = P.toScreen(m.a, m.v);
+        const [x1] = P.toScreen(m.b, m.v);
+        g.moveTo(x0, Math.round(y) + 0.5);
+        g.lineTo(x1, Math.round(y) + 0.5);
+      }
+    }
+    g.stroke();
+    g.restore();
   };
 
   // ---------------------------------------------------------------- guide dragging
@@ -280,6 +376,11 @@ export function installViewExtras(P, { stage }) {
   C.toggleGuides = () => toggle('guides', '안내선 보기');
   C.toggleGrid = () => toggle('grid', '격자');
   C.toggleSnap = () => toggle('snap', '스냅 (자석)');
+  C.toggleSmartGuides = () => {
+    vx.smart = vx.smart === false;
+    save();
+    toast(vx.smart ? '스마트 안내선을 켰습니다 (레이어를 끌면 가장자리·가운데에 맞춰 붙습니다)' : '스마트 안내선을 껐습니다');
+  };
   C.toggleGuideLock = () => toggle('lock', '안내선 잠그기');
   C.clearGuides = () => {
     if (!P.doc?.guides.length) return toast('안내선이 없습니다');
@@ -370,6 +471,7 @@ export function installViewExtras(P, { stage }) {
     { label: '표시', disabled: no(), submenu: [
       { label: '안내선', key: `${mod};`, checked: vx.guides, action: () => C.toggleGuides() },
       { label: '격자', key: `${mod}'`, checked: vx.grid, action: () => C.toggleGrid() },
+      { label: '스마트 안내선 (레이어 맞춰 붙기)', checked: vx.smart !== false, action: () => C.toggleSmartGuides() },
     ] },
     { label: '스냅 (자석처럼 붙기)', key: `${mod}Shift+;`, checked: vx.snap, disabled: no(), action: () => C.toggleSnap() },
     '-',

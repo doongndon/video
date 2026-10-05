@@ -47,6 +47,9 @@ export function newLayer(kind, props = {}) {
 const LOCAL_ADJ = new Set(['brightness', 'levels', 'curves', 'exposure', 'vibrance', 'hueSat', 'colorBalance', 'bw', 'photoFilter', 'invert', 'posterize', 'threshold', 'gradientMap', 'desaturate', 'selectiveColor', 'channelMixer', 'replaceColor', 'colorLookup']);
 
 export function unionRect(a, b) {
+  // an empty rectangle adds nothing
+  if (!(a.w > 0 && a.h > 0)) return b;
+  if (!(b.w > 0 && b.h > 0)) return a;
   const x = Math.min(a.x, b.x);
   const y = Math.min(a.y, b.y);
   return { x, y, w: Math.max(a.x + a.w, b.x + b.w) - x, h: Math.max(a.y + a.h, b.y + b.h) - y };
@@ -250,28 +253,51 @@ export class PhotoDoc {
   /** Move layers by (dx, dy): groups move their contents, linked masks follow, smart objects keep quality. */
   translateLayers(layers, dx, dy) {
     const done = new Set();
+    // returns the area the move changed (old and new place), or null when unknown (redraw all)
     const move = (l) => {
-      if (done.has(l.id)) return;
+      if (done.has(l.id)) return undefined;
       done.add(l.id);
+      let area;
       if (l.kind === 'group') {
-        for (const d of this.descendants(l.id)) move(d);
-      } else if (l.kind === 'smart') {
-        const m = l.smart.m;
-        l.smart = { ...l.smart, m: [m[0], m[1], m[2], m[3], m[4] + dx, m[5] + dy], corners: l.smart.corners?.map(([x, y]) => [x + dx, y + dy]) };
-      } else if (l.kind !== 'fill' && l.kind !== 'adjust') {
-        l.x += dx;
-        l.y += dy;
+        area = hasFx(l.fx) || (l.mask && l.mask.enabled) ? null : undefined;
+        for (const d of this.descendants(l.id)) {
+          const r = move(d);
+          if (r === null || area === null) area = null;
+          else if (r) area = area ? unionRect(area, r) : r;
+        }
+      } else {
+        const r0 = this.movedArea(l);
+        if (l.kind === 'smart') {
+          const m = l.smart.m;
+          l.smart = { ...l.smart, m: [m[0], m[1], m[2], m[3], m[4] + dx, m[5] + dy], corners: l.smart.corners?.map(([x, y]) => [x + dx, y + dy]) };
+        } else if (l.kind !== 'fill' && l.kind !== 'adjust') {
+          l.x += dx;
+          l.y += dy;
+        }
+        area = r0 && unionRect(r0, { x: r0.x + dx, y: r0.y + dy, w: r0.w, h: r0.h });
       }
       if (l.mask && l.mask.linked !== false) l.mask = { ...l.mask, x: l.mask.x + dx, y: l.mask.y + dy };
       if (l.vmask && l.vmask.linked !== false) l.vmask = { ...l.vmask, dx: (l.vmask.dx || 0) + dx, dy: (l.vmask.dy || 0) + dy };
       l._styled = null;
-      this.touch(l);
+      // moving doesn't change the pixels: keep the remembered bounds
+      const ob = l._ob?.rev === l.rev ? l._ob : null;
+      this.touch(l, area || null);
+      if (ob) ob.rev = l.rev;
+      return area || null;
     };
     for (const l of layers) {
       move(l);
       // linked layers move together
       if (l.linkId) for (const o of this.layers) if (o.linkId === l.linkId) move(o);
     }
+  }
+
+  /** What a layer covers before a move, when moving it changes nothing outside (no styles). */
+  movedArea(l) {
+    if (hasFx(l.fx) || l.kind === 'fill' || l.kind === 'adjust') return null;
+    const b = this.opaqueBounds(l);
+    if (!b) return { x: 0, y: 0, w: 0, h: 0 };
+    return { x: Math.floor(b.x) - 2, y: Math.floor(b.y) - 2, w: Math.ceil(b.w) + 4, h: Math.ceil(b.h) + 4 };
   }
 
   // ---------------------------------------------------------------- copy-on-write editing
@@ -387,7 +413,14 @@ export class PhotoDoc {
     if (layer.kind === 'group') return this.bounds(layer);
     const c = this.content(layer);
     if (!c) return null;
-    const b = alphaBox(c.canvas);
+    // scanning a big layer takes a moment: remember the answer until the layer changes
+    const k = layer._ob;
+    let b;
+    if (k && k.canvas === c.canvas && k.rev === layer.rev) b = k.b;
+    else {
+      b = alphaBox(c.canvas);
+      Object.defineProperty(layer, '_ob', { value: { canvas: c.canvas, rev: layer.rev, b }, enumerable: false, configurable: true, writable: true });
+    }
     return b && { x: c.x + b.x, y: c.y + b.y, w: b.w, h: b.h };
   }
 
@@ -698,23 +731,37 @@ export class PhotoDoc {
 /** Tight box of non-transparent pixels in a canvas. */
 export function alphaBox(canvas) {
   const { width: w, height: h } = canvas;
+  if (!w || !h) return null;
   const d = canvas.getContext('2d').getImageData(0, 0, w, h).data;
+  // alpha is the high byte of each little-endian 32-bit pixel
+  const u = new Uint32Array(d.buffer, d.byteOffset, w * h);
+  const rowHas = (y) => {
+    for (let i = y * w, e = i + w; i < e; i++) if (u[i] >>> 24) return true;
+    return false;
+  };
+  let y0 = 0;
+  while (y0 < h && !rowHas(y0)) y0++;
+  if (y0 === h) return null;
+  let y1 = h - 1;
+  while (y1 > y0 && !rowHas(y1)) y1--;
   let x0 = w;
-  let y0 = h;
   let x1 = -1;
-  let y1 = -1;
-  for (let y = 0; y < h; y++) {
-    const row = y * w * 4;
-    for (let x = 0; x < w; x++) {
-      if (d[row + x * 4 + 3] > 0) {
-        if (x < x0) x0 = x;
-        if (x > x1) x1 = x;
-        if (y < y0) y0 = y;
-        if (y > y1) y1 = y;
+  for (let y = y0; y <= y1; y++) {
+    const row = y * w;
+    for (let x = 0; x < x0; x++) {
+      if (u[row + x] >>> 24) {
+        x0 = x;
+        break;
+      }
+    }
+    for (let x = w - 1; x > x1; x--) {
+      if (u[row + x] >>> 24) {
+        x1 = x;
+        break;
       }
     }
   }
-  return x1 < 0 ? null : { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 };
+  return { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 };
 }
 
 /** The mask as a doc-size alpha canvas (outside the mask canvas counts as hidden). */
