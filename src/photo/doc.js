@@ -349,6 +349,7 @@ export class PhotoDoc {
     const st = {
       name: this.name, width: this.width, height: this.height, activeId: this.activeId, selection: this.selection, quickMask: this.quickMask || null,
       workPath: this.workPath && structuredClone(this.workPath), mode: this.mode, resolution: this.resolution,
+      info: this.info ? { ...this.info } : null, hideFx: !!this.hideFx,
       layers: this.layers.map(snapshotLayer),
     };
     for (const k of DOC_ARRAYS) st[k] = (this[k] || []).map((v) => (v && typeof v === 'object' ? { ...v } : v));
@@ -365,6 +366,8 @@ export class PhotoDoc {
     this.workPath = st.workPath ? structuredClone(st.workPath) : null;
     this.mode = st.mode || 'rgb';
     this.resolution = st.resolution || 72;
+    this.info = st.info ? { ...st.info } : null;
+    this.hideFx = !!st.hideFx;
     for (const k of DOC_ARRAYS) this[k] = (st[k] || []).map((v) => (v && typeof v === 'object' ? { ...v } : v));
     this.layers = st.layers.map((l) => ({ ...snapshotLayer(l), rev: (l.rev || 0) + 1 }));
     this.rev++;
@@ -538,7 +541,8 @@ export class PhotoDoc {
   /** Content with the layer mask, vector mask and layer styles applied (cached per revision). */
   styled(l, c, extraKey = '', o = null) {
     const fx = l.fx || {};
-    const fxOn = hasFx(fx);
+    // Layer ▸ Layer Style ▸ Hide All Effects
+    const fxOn = !this.hideFx && hasFx(fx);
     const masked = (l.mask && l.mask.enabled) || (l.vmask && l.vmask.enabled !== false && l.vmask.subpaths?.length);
     if (!fxOn && !masked) return c;
     const key = `${l.rev}:${extraKey}:${c.x},${c.y},${c.canvas.width},${c.canvas.height}:${fxOn ? JSON.stringify(fx) : ''}:${l.fillOpacity}`;

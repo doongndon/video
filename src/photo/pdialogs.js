@@ -149,6 +149,18 @@ export function paramEditors(defs, params, onChange, P = null) {
       });
       inp.addEventListener('change', () => onChange(params, true));
       rows.push(h('label.ph-prow', h('span', label), inp));
+    } else if (kind === 'kernel') {
+      // a 5×5 grid of weights (Filter ▸ Other ▸ Custom)
+      params[key] = Array.isArray(params[key]) && params[key].length === 25 ? params[key].slice() : Array.from({ length: 25 }, (_, i) => (i === 12 ? 1 : 0));
+      const grid = h('div.ph-kernel', ...params[key].map((v, i) => {
+        const inp = h('input', { type: 'number', step: 1, value: v, 'aria-label': `${Math.floor(i / 5) + 1}행 ${(i % 5) + 1}열` });
+        inp.addEventListener('change', () => {
+          params[key][i] = Number(inp.value) || 0;
+          onChange(params, true);
+        });
+        return inp;
+      }));
+      rows.push(h('div.ph-prow.ph-kernelrow', h('span', label), grid));
     } else if (kind === 'curve') {
       rows.push(curveEditor(params[key], (pts, done) => {
         params[key] = pts;

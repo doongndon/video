@@ -1054,3 +1054,6 @@ const A = {
 
 Object.assign(FILTERS, F);
 Object.assign(ADJUSTMENTS, A);
+
+// shared with the filters in fx3.js and the filter gallery
+export { blurred, remap, sampler, medianData };

@@ -473,7 +473,7 @@ export async function serializeDoc(doc, enc) {
   for (const ch of doc.channels || []) channels.push({ ...ch, canvas: await enc(ch.canvas) });
   return {
     name: doc.name, width: doc.width, height: doc.height, activeId: doc.activeId, selectedIds: doc.selectedIds, sourceMediaId: doc.sourceMediaId,
-    guides: doc.guides, paths: doc.paths, workPath: doc.workPath, notes: doc.notes, counts: doc.counts, samplers: doc.samplers, comps: doc.comps, mode: doc.mode, resolution: doc.resolution,
+    guides: doc.guides, paths: doc.paths, workPath: doc.workPath, notes: doc.notes, counts: doc.counts, samplers: doc.samplers, comps: doc.comps, mode: doc.mode, resolution: doc.resolution, info: doc.info || null, hideFx: !!doc.hideFx,
     channels, layers,
   };
 }
@@ -492,6 +492,8 @@ export async function deserializeDoc(o, dec) {
   doc.workPath = o.workPath || null;
   doc.mode = o.mode || 'rgb';
   doc.resolution = o.resolution || 72;
+  doc.info = o.info || null;
+  doc.hideFx = !!o.hideFx;
   doc.sourceMediaId = o.sourceMediaId || null;
   doc.channels = [];
   for (const ch of o.channels || []) doc.channels.push({ ...ch, canvas: await dec(ch.canvas) });

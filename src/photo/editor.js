@@ -11,6 +11,7 @@ import * as SEL from './selection.js';
 import { TOOL_BY_ID } from './tools.js';
 import { ADJUSTMENTS, FILTERS } from './adjust.js';
 import './fx2.js';
+import './fx3.js';
 import * as IO from './io.js';
 import * as D from './pdialogs.js';
 import { installLayerCommands, layerMenuItems } from './layercmds.js';
@@ -25,6 +26,8 @@ import { installEdit2 } from './edit2.js';
 import { installExtra3, buildCompsPanel } from './extra3.js';
 import { installViewExtras, buildNavigatorPanel, buildInfoPanel, buildHistogramPanel } from './view2.js';
 import { installPhotoAI, buildAiPanel } from './photoai.js';
+import { filterGalleryDialog } from './gallery.js';
+import { installImage2 } from './image2.js';
 import { mixIntoMask } from './selectx.js';
 import { buildPathsPanel, buildCharacterPanel, installTypeCommands, warpTextDialog } from './panels2.js';
 import * as PT from './paths.js';
@@ -319,6 +322,8 @@ export function createPhotoEditor(root) {
   P.commit = (label, before) => {
     const doc = P.doc;
     if (!doc) return;
+    // whatever the step changed, the picture is redrawn (some commands swap layers without touching them)
+    doc.rev++;
     doc.history.push(label, before);
     doc.saved = false;
     P.afterHistory();
@@ -1159,9 +1164,9 @@ export function createPhotoEditor(root) {
     if (!mod && P.doc && TOOL_BY_ID[P.tool].onKey?.(P, e) === true) return done();
     const map = {
       KeyZ: () => (mod ? (e.shiftKey ? P.redo() : P.undo()) : P.setTool('zoom')),
-      KeyY: () => (mod ? P.redo() : P.setTool('historyBrush')),
+      KeyY: () => (mod ? (e.shiftKey ? P.cmd.gamutWarning?.() : P.redo()) : P.setTool('historyBrush')),
       KeyA: () => (mod && e.altKey ? P.cmd.selectAllLayers() : mod ? P.cmd.selectAll() : cycle(['pathSelect', 'directSelect'], e.shiftKey)),
-      KeyP: () => (mod ? null : cycle(['pen', 'freePen'], e.shiftKey)),
+      KeyP: () => (mod ? (e.shiftKey ? null : P.cmd.print?.()) : cycle(['pen', 'freePen'], e.shiftKey)),
       KeyD: () => (mod ? (e.shiftKey ? P.cmd.reselect() : P.cmd.deselect()) : P.defaultColors()),
       KeyI: () => (mod ? (e.shiftKey ? P.cmd.inverse() : D.adjustDialog(P, 'invert')) : cycle(['eyedropper', 'sampler', 'ruler', 'note', 'count'], e.shiftKey)),
       KeyT: () => (mod && e.shiftKey ? P.cmd.transformAgain() : mod ? P.cmd.freeTransform() : cycle(['text', 'verticalText', 'textMask', 'verticalTextMask'], e.shiftKey)),
@@ -1298,11 +1303,14 @@ export function createPhotoEditor(root) {
   installViewExtras(P, { stage });
   installTypeCommands(P, PT);
   installPhotoAI(P);
+  P.cmd.filterGallery = () => filterGalleryDialog(P);
+  installImage2(P);
   installActions(P); // last: it wraps every command so it can record them
   P.emit('tool', P.tool);
   P.emit('channels');
   P.warpText = () => warpTextDialog(P);
   P.menus = buildMenus(P);
+  for (const extend of P.extendMenus || []) extend();
   P.layerMenu = () => P.menus['레이어']();
   P.contextMenu = () => [
     { label: '실행 취소', key: 'Ctrl+Z', action: () => P.undo(), disabled: !P.doc?.history.undoStack.length },
@@ -1960,7 +1968,8 @@ function buildMenus(P) {
   const adjustItems = () => Object.entries(ADJUSTMENTS).map(([k, a]) => ({ label: `${a.name}${a.params.length ? '…' : ''}`, key: { levels: `${mod}L`, curves: `${mod}M`, hueSat: `${mod}U`, colorBalance: `${mod}B`, invert: `${mod}I`, desaturate: `${mod}Shift+U` }[k], disabled: no(), action: () => D.adjustDialog(P, k) }));
   const filterGroups = () => {
     const groups = {};
-    for (const [id, f] of Object.entries(FILTERS)) (groups[f.group] ||= []).push({ label: `${f.name}${f.params.length ? '…' : ''}`, disabled: no(), action: () => D.filterDialog(P, id) });
+    // the filter gallery's own effects live in the gallery (like Photoshop's default menu)
+    for (const [id, f] of Object.entries(FILTERS)) if (!f.gallery && !f.hidden) (groups[f.group] ||= []).push({ label: `${f.name}${f.params.length ? '…' : ''}`, disabled: no(), action: () => D.filterDialog(P, id) });
     // a group of one (Camera Raw) is a plain item, like Photoshop's
     return Object.entries(groups).map(([g, items]) => (items.length === 1 ? items[0] : { label: g, submenu: items }));
   };
@@ -2083,6 +2092,7 @@ function buildMenus(P) {
     '필터': () => [
       { label: '마지막 필터 다시', key: `${mod}F`, disabled: no(), action: () => D.repeatFilter(P) },
       '-',
+      { label: '필터 갤러리…', disabled: no(), action: () => C.filterGallery() },
       { label: '픽셀 유동화…', key: `${mod}Shift+X`, disabled: no(), action: () => C.liquify() },
       ...filterGroups(),
     ],

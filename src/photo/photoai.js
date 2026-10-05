@@ -299,7 +299,7 @@ function makeTools(P) {
   const C = P.cmd;
   const doc = () => P.doc;
   const adjIds = Object.keys(ADJUSTMENTS);
-  const filterIds = Object.keys(FILTERS).filter((id) => id !== 'cameraRaw');
+  const filterIds = Object.keys(FILTERS).filter((id) => id !== 'cameraRaw' && !FILTERS[id].hidden);
   return [
     {
       name: 'camera_raw', label: 'Camera Raw 보정',

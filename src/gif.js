@@ -173,3 +173,48 @@ export async function encodeGif(frames, w, h, fps, onProgress = () => {}) {
   bytes.push(0x3b);
   return new Blob([new Uint8Array(bytes)], { type: 'image/gif' });
 }
+
+export { medianCut };
+
+/**
+ * A GIF from frames of palette indices sharing one palette (up to 256 colours). frames:
+ * [{ indices: Uint8Array(w*h), delay: hundredths of a second }]; `transparent` is a palette index
+ * shown as see-through (-1: none); `loop` 0 = forever, null = play once.
+ */
+export function encodeIndexedGif(frames, palette, w, h, { transparent = -1, loop = 0 } = {}) {
+  let bits = 1;
+  while (1 << bits < palette.length) bits++;
+  const size = 1 << bits;
+  const bytes = [];
+  const push16 = (v) => bytes.push(v & 255, (v >> 8) & 255);
+  for (const c of 'GIF89a') bytes.push(c.charCodeAt(0));
+  push16(w);
+  push16(h);
+  bytes.push(0x80 | 0x70 | (bits - 1), 0, 0);
+  for (let i = 0; i < size; i++) {
+    const c = palette[i] || [0, 0, 0];
+    bytes.push(c[0], c[1], c[2]);
+  }
+  if (frames.length > 1 && loop != null) bytes.push(0x21, 0xff, 0x0b, ...[...'NETSCAPE2.0'].map((c) => c.charCodeAt(0)), 0x03, 0x01, loop & 255, (loop >> 8) & 255, 0);
+  const minCode = Math.max(2, bits);
+  for (const f of frames) {
+    const delay = Math.max(0, Math.round(f.delay || 0));
+    // disposal 2 (restore to background) when frames have see-through parts
+    bytes.push(0x21, 0xf9, 0x04, (transparent >= 0 ? 0x08 | 1 : 0x04), delay & 255, (delay >> 8) & 255, transparent >= 0 ? transparent : 0, 0);
+    bytes.push(0x2c);
+    push16(0);
+    push16(0);
+    push16(w);
+    push16(h);
+    bytes.push(0);
+    bytes.push(minCode);
+    const data = lzw(f.indices, minCode);
+    for (let i = 0; i < data.length; i += 255) {
+      const chunk = data.slice(i, i + 255);
+      bytes.push(chunk.length, ...chunk);
+    }
+    bytes.push(0);
+  }
+  bytes.push(0x3b);
+  return new Blob([new Uint8Array(bytes)], { type: 'image/gif' });
+}
