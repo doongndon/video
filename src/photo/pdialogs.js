@@ -281,7 +281,16 @@ export function curveEditor(points, onChange) {
 // ---------------------------------------------------------------- destructive adjustment / filter with live preview
 
 /** Run `compute(baseCanvas, params)` live on the active layer (inside the selection), OK keeps it. */
-function liveLayerDialog(P, { title, defs, params, compute, label, slow = false, record = null }) {
+// adjustments whose result at a pixel depends only on that pixel: a smaller copy previews them exactly
+const PER_PIXEL = new Set(['brightness', 'levels', 'curves', 'exposure', 'vibrance', 'hueSat', 'colorBalance', 'bw', 'photoFilter', 'invert', 'posterize', 'threshold', 'gradientMap', 'desaturate', 'selectiveColor', 'channelMixer', 'replaceColor', 'colorLookup']);
+// filters that look the same on a smaller copy (their sizes are relative to the picture)
+const SCALE_FREE = new Set(['cameraRaw', 'vignette', 'spherize', 'pinch', 'twirl']);
+
+/**
+ * `proxy`: on a big layer, previews are computed at about screen resolution (what the view shows
+ * at the current zoom) and only "확인" computes the full-size result.
+ */
+function liveLayerDialog(P, { title, defs, params, compute, label, slow = false, record = null, proxy = false }) {
   const doc = P.doc;
   const l = doc.active;
   if (!l || l.kind !== 'raster' || !l.canvas) {
@@ -295,9 +304,28 @@ function liveLayerDialog(P, { title, defs, params, compute, label, slow = false,
   const status = h('div.note', '');
   let timer = null;
   let applied = false;
-  const preview = () => {
+  let small = null;
+  const proxyScale = () => {
+    const px = base.width * base.height;
+    if (!proxy || px <= 3e6) return 1;
+    return Math.min(1, Math.max(doc.view.zoom * (window.devicePixelRatio || 1), Math.sqrt(2.5e6 / px)));
+  };
+  const preview = (full = false) => {
     try {
-      const out = compute(base, params);
+      const s = full ? 1 : proxyScale();
+      let out;
+      if (s < 0.95) {
+        if (small?.s !== s) {
+          const c = makeCanvas(Math.max(1, Math.round(base.width * s)), Math.max(1, Math.round(base.height * s)));
+          const cg = c.getContext('2d');
+          cg.imageSmoothingQuality = 'high';
+          cg.drawImage(base, 0, 0, c.width, c.height);
+          small = { s, canvas: c };
+        }
+        const r = compute(small.canvas, params);
+        out = makeCanvas(base.width, base.height);
+        out.getContext('2d').drawImage(r, 0, 0, base.width, base.height);
+      } else out = compute(base, params);
       if (doc.selection) {
         // only inside the selection: original outside, result inside
         const g = out.getContext('2d');
@@ -323,8 +351,9 @@ function liveLayerDialog(P, { title, defs, params, compute, label, slow = false,
   };
   const schedule = (now) => {
     clearTimeout(timer);
-    if (slow) status.textContent = '미리 보기 계산 중…';
-    timer = setTimeout(preview, now ? 0 : slow ? 220 : 40);
+    const heavy = slow && proxyScale() >= 0.95;
+    if (heavy) status.textContent = '미리 보기 계산 중…';
+    timer = setTimeout(preview, now ? 0 : heavy ? 220 : 40);
   };
   const pv = chk(true, '미리 보기');
   pv.box.addEventListener('change', () => {
@@ -342,7 +371,7 @@ function liveLayerDialog(P, { title, defs, params, compute, label, slow = false,
     buttons: [{ label: '취소' }, {
       label: '확인', primary: true, action: () => {
         clearTimeout(timer);
-        preview();
+        preview(true);
         applied = true;
         P.commit(label, before);
         if (record) P.recordStep?.({ ...record, params: structuredClone(params) });
@@ -372,7 +401,7 @@ export function adjustDialog(P, type) {
     P.recordStep?.({ type: 'adjust', id: type, params });
     return undefined;
   }
-  liveLayerDialog(P, { title: def.name, defs: def.params, params, label: def.name, compute: (c, p) => adjustCanvas(c, type, p), slow: P.doc.width * P.doc.height > 6e6, record: { type: 'adjust', id: type } });
+  liveLayerDialog(P, { title: def.name, defs: def.params, params, label: def.name, compute: (c, p) => adjustCanvas(c, type, p), slow: P.doc.width * P.doc.height > 6e6, record: { type: 'adjust', id: type }, proxy: PER_PIXEL.has(type) });
   return undefined;
 }
 
@@ -422,7 +451,7 @@ export function filterDialog(P, id) {
     return undefined;
   }
   const big = P.doc.width * P.doc.height;
-  liveLayerDialog(P, { title: f.name, defs: f.params.map((d) => [...d.slice(0, 5), d[5]]), params, label: f.name, record: { type: 'filter', id }, compute: (c, p) => { remember(); return run(c, p); }, slow: big > 2e6 || !!f.slow || ['median', 'oil', 'motion', 'twirl', 'spherize', 'pinch', 'wave', 'clouds', 'edges'].includes(id) });
+  liveLayerDialog(P, { title: f.name, defs: f.params.map((d) => [...d.slice(0, 5), d[5]]), params, label: f.name, record: { type: 'filter', id }, compute: (c, p) => { remember(); return run(c, p); }, slow: big > 2e6 || !!f.slow || ['median', 'oil', 'motion', 'twirl', 'spherize', 'pinch', 'wave', 'clouds', 'edges'].includes(id), proxy: SCALE_FREE.has(id) });
   return undefined;
 }
 

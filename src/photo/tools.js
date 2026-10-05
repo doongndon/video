@@ -89,9 +89,12 @@ export class Stroke {
       this.ox = mt.x;
       this.oy = mt.y;
     } else {
+      const old = this.layer.canvas;
+      const [ox, oy] = [this.layer.x, this.layer.y];
       this.g = doc.editPixels(this.layer, { x: 0, y: 0, w: doc.width, h: doc.height });
-      // pre-stroke pixels at the (possibly grown) canvas size
-      this.base = cloneCanvas(this.layer.canvas);
+      // pre-stroke pixels at the (possibly grown) canvas size: editing swapped in a copy, so the old
+      // canvas is exactly that (and is never changed) unless the canvas had to grow
+      this.base = sameGeometry(old, ox, oy, this.layer) ? old : cloneCanvas(this.layer.canvas);
       this.ox = this.layer.x;
       this.oy = this.layer.y;
     }
@@ -220,7 +223,9 @@ export class Stroke {
     if (this.maskKind === 'quick' || this.maskKind === 'channel') this.E.doc.rev++;
     else {
       this.layer._styled = null;
-      this.E.doc.touch(this.layer);
+      // only this rectangle changed, unless layer styles (a shadow, a stroke) spread it further
+      const feathered = this.onMask && this.layer.mask?.feather > 0;
+      this.E.doc.touch(this.layer, feathered ? null : changedRect(this.E.doc, this.layer, { x: x + this.ox, y: y + this.oy, w, h }));
     }
     this.E.redraw();
   }
@@ -236,6 +241,14 @@ export class Stroke {
 function E_lum(hex) {
   const [r, g, b] = hexRgb(hex);
   return 0.299 * r + 0.587 * g + 0.114 * b;
+}
+
+const sameGeometry = (c, x, y, l) => !!c && c !== l.canvas && c.width === l.canvas.width && c.height === l.canvas.height && x === l.x && y === l.y;
+
+/** `r` when a change inside it shows only inside it: no layer styles on the layer or its groups. */
+export function changedRect(doc, layer, r) {
+  for (let l = layer; l; l = l.parent ? doc.layer(l.parent) : null) if (hasFx(l.fx)) return null;
+  return r;
 }
 
 function union(a, b) {
@@ -1233,8 +1246,10 @@ export const TOOLS = [
         this.d.mg = mt.edit();
         return;
       }
+      const old = l.canvas;
+      const [ox, oy] = [l.x, l.y];
       E.doc.editPixels(l);
-      this.d.base = cloneCanvas(l.canvas);
+      this.d.base = sameGeometry(old, ox, oy, l) ? old : cloneCanvas(l.canvas);
     },
     move(E, p) {
       if (!this.d) return;

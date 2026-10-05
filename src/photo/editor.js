@@ -5,7 +5,7 @@ import { h, clamp, downloadBlob, modKey } from '../util.js';
 import { toast, promptDialog, confirmDialog, showMenu, closeMenus, menusOpen, loadPref, savePref } from '../ui/common.js';
 import { icon } from '../ui/icons.js';
 import { mobileApi } from '../ui/mobile.js';
-import { PhotoDoc, newLayer, makeCanvas, cloneCanvas, textBox, boxCorners } from './doc.js';
+import { PhotoDoc, newLayer, makeCanvas, cloneCanvas, textBox, boxCorners, unionRect } from './doc.js';
 import { History } from './history.js';
 import * as SEL from './selection.js';
 import { TOOL_BY_ID } from './tools.js';
@@ -351,9 +351,14 @@ export function createPhotoEditor(root) {
 
   const comp = makeCanvas(1, 1);
   let compRev = -1;
+  let compDoc = null;
   let compFloat = null;
   let compMask = null;
   let compVersion = 0;
+  // smaller copies of the composite (1/2, 1/4, …) for drawing it small: the view when zoomed out, the
+  // navigator, the histogram. Kept up to date area by area while painting.
+  const mips = [];
+  let mipDirty = 'all';
   let frame = 0;
   // the picture as last drawn at screen size: reused while neither the picture nor the view changes
   const viewCache = makeCanvas(1, 1);
@@ -369,9 +374,19 @@ export function createPhotoEditor(root) {
     }
     // a view-only float (a live preview on the top layer) is drawn over the view in draw(), not here
     const fl = P.float?.viewOnly ? null : P.float;
-    if (compRev !== doc.rev || compFloat !== fl || compMask !== P.showMaskOnly) {
+    if (compRev !== doc.rev || compDoc !== doc || compFloat !== fl || compMask !== P.showMaskOnly) {
+      // only part of the picture changed (a brush stroke): redo just that rectangle
+      const dirty = compDoc === doc && compFloat === fl && compMask === P.showMaskOnly && !P.showMaskOnly ? doc.takeDirty(compRev) : doc.takeDirty(NaN);
+      const clip = dirty && clipRect(dirty, doc.width, doc.height);
       compMask = P.showMaskOnly;
-      doc.render(comp.getContext('2d'), { float: fl, fg: P.fg, bg: P.bg });
+      compDoc = doc;
+      if (clip && clip.w * clip.h < doc.width * doc.height * 0.6) {
+        doc.render(comp.getContext('2d'), { float: fl, fg: P.fg, bg: P.bg, clip });
+        if (mipDirty !== 'all') mipDirty = mipDirty ? unionRect(mipDirty, clip) : clip;
+      } else {
+        doc.render(comp.getContext('2d'), { float: fl, fg: P.fg, bg: P.bg });
+        mipDirty = 'all';
+      }
       // Alt+click on a mask thumbnail: look at the mask itself
       const ml = P.showMaskOnly && doc.layer(P.showMaskOnly);
       if (ml?.mask) {
@@ -394,6 +409,63 @@ export function createPhotoEditor(root) {
     }
     return comp;
   };
+
+  /**
+   * The composite or a smaller copy of it that still has at least `scale` (0..1] of its resolution.
+   * Drawn whole over the document area it looks the same, at a fraction of the cost.
+   */
+  P.viewSource = (scale) => {
+    const src = P.composite();
+    if (mipDirty === 'all') {
+      mips.length = 0;
+      mipDirty = null;
+    }
+    if (mipDirty) {
+      for (let k = 0; k < mips.length; k++) updateMip(k, mipDirty);
+      mipDirty = null;
+    }
+    if (!(scale < 0.5) || Math.max(src.width, src.height) <= 1024) return src;
+    let k = 0;
+    while (k < 8 && 2 ** -(k + 2) >= scale && Math.max(src.width, src.height) * 2 ** -(k + 2) >= 64) k++;
+    for (let i = mips.length; i <= k; i++) {
+      const prev = i ? mips[i - 1] : src;
+      const c = makeCanvas(Math.ceil(prev.width / 2), Math.ceil(prev.height / 2));
+      // halving with plain bilinear filtering averages each 2×2 block: as good as the slow filter
+      const g = c.getContext('2d');
+      g.imageSmoothingQuality = 'low';
+      g.drawImage(prev, 0, 0, c.width, c.height);
+      mips.push(c);
+    }
+    return mips[k];
+  };
+  // redo one level of the pyramid inside a rectangle (doc coords) from the level above it
+  function updateMip(k, r) {
+    const prev = k ? mips[k - 1] : comp;
+    const c = mips[k];
+    const kx = c.width / comp.width;
+    const ky = c.height / comp.height;
+    const x0 = Math.max(0, Math.floor(r.x * kx) - 1);
+    const y0 = Math.max(0, Math.floor(r.y * ky) - 1);
+    const x1 = Math.min(c.width, Math.ceil((r.x + r.w) * kx) + 1);
+    const y1 = Math.min(c.height, Math.ceil((r.y + r.h) * ky) + 1);
+    if (x1 <= x0 || y1 <= y0) return;
+    const g = c.getContext('2d');
+    g.save();
+    g.beginPath();
+    g.rect(x0, y0, x1 - x0, y1 - y0);
+    g.clip();
+    g.clearRect(x0, y0, x1 - x0, y1 - y0);
+    g.imageSmoothingQuality = 'low';
+    // a margin around the piece keeps the filter from seeing its edge; the clip keeps it in place
+    const fx = prev.width / c.width;
+    const fy = prev.height / c.height;
+    const sx0 = Math.max(0, x0 - 2);
+    const sy0 = Math.max(0, y0 - 2);
+    const sx1 = Math.min(c.width, x1 + 2);
+    const sy1 = Math.min(c.height, y1 + 2);
+    g.drawImage(prev, sx0 * fx, sy0 * fy, (sx1 - sx0) * fx, (sy1 - sy0) * fy, sx0, sy0, sx1 - sx0, sy1 - sy0);
+    g.restore();
+  }
   P.redraw = () => {
     if (!frame) frame = requestAnimationFrame(draw);
   };
@@ -437,7 +509,10 @@ export function createPhotoEditor(root) {
     const w = doc.width * v.zoom;
     const hh = doc.height * v.zoom;
     // transparency checkerboard
-    const src = P.displayCanvas ? P.displayCanvas(P.composite()) : P.composite();
+    const full = P.composite();
+    const shown = P.displayCanvas ? P.displayCanvas(full) : full;
+    // zoomed out, a smaller copy of the picture looks the same and draws much faster
+    const src = shown === full ? P.viewSource(v.zoom * dpr) : shown;
     if (!src._vid) src._vid = ++vidCounter;
     const vkey = `${src._vid}|${compVersion}|${v.zoom}|${v.x}|${v.y}|${dpr}|${view.width}x${view.height}`;
     if (viewCache.key !== vkey) {
@@ -467,7 +542,8 @@ export function createPhotoEditor(root) {
       vg.fillRect(0, 0, w, hh);
       vg.restore();
       vg.imageSmoothingEnabled = v.zoom < 2;
-      vg.imageSmoothingQuality = 'high';
+      // within 2× of the source size bilinear filtering is enough (and several times faster)
+      vg.imageSmoothingQuality = (w * dpr) / src.width >= 0.5 ? 'low' : 'high';
       vg.drawImage(src, x, y, w, hh);
       viewCache.key = vkey;
     }
@@ -2003,4 +2079,13 @@ function photoShortcuts() {
     ];
     openModal({ title: '사진 편집 단축키 (macOS는 Ctrl 대신 ⌘)', width: '600px', body: [h('div.kbd-table', rows.flatMap(([k, d]) => [h('span', d), h('span.k', k)])), h('div.note', '한글 입력 상태에서도 단축키가 작동합니다 (키 위치 기준). 글자를 입력하는 칸에서는 단축키가 꺼집니다.')] });
   });
+}
+
+/** A dirty rectangle grown to whole pixels (plus a pixel of margin) and kept inside the document. */
+function clipRect(r, W, H) {
+  const x = Math.max(0, Math.floor(r.x) - 1);
+  const y = Math.max(0, Math.floor(r.y) - 1);
+  const x1 = Math.min(W, Math.ceil(r.x + r.w) + 1);
+  const y1 = Math.min(H, Math.ceil(r.y + r.h) + 1);
+  return x1 > x && y1 > y ? { x, y, w: x1 - x, h: y1 - y } : null;
 }

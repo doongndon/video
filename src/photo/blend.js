@@ -43,6 +43,18 @@ const hash = (x, y) => {
   return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
 };
 
+// While a document redraws only a changed rectangle, the canvas clip keeps drawImage inside it, but
+// putImageData ignores clips: per-pixel modes limit themselves to this rectangle on that context.
+let clipCtx = null;
+let clipRect = null;
+/** Limit per-pixel blending on `ctx` to `rect` (null: no limit). Returns the previous setting. */
+export function setCompositeClip(ctx, rect) {
+  const prev = [clipCtx, clipRect];
+  clipCtx = rect ? ctx : null;
+  clipRect = rect || null;
+  return prev;
+}
+
 /**
  * Composite `src` (canvas at sx, sy in ctx pixels) onto ctx with `mode` and `alpha`.
  * Uses the canvas operation when there is one, otherwise blends the pixels here.
@@ -59,10 +71,11 @@ export function compositeOnto(ctx, src, sx, sy, mode, alpha = 1) {
   }
   const W = ctx.canvas.width;
   const H = ctx.canvas.height;
-  const x0 = Math.max(0, Math.floor(sx));
-  const y0 = Math.max(0, Math.floor(sy));
-  const x1 = Math.min(W, Math.ceil(sx + src.width));
-  const y1 = Math.min(H, Math.ceil(sy + src.height));
+  const c = ctx === clipCtx ? clipRect : null;
+  const x0 = Math.max(c ? c.x : 0, Math.floor(sx));
+  const y0 = Math.max(c ? c.y : 0, Math.floor(sy));
+  const x1 = Math.min(c ? c.x + c.w : W, W, Math.ceil(sx + src.width));
+  const y1 = Math.min(c ? c.y + c.h : H, H, Math.ceil(sy + src.height));
   const w = x1 - x0;
   const h = y1 - y0;
   if (w <= 0 || h <= 0) return;

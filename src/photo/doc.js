@@ -8,7 +8,7 @@
 
 import { loadFontFor } from '../fonts.js';
 import { applyAdjustment, applyFilter } from './adjust.js';
-import { compositeOnto, BLEND_MODES as BM } from './blend.js';
+import { compositeOnto, setCompositeClip, BLEND_MODES as BM } from './blend.js';
 import { stylePasses, fxPad, hasFx, normalizeFx } from './styles.js';
 import { boxGradient, paintPattern } from './resources.js';
 
@@ -41,6 +41,15 @@ export function newLayer(kind, props = {}) {
     x: 0, y: 0, rotation: 0, canvas: null, mask: null, vmask: null,
     text: null, shape: null, adjust: null, fill: null, smart: null, blendIf: null, fx: {}, rev: 0, ...props,
   };
+}
+
+// adjustments whose result at a pixel depends only on that pixel (they can redraw a rectangle alone)
+const LOCAL_ADJ = new Set(['brightness', 'levels', 'curves', 'exposure', 'vibrance', 'hueSat', 'colorBalance', 'bw', 'photoFilter', 'invert', 'posterize', 'threshold', 'gradientMap', 'desaturate', 'selectiveColor', 'channelMixer', 'replaceColor', 'colorLookup']);
+
+export function unionRect(a, b) {
+  const x = Math.min(a.x, b.x);
+  const y = Math.min(a.y, b.y);
+  return { x, y, w: Math.max(a.x + a.w, b.x + b.w) - x, h: Math.max(a.y + a.h, b.y + b.h) - y };
 }
 
 const META = ['text', 'shape', 'fill', 'smart', 'vmask', 'blendIf', 'adjust'];
@@ -112,10 +121,32 @@ export class PhotoDoc {
     return this.layers.findIndex((l) => l.id === id);
   }
 
-  touch(layer) {
+  /**
+   * Mark a change. `rect` (doc coords) says only that area changed, so the next redraw can redo just
+   * that part; changes without one (or a bare rev++) redraw everything.
+   */
+  touch(layer, rect = null) {
     if (layer) layer.rev++;
+    if (rect && this._dirtyRect && this._dirtyTo === this.rev) this._dirtyRect = unionRect(this._dirtyRect, rect);
+    else if (rect) {
+      this._dirtyRect = { x: rect.x, y: rect.y, w: rect.w, h: rect.h };
+      this._dirtyBase = this.rev;
+    } else this._dirtyRect = null;
     this.rev++;
+    this._dirtyTo = rect ? this.rev : -1;
     this.saved = false;
+  }
+
+  /**
+   * The area changed since revision `since`, when every change since then said where it was and the
+   * document can be redrawn piece by piece (null: redraw everything). Clears the record.
+   */
+  takeDirty(since) {
+    const r = this._dirtyRect && this._dirtyTo === this.rev && this._dirtyBase === since ? this._dirtyRect : null;
+    this._dirtyRect = null;
+    // an adjustment that looks at neighbouring pixels (a blur inside it, a histogram) needs them all
+    if (r && this.layers.some((l) => l.kind === 'adjust' && l.visible && !LOCAL_ADJ.has(l.adjust?.type))) return null;
+    return r;
   }
 
   // ---------------------------------------------------------------- tree
@@ -363,13 +394,24 @@ export class PhotoDoc {
   // ---------------------------------------------------------------- compositing
 
   /** Draw the visible layers into ctx (doc-size). `upTo`: only layers below that flat index. */
-  render(ctx, { upTo = null, skipId = null, float = null, fg, bg } = {}) {
+  render(ctx, { upTo = null, skipId = null, float = null, fg, bg, clip = null } = {}) {
     ctx.save();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.clearRect(0, 0, this.width, this.height);
+    // clip: redo only this rectangle (whole pixels); everything outside stays as it was
+    if (clip) {
+      ctx.beginPath();
+      ctx.rect(clip.x, clip.y, clip.w, clip.h);
+      ctx.clip();
+      ctx.clearRect(clip.x, clip.y, clip.w, clip.h);
+    } else ctx.clearRect(0, 0, this.width, this.height);
     const only = upTo == null ? null : new Set(this.layers.slice(0, upTo).map((l) => l.id));
-    const o = { skipId, float, only, sig: '', fg, bg };
-    this.renderList(ctx, this.children(null), o);
+    const o = { skipId, float, only, sig: '', fg, bg, clip, root: ctx };
+    const prevClip = setCompositeClip(ctx, clip);
+    try {
+      this.renderList(ctx, this.children(null), o);
+    } finally {
+      setCompositeClip(...prevClip);
+    }
     // a float that belongs to no layer (a transformed group, mask or selection) goes on top
     if (float && !float.layerId) {
       if (float.tint) {
@@ -576,6 +618,7 @@ export class PhotoDoc {
   }
 
   drawAdjustment(ctx, l, sig, o = {}) {
+    if (o.clip && ctx === o.root && LOCAL_ADJ.has(l.adjust.type)) return this.drawAdjustmentIn(ctx, l, o, o.clip);
     const key = `${sig}|${JSON.stringify(l.adjust)}|${l.mask ? l.rev : 0}|${ctx.canvas.width}`;
     let out = l._cache?.key === key ? l._cache.canvas : null;
     if (!out) {
@@ -604,6 +647,31 @@ export class PhotoDoc {
       ctx.drawImage(out, 0, 0);
       ctx.restore();
     } else compositeOnto(ctx, out, 0, 0, mode, l.opacity);
+  }
+
+  /** An adjustment layer over just one rectangle (per-pixel adjustments only), not cached. */
+  drawAdjustmentIn(ctx, l, o, r) {
+    const out = makeCanvas(r.w, r.h);
+    const og = out.getContext('2d');
+    const img = ctx.getImageData(r.x, r.y, r.w, r.h);
+    applyAdjustment(img, l.adjust.type, { ...l.adjust.params, _fg: o.fg, _bg: o.bg });
+    og.putImageData(img, 0, 0);
+    if (l.mask && l.mask.enabled) {
+      og.globalCompositeOperation = 'destination-in';
+      og.drawImage(maskAlpha(this, l.mask), -r.x, -r.y);
+    }
+    if (l.vmask?.subpaths?.length && vectorMaskRenderer) {
+      og.globalCompositeOperation = 'destination-in';
+      og.drawImage(vectorMaskRenderer(this, l.vmask), -r.x, -r.y);
+    }
+    const mode = l.blend === 'pass through' ? 'normal' : l.blend;
+    if (mode === 'normal') {
+      ctx.save();
+      ctx.globalAlpha = l.opacity;
+      ctx.globalCompositeOperation = 'source-atop';
+      ctx.drawImage(out, r.x, r.y);
+      ctx.restore();
+    } else compositeOnto(ctx, out, r.x, r.y, mode, l.opacity);
   }
 
   /** Flattened image (new doc-size canvas). */

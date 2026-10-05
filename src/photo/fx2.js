@@ -31,6 +31,21 @@ const smooth = (a, b, x) => {
 /** Gaussian blur with mirrored edges (no dark rim from the transparent outside). */
 function blurred(c, r) {
   if (r <= 0) return c;
+  // a wide blur only keeps broad shapes: blur a smaller copy and scale it back up (much faster,
+  // the difference is a fraction of a percent of the radius)
+  const f = Math.min(16, Math.floor(r / 3));
+  if (f >= 2 && c.width / f >= 8 && c.height / f >= 8) {
+    const s = mk(Math.ceil(c.width / f), Math.ceil(c.height / f));
+    const sg = s.getContext('2d');
+    sg.imageSmoothingQuality = 'high';
+    sg.drawImage(c, 0, 0, s.width, s.height);
+    const b = blurred(s, Math.sqrt(Math.max(0.25, r * r - (f * f) / 4)) / f);
+    const out = mk(c.width, c.height);
+    const og = out.getContext('2d');
+    og.imageSmoothingQuality = 'low';
+    og.drawImage(b, 0, 0, out.width, out.height);
+    return out;
+  }
   const p = Math.ceil(r * 3);
   const w = c.width;
   const h = c.height;

@@ -68,6 +68,9 @@ async function oneStep(P, label, fn) {
   }
 }
 
+/** Resolves after the browser has drawn the current state of the page. */
+const painted = () => new Promise((r) => requestAnimationFrame(() => setTimeout(r, 0)));
+
 const DOC_CHANGED = '응답을 기다리는 동안 다른 문서로 바뀌어 AI 편집을 멈췄습니다';
 
 /** Rotate a picture and scale it just enough that no empty corners show. */
@@ -783,6 +786,9 @@ export function buildAiPanel(P) {
       const raw = useAi ? await askEnhance(P, style, ctrl.signal) : heuristicSettings(P.composite(), style);
       if (P.doc !== doc) throw new Error(DOC_CHANGED);
       const set = cleanSettings(raw, strength.value / 100);
+      // big pictures take a moment: let the status show before the work starts
+      status.textContent = '보정을 적용하는 중…';
+      await painted();
       await oneStep(P, useAi ? 'AI 자동 보정' : '자동 보정', () => {
         applyEnhance(P, set, { asLayer: asLayer.checked, label: useAi ? 'AI 자동 보정' : '자동 보정', allowStraighten: allowStraighten.checked, allowCrop: allowCrop.checked });
       });

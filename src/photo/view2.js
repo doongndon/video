@@ -414,7 +414,9 @@ export function buildNavigatorPanel(P, stage) {
     const { k, ox, oy } = geom();
     if (thumbRev !== doc.rev || !thumb) {
       thumb = makeCanvas(Math.max(1, Math.round(doc.width * k)), Math.max(1, Math.round(doc.height * k)));
-      thumb.getContext('2d').drawImage(P.composite(), 0, 0, thumb.width, thumb.height);
+      const tg = thumb.getContext('2d');
+      tg.imageSmoothingQuality = 'high';
+      tg.drawImage(P.viewSource ? P.viewSource(k) : P.composite(), 0, 0, thumb.width, thumb.height);
       thumbRev = doc.rev;
     }
     g.drawImage(thumb, ox, oy);
@@ -516,7 +518,7 @@ export function buildHistogramPanel(P) {
     const hh = Math.max(1, Math.round(doc.height * k));
     const t = makeCanvas(w, hh);
     const tg = t.getContext('2d', { willReadFrequently: true });
-    tg.drawImage(P.composite(), 0, 0, w, hh);
+    tg.drawImage(P.viewSource ? P.viewSource(k) : P.composite(), 0, 0, w, hh);
     const d = tg.getImageData(0, 0, w, hh).data;
     let sel = null;
     if (doc.selection) {
