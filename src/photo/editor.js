@@ -81,6 +81,11 @@ if ((toolOpts._v || 0) < 2) {
 }
 
 export function createPhotoEditor(root) {
+  // The saved last tool may be one the install* calls below register (pen, frame, rotate view…):
+  // build the bars with a core tool and switch back once every tool exists.
+  const savedTool = P.tool;
+  if (!TOOL_BY_ID[P.tool]) P.tool = 'brush';
+
   // ---------------------------------------------------------------- state helpers
 
   P.opts = (id) => {
@@ -1494,6 +1499,8 @@ export function createPhotoEditor(root) {
   P.cmd.filterGallery = () => filterGalleryDialog(P);
   installImage2(P);
   installActions(P); // last: it wraps every command so it can record them
+  if (TOOL_BY_ID[savedTool]) P.tool = savedTool;
+  else savePref('photo.tool', P.tool);
   P.emit('tool', P.tool);
   P.emit('channels');
   P.warpText = () => warpTextDialog(P);

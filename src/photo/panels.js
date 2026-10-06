@@ -141,8 +141,8 @@ export function buildOptionsBar(P) {
   // (the slider being dragged would be replaced and the drag would stop after the first step)
   let selfChange = false;
   const render = () => {
-    if (selfChange) return;
     const t = TOOL_BY_ID[P.tool];
+    if (selfChange || !t) return;
     const o = P.opts(t.id);
     const ctrls = [];
     for (const def of t.options) {
