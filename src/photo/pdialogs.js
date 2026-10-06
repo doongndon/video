@@ -376,9 +376,25 @@ function liveLayerDialog(P, { title, defs, params, compute, label, slow = false,
       P.redraw();
     }
   });
+  // 창 숨기기 ▸ 원본 보기 (held): the layer as it was, then the preview again
+  let held = null;
+  const compare = (on) => {
+    if (on && !held) {
+      held = l.canvas;
+      l.canvas = base;
+    } else if (!on && held) {
+      l.canvas = held;
+      held = null;
+    } else return;
+    l._styled = null;
+    doc.touch(l);
+    P.redraw();
+  };
   openModal({
     title,
     width: '460px',
+    peek: true,
+    compare,
     body: [...paramEditors(defs, params, () => schedule(false)), h('div.inline', pv.el), status],
     buttons: [{ label: '취소' }, {
       label: '확인', primary: true, action: () => {

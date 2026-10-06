@@ -2,6 +2,7 @@
 
 import { h, clamp } from '../util.js';
 import { store } from '../store.js';
+import { icon } from './icons.js';
 
 /** Shared drag-and-drop payload (dataTransfer contents are unreadable during dragover). */
 export const dnd = { payload: null };
@@ -205,21 +206,77 @@ export const menusOpen = () => openMenus.length > 0;
 
 // ---------------------------------------------------------------- modals
 
-export function openModal({ title, body, buttons = [{ label: '닫기', primary: true }], onClose, width }) {
+/**
+ * A dialog. `peek` (default: photo dialogs with sliders, which preview on the picture) adds a
+ * "창 숨기기" button (H): the dialog steps aside so the whole picture can be seen (and panned or
+ * zoomed) and comes back with "창 다시 보기"; `compare(on)` adds a hold-to-see-the-original button.
+ */
+export function openModal({ title, body, buttons = [{ label: '닫기', primary: true }], onClose, width, peek, compare }) {
   const footer = h('footer');
+  const head = h('header', h('span.modal-title', title));
   const modal = h('div.modal', { role: 'dialog', 'aria-modal': 'true', style: width ? { width } : null },
-    h('header', title), h('div.body', body), footer);
+    head, h('div.body', body), footer);
   const backdrop = h('div.modal-backdrop', modal);
   let closed = false;
+  const canPeek = peek ?? (document.body.classList.contains('photo-mode') && !!modal.querySelector('input[type=range]'));
+  let peekBar = null;
+  const peeking = () => backdrop.classList.contains('peeking');
+  const setPeek = (on) => {
+    if (closed || on === peeking()) return;
+    backdrop.classList.toggle('peeking', on);
+    document.body.classList.toggle('modal-peeking', on);
+    peekBar?.remove();
+    peekBar = null;
+    if (on) {
+      const hold = compare ? h('button.peek-hold', { title: '누르고 있는 동안 적용 전 원본을 보여 줍니다', 'aria-label': '원본 보기 (누르고 있기)' }, '원본 보기') : null;
+      if (hold) {
+        let down = false;
+        const up = () => {
+          if (!down) return;
+          down = false;
+          hold.classList.remove('on');
+          compare(false);
+        };
+        hold.addEventListener('pointerdown', (e) => {
+          e.preventDefault();
+          down = true;
+          hold.classList.add('on');
+          compare(true);
+        });
+        for (const ev of ['pointerup', 'pointercancel', 'pointerleave']) hold.addEventListener(ev, up);
+        hold.addEventListener('contextmenu', (e) => e.preventDefault());
+      }
+      peekBar = h('div.peek-bar', { role: 'toolbar', 'aria-label': '미리 보기' },
+        h('span.peek-note', '창을 숨긴 동안 그림을 끌어 옮기고 확대해 볼 수 있습니다'),
+        hold,
+        h('button.primary', { onclick: () => setPeek(false) }, icon('eye', 15), ' 창 다시 보기'));
+      document.body.append(peekBar);
+      setTimeout(() => peekBar?.querySelector('button.primary')?.focus({ preventScroll: true }), 0);
+    } else setTimeout(() => head.querySelector('.modal-peek')?.focus({ preventScroll: true }), 0);
+  };
+  if (canPeek) head.append(h('button.modal-peek', { title: '창 숨기기 (H): 그림 전체를 보며 미리 보기', 'aria-label': '창 숨기기', onclick: () => setPeek(true) }, icon('eyeOff', 15), h('span', '창 숨기기')));
   const close = () => {
     if (closed) return;
+    setPeek(false);
     closed = true;
     backdrop.remove();
     document.removeEventListener('keydown', onKey, true);
     onClose?.();
   };
+  const typing = (t) => t instanceof HTMLTextAreaElement || (t instanceof HTMLInputElement && !['range', 'checkbox', 'radio', 'button', 'color'].includes(t.type));
   const onKey = (e) => {
     e.stopPropagation();
+    // H: hide / show the dialog; while hidden, Esc and Enter only bring it back
+    if (canPeek && e.code === 'KeyH' && !e.ctrlKey && !e.metaKey && !e.altKey && !typing(e.target)) {
+      e.preventDefault();
+      setPeek(!peeking());
+      return;
+    }
+    if (peeking() && (e.key === 'Escape' || e.key === 'Enter')) {
+      e.preventDefault();
+      setPeek(false);
+      return;
+    }
     if (e.key === 'Escape') close();
     if (e.key === 'Enter' && !(e.target instanceof HTMLTextAreaElement)) {
       const primary = buttons.find((b) => b.primary);
@@ -244,7 +301,7 @@ export function openModal({ title, body, buttons = [{ label: '닫기', primary: 
   // on phones, focusing a text field would pop up the keyboard over the dialog
   const phone = document.body.classList.contains('mobile');
   setTimeout(() => modal.querySelector(phone ? 'button.primary' : 'input,select,textarea,button.primary')?.focus({ preventScroll: phone }), 0);
-  return { close, modal, footer };
+  return { close, modal, footer, peek: setPeek };
 }
 
 export function confirmDialog(title, message) {

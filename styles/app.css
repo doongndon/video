@@ -605,3 +605,23 @@ body.m-land .modal { max-height: 96dvh; }
 
 #drop-overlay { position: fixed; inset: 0; z-index: 3000; display: grid; place-items: center; background: rgba(59,143,240,.18); border: 3px dashed var(--accent); font-size: 24px; color: #fff; pointer-events: none; }
 #drop-overlay[hidden] { display: none; }
+
+/* Dialogs that preview on the picture: hide the window for a moment (창 숨기기, H) */
+.modal header { display: flex; align-items: center; gap: 8px; }
+.modal header .modal-title { flex: 1; min-width: 0; }
+.modal-peek { flex: none; display: inline-flex; align-items: center; gap: 4px; min-height: 0; height: 30px; padding: 0 10px; font-size: var(--fs-s); font-weight: 400; }
+.modal-backdrop.peeking { background: transparent; pointer-events: none; }
+.modal-backdrop.peeking .modal { display: none; }
+.peek-bar { position: fixed; z-index: 960; left: 50%; bottom: 28px; transform: translateX(-50%); display: flex; align-items: center; gap: 8px; padding: 8px; max-width: calc(100vw - 16px); background: var(--bg-3); border: 1px solid var(--line-2); border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,.5); }
+.peek-bar .peek-note { color: var(--text-dim); font-size: var(--fs-s); padding: 0 6px; }
+.peek-bar button { white-space: nowrap; display: inline-flex; align-items: center; gap: 4px; }
+.peek-hold { touch-action: none; user-select: none; -webkit-user-select: none; }
+.peek-hold.on { background: var(--accent); color: #fff; }
+/* while peeking only the picture answers (pan and zoom); the rest of the editor waits */
+body.modal-peeking #menubar, body.modal-peeking #statusbar, body.modal-peeking #workspace,
+body.modal-peeking .ph-opts, body.modal-peeking .ph-tools, body.modal-peeking .ph-side, body.modal-peeking .ph-tabs,
+body.modal-peeking .ph-strip, body.modal-peeking .ph-mnav, body.modal-peeking .ph-sheet, body.modal-peeking .m-top { pointer-events: none; }
+body.mobile .peek-bar { bottom: calc(12px + env(safe-area-inset-bottom, 0px)); left: 8px; right: 8px; transform: none; justify-content: flex-end; }
+body.mobile .peek-bar .peek-note { flex: 1; min-width: 0; font-size: var(--fs-xs); line-height: 1.4; }
+body.mobile .peek-bar button { min-height: 44px; }
+body.mobile .modal-peek { height: 36px; }

@@ -694,7 +694,7 @@ export function createPhotoEditor(root) {
       og.stroke();
       og.setLineDash([]);
     }
-    if (hover && TOOL_BY_ID[P.tool].cursor === 'brush' && !P.transform) {
+    if (hover && TOOL_BY_ID[P.tool].cursor === 'brush' && !P.transform && !document.body.classList.contains('modal-peeking')) {
       const r = (P.opts(P.tool).size * v.zoom) / 2;
       const [cx, cy] = P.toScreen(hover.x, hover.y);
       // Preferences ▸ brush cursor: the brush outline, a precise cross, or both
@@ -1094,11 +1094,13 @@ export function createPhotoEditor(root) {
     }
     const p = P.toDoc(e.clientX, e.clientY);
     P.lastPoint = p;
-    if (!spaceDown && e.button === 0 && !P.transform && P.viewExtrasDown?.(e, p)) {
+    // a dialog hidden to look at its preview (창 숨기기): the picture only pans and zooms
+    const peeking = document.body.classList.contains('modal-peeking');
+    if (!spaceDown && !peeking && e.button === 0 && !P.transform && P.viewExtrasDown?.(e, p)) {
       active = 'extras';
       return;
     }
-    if (e.button === 1 || spaceDown || (P.tool === 'hand' && !P.transform)) {
+    if (e.button === 1 || spaceDown || peeking || (P.tool === 'hand' && !P.transform)) {
       active = 'pan';
       panStart = { x: e.clientX, y: e.clientY, vx: P.view.x, vy: P.view.y };
       stage.style.cursor = 'grabbing';
