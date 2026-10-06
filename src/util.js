@@ -112,9 +112,14 @@ export function debounce(fn, ms) {
   let timer = null;
   const wrapped = (...args) => {
     clearTimeout(timer);
-    timer = setTimeout(() => fn(...args), ms);
+    timer = setTimeout(() => {
+      timer = null;
+      fn(...args);
+    }, ms);
   };
-  wrapped.flush = () => { clearTimeout(timer); fn(); };
+  wrapped.flush = () => { clearTimeout(timer); timer = null; return fn(); };
+  /** Run now only if a call is waiting. */
+  wrapped.flushPending = () => (timer ? wrapped.flush() : undefined);
   return wrapped;
 }
 

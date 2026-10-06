@@ -331,7 +331,14 @@ const objSel = {
     }
     E.toast('개체를 찾는 중…');
     setTimeout(() => {
-      const m = SX.objectSelect(sampleCanvas(E, o.sampleAll), r, { poly: lasso ? d.pts.map((q) => [q.x, q.y]) : null });
+      const src = sampleCanvas(E, o.sampleAll);
+      let m = SX.objectSelect(src, r, { poly: lasso ? d.pts.map((q) => [q.x, q.y]) : null });
+      if (!m) {
+        // a box drawn inside one object (all one colour): the object is the like-coloured area around it
+        const w = SEL.magicWand(E.doc, src, r.x + r.w / 2, r.y + r.h / 2, { tolerance: 40, contiguous: true });
+        const b = w && SEL.alphaBounds(w);
+        if (b && b.x <= r.x && b.y <= r.y && b.x + b.w >= r.x + r.w && b.y + b.h >= r.y + r.h && b.w * b.h < E.doc.width * E.doc.height * 0.9) m = w;
+      }
       if (!m) {
         E.toast('개체를 찾지 못했습니다 (배경과 색이 비슷하면 어렵습니다)');
         return;

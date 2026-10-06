@@ -2,11 +2,12 @@
 // Frame tool (K): shaped placeholders that pictures drop into, cropped to the frame like Canva's frames.
 
 import { h } from '../util.js';
-import { toast } from '../ui/common.js';
+import { toast, showMenu, loadPref, savePref } from '../ui/common.js';
 import { newLayer, makeCanvas } from './doc.js';
 import { TOOLS, TOOL_BY_ID, TOOL_GROUPS, needRaster, changedRect } from './tools.js';
 import * as PT from './paths.js';
 import * as IO from './io.js';
+import * as SEL from './selection.js';
 
 const ART_STYLES = [
   ['tightShort', '촘촘하게 짧게'], ['tightMedium', '촘촘하게 중간'], ['tightLong', '촘촘하게 길게'],
@@ -368,6 +369,164 @@ export function installTools3(P) {
     }
   };
 
+  // ---------------------------------------------------------------- symmetry painting
+
+  const SYM_TOOLS = ['brush', 'pencil', 'eraser', 'mixer'];
+  const SYM_MODES = [['off', '끔'], ['v', '좌우 (세로 축)'], ['h', '위아래 (가로 축)'], ['vh', '네 방향 (세로 + 가로)'], ['radial', '방사형'], ['mandala', '만다라 (방사형 + 거울)']];
+  P.symmetry = { mode: 'off', n: 6, ...loadPref('photo.symmetry', {}) };
+  const saveSym = () => savePref('photo.symmetry', P.symmetry);
+  let selCentre = null;
+  /** Centre of the symmetry: the selection's middle when there is one, else the canvas middle. */
+  const symCentre = () => {
+    const d = doc();
+    if (d.selection) {
+      if (selCentre?.sel !== d.selection) {
+        const b = SEL.alphaBounds(d.selection.canvas);
+        selCentre = { sel: d.selection, c: b ? [b.x + b.w / 2, b.y + b.h / 2] : [d.width / 2, d.height / 2] };
+      }
+      return selCentre.c;
+    }
+    return [d.width / 2, d.height / 2];
+  };
+  const symOn = () => P.symmetry.mode !== 'off' && SYM_TOOLS.includes(P.tool) && !!doc();
+  /** Dab transforms (x, y, direction) for the stroke being started, or null. */
+  P.symmetryTransforms = () => {
+    if (!symOn()) return null;
+    const [cx, cy] = symCentre();
+    const m = P.symmetry.mode;
+    const id = (x, y, a) => [x, y, a];
+    const mv = (x, y, a) => [2 * cx - x, y, Math.PI - a];
+    const mh = (x, y, a) => [x, 2 * cy - y, -a];
+    if (m === 'v') return [id, mv];
+    if (m === 'h') return [id, mh];
+    if (m === 'vh') return [id, mv, mh, (x, y, a) => [2 * cx - x, 2 * cy - y, a + Math.PI]];
+    const n = Math.max(2, Math.min(24, Math.round(P.symmetry.n || 6)));
+    const out = [];
+    for (let k = 0; k < n; k++) {
+      const t = (k * 2 * Math.PI) / n;
+      const c = Math.cos(t);
+      const sn = Math.sin(t);
+      const rot = (x, y, a) => [cx + (x - cx) * c - (y - cy) * sn, cy + (x - cx) * sn + (y - cy) * c, a + t];
+      out.push(rot);
+      if (m === 'mandala') out.push((x, y, a) => { const [mx, my, ma] = mv(x, y, a); return rot(mx, my, ma); });
+    }
+    return out;
+  };
+  P.symmetryButton = () => {
+    const name = SYM_MODES.find(([k]) => k === P.symmetry.mode)?.[1] || '끔';
+    const label = P.symmetry.mode === 'radial' || P.symmetry.mode === 'mandala' ? `${name} ${P.symmetry.n}` : name;
+    return h(`button.small${P.symmetry.mode !== 'off' ? '.on' : ''}`, {
+      title: '대칭 칠하기: 한 번 칠하면 거울이나 둘레로 같이 칠해집니다 (선택 영역이 있으면 그 가운데가 중심)',
+      onclick: (e) => {
+        const r = e.currentTarget.getBoundingClientRect();
+        showMenu([
+          ...SYM_MODES.map(([k, n]) => ({ label: n, checked: P.symmetry.mode === k, action: () => { P.symmetry.mode = k; saveSym(); P.emit('opts'); P.redraw(); } })),
+          '-',
+          ...[3, 4, 5, 6, 8, 10, 12, 16].map((n) => ({ label: `방사형 조각 ${n}개`, checked: P.symmetry.n === n, action: () => { P.symmetry.n = n; if (!['radial', 'mandala'].includes(P.symmetry.mode)) P.symmetry.mode = 'radial'; saveSym(); P.emit('opts'); P.redraw(); } })),
+        ], r.left, r.bottom + 2);
+      },
+    }, `대칭: ${label} ▾`);
+  };
+  // the axes, while a painting tool is picked
+  const prevExtras2 = P.drawViewExtras;
+  P.drawViewExtras = (g) => {
+    prevExtras2?.(g);
+    if (!symOn() || P.extrasOn === false) return;
+    const d = doc();
+    const v = d.view;
+    const [cx, cy] = symCentre();
+    const R = Math.hypot(d.width, d.height);
+    const lines = [];
+    const m = P.symmetry.mode;
+    if (m === 'v' || m === 'vh') lines.push([cx, 0, cx, d.height]);
+    if (m === 'h' || m === 'vh') lines.push([0, cy, d.width, cy]);
+    if (m === 'radial' || m === 'mandala') {
+      const n = Math.max(2, Math.round(P.symmetry.n || 6));
+      for (let k = 0; k < n; k++) {
+        const t = (k * 2 * Math.PI) / n - Math.PI / 2;
+        lines.push([cx, cy, cx + Math.cos(t) * R, cy + Math.sin(t) * R]);
+      }
+    }
+    g.save();
+    g.beginPath();
+    g.rect(v.x, v.y, d.width * v.zoom, d.height * v.zoom);
+    g.clip();
+    g.strokeStyle = 'rgba(255,64,160,.85)';
+    g.setLineDash([6, 4]);
+    g.lineWidth = 1;
+    g.beginPath();
+    for (const [x0, y0, x1, y1] of lines) {
+      g.moveTo(v.x + x0 * v.zoom, v.y + y0 * v.zoom);
+      g.lineTo(v.x + x1 * v.zoom, v.y + y1 * v.zoom);
+    }
+    g.stroke();
+    g.restore();
+  };
+
+  // ---------------------------------------------------------------- rotate view (R)
+
+  const stageEl = () => document.querySelector('.ph-stage');
+  const norm = (a) => {
+    let x = ((a % 360) + 360) % 360;
+    if (x > 180) x -= 360;
+    return Math.round(x * 10) / 10;
+  };
+  /** Turn the view (not the picture) by an angle in degrees; 0 straightens it again. */
+  P.setViewRotation = (deg) => {
+    const d = doc();
+    if (!d) return;
+    d.view = { ...d.view, rot: norm(deg) };
+    P.viewChanged();
+    P.emit('opts');
+  };
+  const rotateView = {
+    id: 'rotateView', name: '회전 보기', key: 'R', icon: 'rotateView', group: 'view', cursor: 'grab',
+    options: [],
+    angle(e) {
+      const r = stageEl().getBoundingClientRect();
+      return (Math.atan2(e.clientY - (r.top + r.height / 2), e.clientX - (r.left + r.width / 2)) * 180) / Math.PI;
+    },
+    down(E, p, e) {
+      if (!E.doc || !e) return;
+      this.d = { a0: this.angle(e), rot0: E.doc.view.rot || 0 };
+    },
+    move(E, p, e) {
+      if (!this.d || !e) return;
+      let rot = this.d.rot0 + this.angle(e) - this.d.a0;
+      if (e.shiftKey) rot = Math.round(rot / 15) * 15;
+      P.setViewRotation(rot);
+    },
+    up() {
+      this.d = null;
+    },
+    cancel() {
+      this.d = null;
+    },
+    onKey(E, e) {
+      if (e.key === 'Escape') {
+        P.setViewRotation(0);
+        return true;
+      }
+      return false;
+    },
+    optionButtons() {
+      const rot = doc()?.view?.rot || 0;
+      const n = h('input.ph-num', { type: 'number', min: -180, max: 180, step: 1, value: rot, 'aria-label': '회전 각도' });
+      n.addEventListener('change', () => P.setViewRotation(+n.value || 0));
+      return [
+        h('label.ph-opt', h('span', '각도'), n, h('small', '°')),
+        h('button.small', { title: '반시계 방향 15°', onclick: () => P.setViewRotation(rot - 15) }, '↺ 15°'),
+        h('button.small', { title: '시계 방향 15°', onclick: () => P.setViewRotation(rot + 15) }, '↻ 15°'),
+        h('button.small', { title: '똑바로 (Esc)', onclick: () => P.setViewRotation(0) }, '0°로'),
+        h('span.ph-opt.ph-hint', '끌어서 돌리기 · Shift: 15°씩 · 그림은 바뀌지 않음'),
+      ];
+    },
+  };
+  TOOLS.push(rotateView);
+  TOOL_BY_ID.rotateView = rotateView;
+  const hg2 = TOOL_GROUPS.find((g) => g[0] === 'hand');
+  if (hg2) hg2.push('rotateView');
+
   const C = P.cmd;
   C.placeIntoFrame = async (f = frameOf(doc()?.active)) => {
     if (!f) return toast('먼저 프레임(프레임 도구 K로 만든 것)을 고르세요');
@@ -418,6 +577,20 @@ export function installTools3(P) {
     ];
   };
   P.extendMenus = [...(P.extendMenus || []), () => {
+    const origView = P.menus['보기'];
+    P.menus['보기'] = () => {
+      const items = origView();
+      const rot = doc()?.view?.rot || 0;
+      const i = items.findIndex((x) => x?.label?.startsWith('100%'));
+      items.splice(i + 1, 0, { label: `화면 회전${rot ? ` (지금 ${rot}°)` : ''}`, disabled: !doc(), submenu: [
+        { label: '회전 보기 도구', key: 'R', action: () => P.setTool('rotateView') },
+        { label: '시계 방향 15°', action: () => P.setViewRotation(rot + 15) },
+        { label: '반시계 방향 15°', action: () => P.setViewRotation(rot - 15) },
+        { label: '시계 방향 90°', action: () => P.setViewRotation(rot + 90) },
+        { label: '회전 초기화 (0°)', disabled: !rot, action: () => P.setViewRotation(0) },
+      ] });
+      return items;
+    };
     const orig = P.menus['레이어'];
     P.menus['레이어'] = () => {
       const items = orig();

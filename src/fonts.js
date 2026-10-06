@@ -121,6 +121,9 @@ export function fontSheetPending(family) {
 }
 
 /** Make sure the stylesheet of a Google family is on the page. Resolves when it has loaded. */
+/** A web font that has to be fetched before it can draw (a Google font). */
+export const isWebFont = (family) => GOOGLE.has(family);
+
 export function ensureFont(family) {
   if (!GOOGLE.has(family) || PRELOADED.has(family) || typeof document === 'undefined') return Promise.resolve();
   let entry = sheets.get(family);

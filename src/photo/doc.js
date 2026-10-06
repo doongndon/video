@@ -6,7 +6,7 @@
 // never changed in place once an undo snapshot may point at them: editPixels()/editMask() swap in a
 // copy first (copy-on-write), so history entries stay cheap.
 
-import { loadFontFor } from '../fonts.js';
+import { loadFontFor, isWebFont } from '../fonts.js';
 import { applyAdjustment, applyFilter } from './adjust.js';
 import { compositeOnto, setCompositeClip, BLEND_MODES as BM } from './blend.js';
 import { stylePasses, fxPad, hasFx, normalizeFx } from './styles.js';
@@ -1002,12 +1002,26 @@ function renderTextLayer(doc, layer) {
   // load the web font (and its Korean subsets) for this text, then redraw
   const fk = `${t.font}|${t.bold}|${t.italic}|${t.content}`;
   if (!fontWaits.has(fk)) {
+    if (fontWaits.size > 2000) fontWaits.clear();
     fontWaits.add(fk);
-    loadFontFor(t.font, t.content || '', { bold: t.bold, italic: t.italic }).then(() => {
+    // glyphs already loaded (typing in a font in use): nothing to wait for, so no full redraw per key
+    let ready = false;
+    try {
+      const faces = [...document.fonts].some((f) => f.family.replace(/^["']|["']$/g, '') === t.font);
+      // a font with faces: are the ones for this text loaded? none at all: a system font is ready,
+      // a web font still has to be fetched
+      ready = faces ? document.fonts.check(`${t.italic ? 'italic ' : ''}${t.bold ? 700 : 400} 16px "${t.font}"`, t.content || 'A') : !isWebFont(t.font);
+    } catch { /* unknown font: load it */ }
+    if (!ready) loadFontFor(t.font, t.content || '', { bold: t.bold, italic: t.italic }).then(() => {
+      if (!doc.layer(layer.id)) return;
+      // the text drawn again in the arrived font: only its own area (old and new size) is redrawn
+      const r0 = doc.movedArea(layer);
       layer._text = null;
       layer.rev++;
-      doc.rev++;
-      window.dispatchEvent(new Event('photo:redraw'));
+      const r1 = doc.movedArea(layer);
+      const area = r0 && r1 && (r0.w > 0 ? (r1.w > 0 ? unionRect(r0, r1) : r0) : r1);
+      doc.touch(layer, area && area.w > 0 && !doc.ancestors(layer).some((a) => hasFx(a.fx)) ? area : null);
+      window.dispatchEvent(new Event('photo:repaint'));
     }).catch(() => {});
   }
   let out;

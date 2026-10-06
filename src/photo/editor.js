@@ -528,19 +528,61 @@ export function createPhotoEditor(root) {
     updateStatus();
   };
 
+  // Rotate View: the two canvases grow to the stage's diagonal and turn (CSS) about its middle, so
+  // everything drawn on them (picture, selection, handles) turns along; `off` is where the stage's
+  // top-left corner sits inside the bigger canvas
+  let off = { x: 0, y: 0 };
+  let cssKey = '';
   function sizeCanvases() {
     const r = stage.getBoundingClientRect();
     const dpr = window.devicePixelRatio || 1;
+    const rot = P.doc?.view?.rot || 0;
+    const D = rot ? Math.ceil(Math.hypot(r.width, r.height)) + 2 : 0;
+    const cw = rot ? D : r.width;
+    const ch = rot ? D : r.height;
+    off = { x: rot ? (D - r.width) / 2 : 0, y: rot ? (D - r.height) / 2 : 0 };
+    const key = rot ? `${rot}|${D}|${r.width}x${r.height}` : '';
     for (const c of [view, over]) {
-      const w = Math.max(1, Math.round(r.width * dpr));
-      const hh = Math.max(1, Math.round(r.height * dpr));
+      const w = Math.max(1, Math.round(cw * dpr));
+      const hh = Math.max(1, Math.round(ch * dpr));
       if (c.width !== w || c.height !== hh) {
         c.width = w;
         c.height = hh;
       }
+      if (key !== cssKey) {
+        Object.assign(c.style, rot
+          ? { left: `${-off.x}px`, top: `${-off.y}px`, width: `${D}px`, height: `${D}px`, transform: `rotate(${rot}deg)`, transformOrigin: '50% 50%' }
+          : { left: '', top: '', width: '', height: '', transform: '', transformOrigin: '' });
+      }
     }
+    cssKey = key;
     return dpr;
   }
+  /** A client point in the stage's own (unturned) coordinates. */
+  const logical = (clientX, clientY) => {
+    const r = stage.getBoundingClientRect();
+    let lx = clientX - r.left;
+    let ly = clientY - r.top;
+    const rot = P.doc?.view?.rot || 0;
+    if (rot) {
+      const a = (-rot * Math.PI) / 180;
+      const cx = r.width / 2;
+      const cy = r.height / 2;
+      const dx = lx - cx;
+      const dy = ly - cy;
+      lx = cx + dx * Math.cos(a) - dy * Math.sin(a);
+      ly = cy + dx * Math.sin(a) + dy * Math.cos(a);
+    }
+    return [lx, ly];
+  };
+  /** A movement on screen turned into the stage's own coordinates. */
+  const logicalDelta = (dx, dy) => {
+    const rot = P.doc?.view?.rot || 0;
+    if (!rot) return [dx, dy];
+    const a = (-rot * Math.PI) / 180;
+    return [dx * Math.cos(a) - dy * Math.sin(a), dx * Math.sin(a) + dy * Math.cos(a)];
+  };
+  P.logicalPoint = logical;
 
   function draw() {
     frame = 0;
@@ -567,7 +609,10 @@ export function createPhotoEditor(root) {
     // zoomed out, a smaller copy of the picture looks the same and draws much faster
     const src = shown === full ? P.viewSource(v.zoom * dpr) : shown;
     if (!src._vid) src._vid = ++vidCounter;
-    const vbase = `${src._vid}|${v.zoom}|${v.x}|${v.y}|${dpr}|${view.width}x${view.height}`;
+    const rotated = !!v.rot;
+    const OX = off.x;
+    const OY = off.y;
+    const vbase = `${src._vid}|${v.zoom}|${v.x}|${v.y}|${dpr}|${view.width}x${view.height}|${v.rot || 0}`;
     const vkey = `${vbase}|${compVersion}`;
     // the part of the screen to paint again: null for all of it, 'none' for nothing
     let blit = viewShows === vkey ? 'none' : null;
@@ -576,7 +621,7 @@ export function createPhotoEditor(root) {
       // scaling a big picture down to the screen is the costly part of a redraw: do it only when
       // the picture or the view changed (not for marching ants, cursors or overlays), and when only
       // a part of the picture changed (moving an object, a brush stroke) only that part
-      const part = viewCache.base === vbase && viewDirty && viewDirty !== 'all' && shown === full ? viewDirty : null;
+      const part = viewCache.base === vbase && viewDirty && viewDirty !== 'all' && shown === full && !rotated ? viewDirty : null;
       viewDirty = null;
       viewCache.base = vbase;
       if (viewCache.width !== view.width || viewCache.height !== view.height) {
@@ -617,7 +662,7 @@ export function createPhotoEditor(root) {
         }
       } else vg.clearRect(0, 0, viewCache.width, viewCache.height);
       if (!none) {
-        vg.setTransform(dpr, 0, 0, dpr, 0, 0);
+        vg.setTransform(dpr, 0, 0, dpr, OX * dpr, OY * dpr);
         if (!checker) {
           // transparency grid (Preferences: size and colours)
           const cs = { small: 4, medium: 8, large: 16 }[P.prefs.checker] || 8;
@@ -646,7 +691,7 @@ export function createPhotoEditor(root) {
     }
     // live preview on the top layer: made at screen size and drawn straight over the picture
     const live = P.float?.viewOnly ? P.float.canvas : null;
-    if (live) blit = null;
+    if (live || rotated) blit = blit === 'none' && !live ? 'none' : null;
     if (blit !== 'none') {
       g.save();
       if (blit) {
@@ -658,7 +703,7 @@ export function createPhotoEditor(root) {
       g.fillRect(0, 0, view.width, view.height);
       if (blit) g.drawImage(viewCache, blit.x, blit.y, blit.w, blit.h, blit.x, blit.y, blit.w, blit.h);
       else g.drawImage(viewCache, 0, 0);
-      g.setTransform(dpr, 0, 0, dpr, 0, 0);
+      g.setTransform(dpr, 0, 0, dpr, OX * dpr, OY * dpr);
       if (live) {
         g.imageSmoothingEnabled = true;
         g.drawImage(live, x, y, w, hh);
@@ -669,13 +714,13 @@ export function createPhotoEditor(root) {
     }
     viewShows = live ? '' : vkey;
     // overlay: selection ants, tool overlay, transform handles, brush cursor
-    og.setTransform(dpr, 0, 0, dpr, 0, 0);
+    og.setTransform(dpr, 0, 0, dpr, OX * dpr, OY * dpr);
     if (doc.selection && !P.float && P.extrasOn !== false) {
-      const ants = SEL.antsImage(doc.selection, { zoom: v.zoom * dpr, x: v.x * dpr, y: v.y * dpr }, over.width, over.height, antsPhase);
+      const ants = SEL.antsImage(doc.selection, { zoom: v.zoom * dpr, x: (v.x + OX) * dpr, y: (v.y + OY) * dpr }, over.width, over.height, antsPhase);
       if (ants) {
         og.setTransform(1, 0, 0, 1, 0, 0);
         og.putImageData(ants, 0, 0);
-        og.setTransform(dpr, 0, 0, dpr, 0, 0);
+        og.setTransform(dpr, 0, 0, dpr, OX * dpr, OY * dpr);
       }
     }
     TOOL_BY_ID[P.tool].overlay?.(P, og);
@@ -737,8 +782,8 @@ export function createPhotoEditor(root) {
 
   P.toScreen = (x, y) => [x * P.view.zoom + P.view.x, y * P.view.zoom + P.view.y];
   P.toDoc = (clientX, clientY) => {
-    const r = stage.getBoundingClientRect();
-    return { x: (clientX - r.left - P.view.x) / P.view.zoom, y: (clientY - r.top - P.view.y) / P.view.zoom };
+    const [lx, ly] = logical(clientX, clientY);
+    return { x: (lx - P.view.x) / P.view.zoom, y: (ly - P.view.y) / P.view.zoom };
   };
   P.fit = () => {
     const doc = P.doc;
@@ -747,9 +792,14 @@ export function createPhotoEditor(root) {
     // hidden (video mode): fit when the stage shows up
     if (r.width < 20 || r.height < 20) return;
     const pad = isMobile() ? 16 : 40;
-    const z = Math.max(0.01, Math.min(1, (r.width - pad) / doc.width, (r.height - pad) / doc.height));
+    // a turned view (Rotate View) fits the turned picture
+    const rot = doc.view?.rot || 0;
+    const a = (rot * Math.PI) / 180;
+    const bw = Math.abs(doc.width * Math.cos(a)) + Math.abs(doc.height * Math.sin(a));
+    const bh = Math.abs(doc.width * Math.sin(a)) + Math.abs(doc.height * Math.cos(a));
+    const z = Math.max(0.01, Math.min(1, (r.width - pad) / bw, (r.height - pad) / bh));
     // auto: the view follows the window (rotating the phone) until the user zooms or pans
-    doc.view = { zoom: z, x: (r.width - doc.width * z) / 2, y: (r.height - doc.height * z) / 2, fitted: true, auto: true };
+    doc.view = { zoom: z, x: (r.width - doc.width * z) / 2, y: (r.height - doc.height * z) / 2, fitted: true, auto: true, rot };
     P.viewChanged();
   };
   /** Called when the photo editor comes on screen. */
@@ -765,8 +815,9 @@ export function createPhotoEditor(root) {
     const px = cx ?? r.left + r.width / 2;
     const py = cy ?? r.top + r.height / 2;
     const p = P.toDoc(px, py);
+    const [lx, ly] = logical(px, py);
     const zoom = clamp(z, 0.01, 64);
-    doc.view = { zoom, x: px - r.left - p.x * zoom, y: py - r.top - p.y * zoom, fitted: true };
+    doc.view = { zoom, x: lx - p.x * zoom, y: ly - p.y * zoom, fitted: true, rot: doc.view.rot || 0 };
     P.viewChanged();
   };
   P.zoomAt = (k, cx, cy) => P.setZoom(P.view.zoom * k, cx, cy);
@@ -901,7 +952,7 @@ export function createPhotoEditor(root) {
     if (!s) return;
     const v = P.view;
     const dpr = window.devicePixelRatio || 1;
-    const ants = SEL.antsImage({ canvas: s.canvas }, { zoom: v.zoom * dpr, x: (v.x + dx * v.zoom) * dpr, y: (v.y + dy * v.zoom) * dpr }, over.width, over.height, antsPhase);
+    const ants = SEL.antsImage({ canvas: s.canvas }, { zoom: v.zoom * dpr, x: (v.x + off.x + dx * v.zoom) * dpr, y: (v.y + off.y + dy * v.zoom) * dpr }, over.width, over.height, antsPhase);
     g.save();
     g.setTransform(1, 0, 0, 1, 0, 0);
     if (ants) g.putImageData(ants, 0, 0);
@@ -917,9 +968,14 @@ export function createPhotoEditor(root) {
     const ta = h('textarea', { rows: 3, placeholder: '글자를 입력하세요', 'aria-label': '글자 입력' });
     ta.value = l.text.content;
     ta.addEventListener('input', () => {
+      // only where the text was and is now is drawn again (typing on a big photo stays quick)
+      const r0 = doc.movedArea(l);
       l.text = { ...l.text, content: ta.value };
       l.name = ta.value.split('\n')[0].slice(0, 30) || '텍스트';
-      doc.touch(l);
+      l.rev++;
+      const r1 = doc.movedArea(l);
+      const area = r0 && r1 && (r0.w > 0 ? (r1.w > 0 ? unionRect(r0, r1) : r0) : r1);
+      doc.touch(l, area && area.w > 0 && doc.ancestors(l).every((a) => !a.fx || !Object.values(a.fx).some((f) => f?.enabled)) ? area : null);
       P.redraw();
     });
     ta.addEventListener('keydown', (e) => {
@@ -1145,19 +1201,21 @@ export function createPhotoEditor(root) {
       const d = Math.hypot(a.x - b.x, a.y - b.y);
       const mx = (a.x + b.x) / 2;
       const my = (a.y + b.y) / 2;
-      const r = stage.getBoundingClientRect();
       const zoom = clamp((panStart.zoom * d) / Math.max(1, panStart.d), 0.01, 64);
       // keep the point between the fingers under the fingers
-      const docX = (panStart.mx - r.left - panStart.vx) / panStart.zoom;
-      const docY = (panStart.my - r.top - panStart.vy) / panStart.zoom;
-      P.doc.view = { zoom, x: mx - r.left - docX * zoom, y: my - r.top - docY * zoom, fitted: true };
+      const [sx, sy] = logical(panStart.mx, panStart.my);
+      const [nx, ny] = logical(mx, my);
+      const docX = (sx - panStart.vx) / panStart.zoom;
+      const docY = (sy - panStart.vy) / panStart.zoom;
+      P.doc.view = { zoom, x: nx - docX * zoom, y: ny - docY * zoom, fitted: true, rot: P.doc.view.rot || 0 };
       P.viewChanged();
       return;
     }
     if (active === 'pan') {
       P.doc.view.auto = false;
-      P.doc.view.x = panStart.vx + e.clientX - panStart.x;
-      P.doc.view.y = panStart.vy + e.clientY - panStart.y;
+      const [dx, dy] = logicalDelta(e.clientX - panStart.x, e.clientY - panStart.y);
+      P.doc.view.x = panStart.vx + dx;
+      P.doc.view.y = panStart.vy + dy;
       P.viewChanged();
       return;
     }
@@ -1228,8 +1286,9 @@ export function createPhotoEditor(root) {
     else if (e.ctrlKey || e.metaKey || e.altKey) P.zoomAt(Math.exp(-e.deltaY * (e.ctrlKey && !e.metaKey && Math.abs(e.deltaY) < 50 ? 0.01 : 0.002)), e.clientX, e.clientY);
     else {
       P.doc.view.auto = false;
-      P.doc.view.x -= e.shiftKey ? e.deltaY : e.deltaX;
-      P.doc.view.y -= e.shiftKey ? 0 : e.deltaY;
+      const [dx, dy] = logicalDelta(e.shiftKey ? e.deltaY : e.deltaX, e.shiftKey ? 0 : e.deltaY);
+      P.doc.view.x -= dx;
+      P.doc.view.y -= dy;
       P.viewChanged();
     }
   }, { passive: false });
@@ -1311,7 +1370,7 @@ export function createPhotoEditor(root) {
       KeyQ: () => (mod ? null : P.cmd.quickMask()),
       F6: () => (e.shiftKey && !mod ? P.cmd.feather() : null),
       KeyH: () => (mod ? null : P.setTool('hand')),
-      KeyR: () => (mod && e.altKey ? P.cmd.selectAndMask() : mod ? null : P.setTool('blur')),
+      KeyR: () => (mod && e.altKey ? P.cmd.selectAndMask() : mod ? null : P.setTool('rotateView')),
       Digit0: () => (mod ? P.fit() : null),
       Digit1: () => (mod ? P.setZoom(1) : null),
       Equal: () => (mod ? P.zoomStep(1) : null),
@@ -1459,12 +1518,23 @@ export function createPhotoEditor(root) {
   let saveTimer = null;
   function scheduleSave() {
     clearTimeout(saveTimer);
+    saveTimer = null;
     if (P.prefs.autosave === false) return;
-    saveTimer = setTimeout(() => {
-      IO.saveSession(P.docs, P.index).then(() => P.emit('saved')).catch((err) => console.warn('photo autosave failed', err));
-    }, 2500);
+    saveTimer = setTimeout(() => P.saveNow(), 2500);
   }
   P.scheduleSave = scheduleSave;
+  /** Save the open documents to this browser now (also when the page is hidden or closed). */
+  P.saveNow = () => {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+    if (P.prefs.autosave === false) return Promise.resolve();
+    return IO.saveSession(P.docs, P.index).then(() => P.emit('saved')).catch((err) => console.warn('photo autosave failed', err));
+  };
+  // edits made in the last moments before the tab closes (or the phone switches apps) are kept too
+  const saveIfWaiting = () => { if (saveTimer) P.saveNow(); };
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') saveIfWaiting(); });
+  window.addEventListener('pagehide', saveIfWaiting);
+  window.addEventListener('beforeunload', saveIfWaiting);
   let restored = false;
   P.restoreSession = async () => {
     if (restored) return;
@@ -1480,6 +1550,8 @@ export function createPhotoEditor(root) {
     }
   };
 
+  // a part of the document changed outside an edit (a font arrived): redraw what doc.touch marked
+  window.addEventListener('photo:repaint', () => P.redraw());
   window.addEventListener('photo:redraw', () => {
     compRev = -1;
     P.redraw();
@@ -2274,7 +2346,7 @@ function photoShortcuts() {
     const rows = [
       ['V', '이동'], ['M / Shift+M', '사각형 · 원형 선택'], ['L', '올가미'], ['W', '자동 선택(마술봉)'], ['C', '자르기'], ['I / Shift+I', '스포이드 · 색상 샘플러 · 눈금자 · 메모 · 카운트'],
       ['J / Shift+J', '복구 도구들 (스팟 복구 · 복구 · 패치 · 내용 인식 이동 · 제거 · 적목)'], ['B / Shift+B', '브러시 · 연필 · 색상 대체 · 혼합 브러시'], ['Y / Shift+Y', '작업 내역 브러시 · 미술 작업 내역 브러시'], ['S', '복제 도장 (Alt+클릭으로 원본)'], ['E / Shift+E', '지우개 · 배경 지우개 · 자동 지우개'], ['G / Shift+G', '그레이디언트 · 페인트 통'],
-      ['O / Shift+O', '닷지 · 번 · 스펀지'], ['R', '흐림 브러시'], ['T', '문자'], ['U', '모양'], ['K', '프레임 (사진을 넣는 모양 틀)'], ['H / Space 누른 채 끌기', '화면 이동'], ['Z', '돋보기'],
+      ['O / Shift+O', '닷지 · 번 · 스펀지'], ['R', '회전 보기 (화면만 돌리기, Esc로 0°)'], ['T', '문자'], ['U', '모양'], ['K', '프레임 (사진을 넣는 모양 틀)'], ['H / Space 누른 채 끌기', '화면 이동'], ['Z', '돋보기'],
       ['[ / ]', '브러시 크기'], ['Shift+[ / ]', '브러시 경도'], ['1~9, 0', '불투명도 10~90%, 100% (칠하기 도구는 도구의, 이동 도구 등은 레이어의)'], ['← → ↑ ↓', '이동 도구: 레이어 1픽셀 이동 (Shift: 10픽셀)'], ['X / D', '색 바꾸기 / 기본 색'],
       ['Ctrl+Z / Ctrl+Shift+Z', '실행 취소 / 다시 실행'], ['Ctrl+A / Ctrl+D / Ctrl+Shift+I', '모두 선택 / 해제 / 반전'],
       ['Ctrl+T', '자유 변형 (브라우저가 막으면 편집 메뉴 사용)'], ['Ctrl+J / Ctrl+E', '레이어 복제 / 아래로 병합'],

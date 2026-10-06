@@ -65,6 +65,7 @@ const P = {
   smudge: '<path d="M5 14V7.5a1 1 0 0 1 2 0V6a1 1 0 0 1 2 0v1a1 1 0 0 1 2 0v1.5a1 1 0 0 1 2 0V11a3 3 0 0 1-3 3z"/><path d="M5 7.5V3.5a1 1 0 0 1 2 0V7"/>',
   push: '<circle cx="6.5" cy="8" r="3.5"/><path d="M10 8h4.5M12.5 6l2 2-2 2"/>',
   dodge: '<circle cx="7" cy="6" r="3.5"/><path d="M9.5 8.5 14 13"/>',
+  rotateView: '<path d="M3.5 8a4.5 4.5 0 1 0 1.3-3.2"/><path d="M4.8 2v2.8h2.8"/><path d="m8 8 2.2-2.2"/>',
   sponge: '<rect x="3" y="4.5" width="10" height="7.5" rx="2.5"/><circle cx="6" cy="7.5" r=".8"/><circle cx="9.5" cy="9" r=".8"/><circle cx="8" cy="6.3" r=".6"/><circle cx="10.5" cy="6.6" r=".5"/>',
   artHistory: '<path d="M13.5 2.5 7 9l-1.5-1.5L12 1z" transform="translate(0 .5)"/><path d="M5.5 8.5c-2 0-3 1.5-3 3.5v1.5H4c2 0 3.5-1 3.5-3z"/><path d="M10 12.5c1-.8 2-.8 3 0M9.5 14.5c1.3-.9 2.7-.9 4 0"/>',
   frameTool: '<rect x="2.5" y="2.5" width="11" height="11" rx="1"/><path d="M2.5 2.5l11 11M13.5 2.5l-11 11"/>',

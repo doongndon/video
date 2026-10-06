@@ -752,6 +752,12 @@ export function installBrushTools(P) {
     const src = doc._histSrc;
     const first = hist.undoStack[0]?.state || doc.capture();
     if (!src) return first;
+    // a snapshot (History panel)
+    if (src.state && !hist.undoStack.includes(src)) {
+      if ([doc.openState, ...(doc.snapshots || []).map((x) => x.state)].includes(src.state)) return src.state;
+      doc._histSrc = null;
+      return first;
+    }
     const i = hist.undoStack.indexOf(src);
     if (i < 0) {
       doc._histSrc = null;

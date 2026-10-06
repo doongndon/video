@@ -320,10 +320,13 @@ export const commands = {
   showPanel: (id) => showPanel(id),
   workspace: (name) => applyWorkspace(name),
   uiScale: (v) => applyUiScale(v),
-  resetLayout: () => {
+  resetLayout: async () => {
     try {
       for (const k of Object.keys(localStorage)) if (k.startsWith('montage.split') || k.startsWith('montage.tab.')) localStorage.removeItem(k);
     } catch { /* storage unavailable */ }
+    // the page reloads: save the latest edits first (the autosave waits a moment after each edit)
+    await saveProjectNow().catch(() => {});
+    await import('./mode.js').then((m) => m.appMode.P?.saveNow?.()).catch(() => {});
     location.reload();
   },
   shortcuts: () => openShortcutsDialog(),

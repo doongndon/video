@@ -109,6 +109,8 @@ export class Stroke {
       this.src = o.srcCanvas || (o.sampleAll ? doc.flatten() : E.layerAsDocCanvas(this.layer, this.base));
       this.srcOff = o.cloneOffset;
     }
+    // symmetry painting (brush, pencil, eraser): every dab is repeated in mirror / around a centre
+    this.sym = mode === 'heal' ? null : E.symmetryTransforms?.() || null;
   }
 
   color() {
@@ -149,6 +151,19 @@ export class Stroke {
   }
 
   stamp(x, y, size) {
+    const T = this.sym;
+    if (!T) return this.stamp1(x, y, size);
+    const d0 = this.dir;
+    for (const t of T) {
+      const [px, py, dd] = t(x, y, d0 || 0);
+      this.dir = dd;
+      this.stamp1(px, py, size);
+    }
+    this.dir = d0;
+    return undefined;
+  }
+
+  stamp1(x, y, size) {
     const lx = x - this.ox;
     const ly = y - this.oy;
     const r = size / 2;

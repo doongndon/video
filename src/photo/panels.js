@@ -1,11 +1,11 @@
 // Photo editor panels: toolbar, tool options bar, layers, colour, properties and history.
 
 import { h, clamp } from '../util.js';
-import { showMenu, toast } from '../ui/common.js';
+import { showMenu, toast, promptDialog } from '../ui/common.js';
 import { icon } from '../ui/icons.js';
 import { openFontPicker } from '../ui/font-picker.js';
 import { fontLabel } from '../fonts.js';
-import { makeCanvas, SHAPES, LAYER_COLORS, FILL_TYPES } from './doc.js';
+import { makeCanvas, SHAPES, LAYER_COLORS, FILL_TYPES, PhotoDoc } from './doc.js';
 import { GRADIENTS, GRADIENT_STYLES, gradientSwatch, listPatterns } from './resources.js';
 import { BLEND_GROUPS, PASS_THROUGH, blendName } from './blend.js';
 import { hasFx, FX_NAMES } from './styles.js';
@@ -269,6 +269,7 @@ export function buildOptionsBar(P) {
     } else if (t.optionButtons) {
       ctrls.push(...t.optionButtons(P).filter(Boolean));
     }
+    if (P.symmetryButton && ['brush', 'pencil', 'eraser', 'mixer'].includes(t.id)) ctrls.push(P.symmetryButton());
     if (P.doc?.active?.mask && ['brush', 'pencil', 'eraser', 'bucket', 'gradient'].includes(t.id)) {
       ctrls.push(h('span.ph-opt.ph-hint', P.editMask ? '◐ 마스크에 칠하는 중 (검정=숨김, 흰색=보임)' : ''));
     }
@@ -852,23 +853,64 @@ export function buildPropertiesPanel(P) {
 // ---------------------------------------------------------------- history
 
 export function buildHistoryPanel(P) {
-  const el = h('div.ph-panel.history', { role: 'list' });
+  const list = h('div.ph-hlist', { role: 'list' });
+  /** Snapshots: states kept by name (Photoshop's History snapshots); the first is the opened state. */
+  const snapshots = (doc) => [
+    ...(doc.openState ? [{ id: 'open', name: '처음 연 상태 (또는 마지막 저장)', state: doc.openState, fixed: true }] : []),
+    ...(doc.snapshots || []),
+  ];
+  let count = 0;
+  P.newSnapshot = async (name) => {
+    const doc = P.doc;
+    if (!doc) return;
+    const n = name ?? (await promptDialog('새 스냅숏', '지금 모습을 이 이름으로 기억합니다 (작업 내역이 넘쳐도 남음)', `스냅숏 ${++count}`));
+    if (n == null) return;
+    doc.snapshots = [...(doc.snapshots || []), { id: `s${Date.now()}${Math.random().toString(36).slice(2, 6)}`, name: n.trim() || `스냅숏 ${count}`, state: doc.capture() }];
+    toast(`스냅숏 "${n.trim() || `스냅숏 ${count}`}"을(를) 만들었습니다`);
+    render();
+  };
+  const toSnapshot = (s) => P.run(`스냅숏으로: ${s.name}`, () => P.doc.restore(s.state));
+  const snapshotToDoc = (s) => {
+    const d = new PhotoDoc({ name: s.name, width: 1, height: 1, background: null });
+    d.restore(s.state);
+    d.name = `${P.doc.name} (${s.name})`;
+    d.saved = false;
+    P.openDoc(d);
+  };
+  P.stateToDoc = () => snapshotToDoc({ name: '복사', state: P.doc.capture() });
   const render = () => {
     const doc = P.doc;
-    el.replaceChildren();
+    list.replaceChildren();
     if (!doc) return;
     const hist = doc.history;
     // the brush mark picks the state the history brush paints back
     const src = (e) => h(`button.ph-hsrc${(doc._histSrc || null) === e ? '.on' : ''}`, { title: '작업 내역 브러시의 원본으로', 'aria-label': '작업 내역 브러시 원본', onclick: () => { doc._histSrc = e; render(); } }, icon('historyBrush', 14));
-    const items = [h('div.ph-hline', src(null), h(`button.ph-hrow${hist.undoStack.length === 0 ? '.on' : ''}`, { onclick: () => { hist.jumpTo(-1); P.afterHistory(); } }, `${doc.name} (처음)`))];
+    const items = snapshots(doc).map((s) => {
+      const row = h('button.ph-hrow.snap', { title: '눌러서 이 모습으로 (실행 취소 가능) · 오른쪽 클릭: 메뉴', onclick: () => toSnapshot(s) }, icon('camera', 14), ` ${s.name}`);
+      row.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        showMenu([
+          { label: '이 모습으로 돌아가기', action: () => toSnapshot(s) },
+          { label: '이 모습으로 새 문서 만들기', action: () => snapshotToDoc(s) },
+          { label: '이름 바꾸기…', disabled: s.fixed, action: async () => { const v = await promptDialog('스냅숏 이름', '이름', s.name); if (v?.trim()) { s.name = v.trim(); render(); } } },
+          { label: '삭제', disabled: s.fixed, action: () => { doc.snapshots = doc.snapshots.filter((x) => x !== s); if (doc._histSrc === s) doc._histSrc = null; render(); } },
+        ], e.clientX, e.clientY);
+      });
+      return h('div.ph-hline', src(s), row);
+    });
+    if (items.length) items.push(h('div.ph-hsep'));
+    items.push(h('div.ph-hline', src(null), h(`button.ph-hrow${hist.undoStack.length === 0 ? '.on' : ''}`, { onclick: () => { hist.jumpTo(-1); P.afterHistory(); } }, `${doc.name} (작업 내역 처음)`)));
     hist.undoStack.forEach((e, i) => items.push(h('div.ph-hline', src(e), h(`button.ph-hrow${i === hist.undoStack.length - 1 ? '.on' : ''}`, { onclick: () => { hist.jumpTo(i); P.afterHistory(); } }, e.label))));
     [...hist.redoStack].reverse().forEach((e, i) => items.push(h('button.ph-hrow.redo', { onclick: () => { for (let k = 0; k <= i; k++) hist.redo(); P.afterHistory(); } }, e.label)));
-    el.append(...items);
-    el.querySelector('.on')?.scrollIntoView({ block: 'nearest' });
+    list.append(...items);
+    list.querySelector('.ph-hrow.on')?.scrollIntoView({ block: 'nearest' });
   };
+  const foot = h('div.ph-hfoot',
+    h('button.small', { title: '지금 모습을 스냅숏으로 기억 (작업 내역이 넘쳐도 남음)', onclick: () => P.newSnapshot() }, icon('camera', 14), ' 새 스냅숏'),
+    h('button.small', { title: '지금 모습으로 새 문서 만들기', onclick: () => (P.doc ? P.stateToDoc() : null) }, icon('plus', 13), ' 새 문서로'));
   P.on('history', render);
   P.on('doc', render);
-  return el;
+  return h('div.ph-panel.history', list, foot);
 }
 
 /** A button showing a gradient; opens the gradient editor. onChange(gradient). */

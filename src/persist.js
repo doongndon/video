@@ -73,6 +73,9 @@ export function initAutosave() {
   store.on('change', () => scheduleSave());
   mediaEvents.on('updated', () => scheduleSave());
   window.addEventListener('beforeunload', () => scheduleSave.flush());
+  // phones may close a page in the background without unloading it: save when it is hidden
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') scheduleSave.flushPending(); });
+  window.addEventListener('pagehide', () => scheduleSave.flushPending());
 }
 
 /** Restore the last session. Returns true if a project was restored. */

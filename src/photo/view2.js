@@ -300,6 +300,11 @@ export function installViewExtras(P, { stage }) {
   // ---------------------------------------------------------------- guide dragging
   let drag = null;
   const local = (e) => {
+    // the stage's own coordinates (also when the view is turned with Rotate View)
+    if (P.logicalPoint) {
+      const [x, y] = P.logicalPoint(e.clientX, e.clientY);
+      return { x, y };
+    }
     const r = stage.getBoundingClientRect();
     return { x: e.clientX - r.left, y: e.clientY - r.top };
   };
