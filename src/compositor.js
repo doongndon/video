@@ -103,6 +103,38 @@ function sizeCanvas(c, w, h) {
   return c.getContext('2d');
 }
 
+// Big still images (a phone photo is 12 MP) also keep halved copies: drawing the copy just larger than
+// the size on screen is far cheaper than shrinking the original every frame, and smoother too.
+const MIPS = new WeakMap();
+function mip(img, px) {
+  if (!(px > 0) || !img || !('naturalWidth' in img)) return img; // still images only, not video frames
+  let w = img.naturalWidth;
+  let h = img.naturalHeight;
+  if (w * h < 4e6 || w < px * 2) return img;
+  let chain = MIPS.get(img);
+  if (!chain) MIPS.set(img, (chain = []));
+  let level = img;
+  for (let i = 0; Math.floor(w / 2) >= px; i++) {
+    w = Math.floor(w / 2);
+    h = Math.max(1, Math.floor(h / 2));
+    if (!chain[i]) {
+      const c = makeCanvas(w, h);
+      const g = c.getContext('2d');
+      g.imageSmoothingQuality = 'high';
+      g.drawImage(level, 0, 0, w, h);
+      chain[i] = c;
+    }
+    level = chain[i];
+  }
+  return level;
+}
+
+/** On-screen width in pixels of something w units wide drawn with ctx's current transform. */
+const onScreenWidth = (ctx, w) => {
+  const m = ctx.getTransform();
+  return Math.hypot(m.a, m.b) * w;
+};
+
 function hexToRgb(hex) {
   const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})/i.exec(hex || '#000000');
   return m ? [parseInt(m[1], 16), parseInt(m[2], 16), parseInt(m[3], 16)] : [0, 0, 0];
@@ -547,7 +579,7 @@ export class Compositor {
         const dw = src.w * cover;
         const dh = src.h * cover;
         if (fill.blur > 0.3) ctx.filter = `blur(${fill.blur * this.scale}px)`;
-        ctx.drawImage(img, (W - dw) / 2, (H - dh) / 2, dw, dh);
+        ctx.drawImage(img === src.img ? mip(img, onScreenWidth(ctx, dw)) : img, (W - dw) / 2, (H - dh) / 2, dw, dh);
         ctx.filter = 'none';
         if (fill.dim > 0) {
           ctx.fillStyle = `rgba(0,0,0,${clamp(fill.dim / 100, 0, 1)})`;
@@ -601,6 +633,7 @@ export class Compositor {
         ctx.translate(corr.x, corr.y);
       }
     }
+    if (img === src.img) img = mip(img, onScreenWidth(ctx, src.w));
     ctx.drawImage(img, -src.w / 2, -src.h / 2, src.w, src.h);
     ctx.restore();
   }
@@ -612,7 +645,7 @@ export class Compositor {
     let cur = this.stageA;
     let alt = this.stageB;
     let cctx = sizeCanvas(cur, w, h);
-    cctx.drawImage(src.img, 0, 0, w, h);
+    cctx.drawImage(mip(src.img, w), 0, 0, w, h);
     let filters = [];
 
     const flushFilters = () => {

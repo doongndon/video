@@ -406,15 +406,12 @@ export async function decodeAudioRange(id, start, end) {
   return out;
 }
 
-/** Create a frame reader for exact, sequential frame access during export. */
-export async function createFrameReader(id, width, height) {
-  const rt = getRuntime(id);
-  const input = getInput(rt);
-  const vt = await input.getPrimaryVideoTrack();
+/** The decodable video track of a media item, its first timestamp, and whether it is stored upright. */
+export async function openVideoTrack(id) {
+  const vt = await getInput(getRuntime(id)).getPrimaryVideoTrack();
   if (!vt || !(await vt.canDecode())) throw new Error('video not decodable via WebCodecs');
-  const first = await vt.getFirstTimestamp();
-  const sink = new MB.CanvasSink(vt, { width, height, fit: 'contain', poolSize: 0 });
-  return { sink, first };
+  const [first, rotation, flip] = await Promise.all([vt.getFirstTimestamp(), vt.getRotation(), vt.getFlip()]);
+  return { vt, first, upright: !rotation && !flip };
 }
 
 /**

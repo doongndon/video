@@ -5,7 +5,7 @@ import * as MB from '../vendor/mediabunny/mediabunny.min.mjs';
 import { store } from './store.js';
 import { playback, audioTransitionGain } from './playback.js';
 import { Compositor } from './compositor.js';
-import { createFrameReader, decodeAudioRange, getRuntime, mediaStatus, mediaUrl } from './media.js';
+import { decodeAudioRange, getRuntime, mediaStatus, mediaUrl, openVideoTrack } from './media.js';
 import {
   audioTracks, clipEnd, clipsOnTrack, evalEffect, mediaTimeAt, sequenceDuration, transitionExtents, videoTracks, hasSpeedRamp,
 } from './model.js';
@@ -47,6 +47,32 @@ export function exportRange(which) {
 
 // ---------------------------------------------------------------- frame provider
 
+// Decoded frames as drawables {img, w, h, fit, ts, close}. Upright video hands the decoder's frames
+// straight to the compositor (no copy per frame); rotated (phone portrait) or much larger video is
+// drawn upright and smaller into a few reused canvases.
+function frameSource(vt, first, m) {
+  const sink = new MB.VideoSampleSink(vt);
+  const wrap = (s) => {
+    if (!s) return null;
+    try {
+      const f = s.toVideoFrame();
+      return { img: f, w: m.width, h: m.height, fit: true, ts: s.timestamp - first, close: () => f.close() };
+    } finally {
+      s.close();
+    }
+  };
+  return { from: (t) => sink.samples(t + first), wrap, at: async (t) => wrap(await sink.getSample(t + first)) };
+}
+
+function canvasSource(vt, first, m, width) {
+  const height = width ? Math.round((width * m.height) / m.width) : undefined;
+  // the current frame, the next one and the one being drawn are never overwritten with a pool of 4
+  const sink = new MB.CanvasSink(vt, { width, height, fit: 'contain', poolSize: 4 });
+  const wrap = (wc) => (wc ? { img: wc.canvas, w: m.width, h: m.height, fit: true, ts: wc.timestamp - first, close() {} } : null);
+  return { from: (t) => sink.canvases(t + first), wrap, at: async (t) => wrap(await sink.getCanvas(t + first)) };
+}
+
+
 class ExportProvider {
   constructor(outW) {
     this.outW = outW;
@@ -80,8 +106,19 @@ class ExportProvider {
 
   /** Decode the exact frame of every visible video clip (recursing into nested sequences). */
   async prepare(seq, t, prefix = '', depth = 0, angle = null) {
-    if (depth === 0) this.frames.clear();
-    if (depth > 8) return;
+    if (depth === 0) {
+      this.frames.clear();
+      this.used = new Set();
+      await this.prepare(seq, t, prefix, 1, angle);
+      // a clip that is no longer on screen does not come back in a sequential pass: free its decoder
+      for (const [key, r] of this.readers) {
+        if (this.used.has(key)) continue;
+        this.readers.delete(key);
+        try { await r.close(); } catch { /* ignore */ }
+      }
+      return;
+    }
+    if (depth > 9) return;
     const vts = videoTracks(seq);
     for (const [i, tr] of vts.entries()) {
       // a multicam source only shows its active angle (hidden flags do not apply there)
@@ -106,6 +143,7 @@ class ExportProvider {
   }
 
   async frameAt(clip, m, mt, key) {
+    this.used?.add(key);
     let r = this.readers.get(key);
     if (!r) {
       r = await this.open(clip, m, mt);
@@ -116,34 +154,52 @@ class ExportProvider {
 
   async open(clip, m, mt) {
     try {
-      const width = m.width > this.outW * 2 ? this.outW * 2 : undefined;
-      const { sink, first } = await createFrameReader(clip.mediaId, width, width ? Math.round((width * m.height) / m.width) : undefined);
-      const wrap = (wc) => (wc ? { img: wc.canvas, w: m.width, h: m.height, fit: true, ts: wc.timestamp - first } : null);
+      const { vt, first, upright } = await openVideoTrack(clip.mediaId);
+      // a source much larger than the output is shrunk by the sink (with mipmaps, so it stays smooth)
+      const shrink = m.width > this.outW * 2 ? this.outW * 2 : undefined;
+      const src = upright && !shrink && typeof VideoFrame !== 'undefined' ? frameSource(vt, first, m) : canvasSource(vt, first, m, shrink);
       if (clip.reverse) {
-        return { get: async (t) => wrap(await sink.getCanvas(t + first)), close() {} };
+        let held = null;
+        return {
+          async get(t) {
+            const f = await src.at(t);
+            held?.close();
+            held = f;
+            return f;
+          },
+          close() {
+            held?.close();
+          },
+        };
       }
-      let iter = sink.canvases(Math.max(0, mt) + first);
-      let cur = wrap((await iter.next()).value);
-      let next = wrap((await iter.next()).value);
+      let iter = src.from(Math.max(0, mt));
+      const pull = async () => src.wrap((await iter.next()).value);
+      let cur = await pull();
+      let next = await pull();
       let lastT = mt;
       return {
         async get(t) {
           // went backwards, or jumped far ahead (sparse sampling): restart the iterator there
           if (t < lastT - 1e-3 || (cur && t < cur.ts - 1e-3) || (cur && t - cur.ts > 1)) {
             await iter.return?.();
-            iter = sink.canvases(Math.max(0, t) + first);
-            cur = wrap((await iter.next()).value);
-            next = wrap((await iter.next()).value);
+            cur?.close();
+            next?.close();
+            iter = src.from(Math.max(0, t));
+            cur = await pull();
+            next = await pull();
           }
           lastT = t;
           while (next && next.ts <= t + 1e-4) {
+            cur?.close();
             cur = next;
-            next = wrap((await iter.next()).value);
+            next = await pull();
           }
           return cur;
         },
         async close() {
           await iter.return?.();
+          cur?.close();
+          next?.close();
         },
       };
     } catch (err) {
@@ -357,6 +413,15 @@ export function encodeWav(buffer) {
 
 // ---------------------------------------------------------------- main export
 
+/** Let the page update (progress bar) without a timer: timers are slowed down in background tabs. */
+function yieldToPage() {
+  return new Promise((resolve) => {
+    const ch = new MessageChannel();
+    ch.port1.onmessage = () => resolve();
+    ch.port2.postMessage(0);
+  });
+}
+
 /** Make sure every web font used by text clips is loaded before frames are rendered. */
 export async function preloadFonts(seq) {
   if (!document.fonts) return;
@@ -438,13 +503,21 @@ export async function exportSequence(opts) {
     const sr = mix?.sampleRate || 48000;
     let audioPos = 0;
     const started = performance.now();
+    let shown = 0;
     try {
+      await provider.prepare(seq, start);
       for (let i = 0; i < total; i++) {
         if (token.cancelled) throw new Error('내보내기를 취소했습니다');
         const t = start + i / fps;
-        await provider.prepare(seq, t);
         compositor.render(ctx, seq, t, provider, { scale: outW / seq.width });
-        await videoSource.add(i / fps, 1 / fps);
+        // add() takes its copy of the canvas right away, so the next frame is decoded while this one
+        // is being encoded
+        const added = videoSource.add(i / fps, 1 / fps);
+        const nextReady = i + 1 < total ? provider.prepare(seq, start + (i + 1) / fps) : null;
+        // wait for both before reacting to a failure, so nothing is still decoding while the export stops
+        const [enc, dec] = await Promise.allSettled([added, nextReady]);
+        if (enc.status === 'rejected') throw enc.reason;
+        if (dec.status === 'rejected') throw dec.reason;
         // feed audio up to one second ahead of video
         if (audioSource && mix) {
           const want = Math.min(mix.length, Math.ceil(((i + 1) / fps + 1) * sr));
@@ -453,11 +526,13 @@ export async function exportSequence(opts) {
             audioPos = want;
           }
         }
-        if (i % 3 === 0 || i === total - 1) {
-          const elapsed = (performance.now() - started) / 1000;
+        const now = performance.now();
+        if (now - shown > 120 || i === total - 1) {
+          shown = now;
+          const elapsed = (now - started) / 1000;
           const eta = (elapsed / (i + 1)) * (total - i - 1);
           progress(0.05 + 0.93 * ((i + 1) / total), `프레임 ${i + 1} / ${total} · 약 ${Math.ceil(eta)}초 남음`);
-          await new Promise((r) => setTimeout(r, 0));
+          await yieldToPage();
         }
       }
       if (audioSource && mix && audioPos < mix.length) await audioSource.add(sliceBuffer(mix, audioPos, mix.length));
