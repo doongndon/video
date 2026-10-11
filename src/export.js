@@ -462,6 +462,9 @@ export async function exportSequence(opts) {
   const token = opts.token || { cancelled: false };
   const progress = opts.onProgress || (() => {});
   playback.suspend(true);
+  // keep the phone screen on: a sleeping screen pauses the page and the export with it
+  let wakeLock = null;
+  try { wakeLock = await navigator.wakeLock?.request('screen'); } catch { /* not offered here */ }
   // files whose sound this browser cannot decode: exported silent and reported (name → reason)
   const skipped = new Map();
   const warnings = () => [...skipped].map(([name, why]) => `${name}: ${why}`);
@@ -566,6 +569,7 @@ export async function exportSequence(opts) {
     progress(1, '완료');
     return { blob, info: `${outW}×${outH} @ ${fps} fps · ${videoCodec.toUpperCase()}${audioCodec ? ' + ' + audioCodec.toUpperCase() : ''}`, warnings: warnings() };
   } finally {
+    wakeLock?.release().catch(() => {});
     releaseSoundCapture();
     playback.suspend(false);
     playback.requestRender();

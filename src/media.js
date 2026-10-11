@@ -484,6 +484,7 @@ const CAPTURE_WORKLET = `registerProcessor('montage-capture', class extends Audi
 });`;
 let capturePrep = null;
 let captureLatency = 0.05;
+const CAPTURE_PARTS = 4;
 
 /** A short silent WAV, played once so the tap that starts an export unlocks the capture element. */
 function silentWav() {
@@ -501,18 +502,23 @@ function silentWav() {
 
 /**
  * Call synchronously from the tap/click that starts an export: phone browsers (in-app ones especially)
- * only let audio and media start from a user gesture.
+ * only let audio and media start from a user gesture. Several players are unlocked so long sound can
+ * be recorded in parallel parts.
  */
 export function prepareSoundCapture() {
   if (capturePrep) return;
   try {
     const ctx = new AudioContext();
     ctx.resume().catch(() => {});
-    const el = document.createElement('audio');
-    el.preload = 'auto';
-    el.src = silentWav();
-    el.play().then(() => el.pause()).catch(() => {});
-    capturePrep = { ctx, el, source: null, worklet: null, ranges: new Map() };
+    const wav = silentWav();
+    const slots = Array.from({ length: CAPTURE_PARTS }, () => {
+      const el = document.createElement('audio');
+      el.preload = 'auto';
+      el.src = wav;
+      el.play().then(() => el.pause()).catch(() => {});
+      return { el, source: null };
+    });
+    capturePrep = { ctx, slots, worklet: null, ranges: new Map() };
   } catch (err) {
     console.warn('sound capture unavailable', err);
   }
@@ -522,8 +528,10 @@ export function releaseSoundCapture() {
   const p = capturePrep;
   capturePrep = null;
   if (!p) return;
-  p.el.pause();
-  p.el.removeAttribute('src');
+  for (const { el } of p.slots) {
+    el.pause();
+    el.removeAttribute('src');
+  }
   p.ctx.close().catch(() => {});
 }
 
@@ -546,14 +554,53 @@ async function capturedRange(id, start, end, onCapture) {
   return buf;
 }
 
+/**
+ * Record [start, end) of a file while it plays. Long ranges are split into parts recorded at the same
+ * time by separate players (each lined up on its own), then joined with a short crossfade.
+ */
 async function captureAudioRange(p, id, start, end, onCapture = () => {}) {
-  const { ctx, el } = p;
+  const { ctx } = p;
   if (!p.worklet) {
     p.worklet = URL.createObjectURL(new Blob([CAPTURE_WORKLET], { type: 'text/javascript' }));
     await ctx.audioWorklet.addModule(p.worklet);
   }
   await ctx.resume();
   if (ctx.state !== 'running') throw new Error('audio context did not start');
+  const dur = end - start;
+  const k = Math.max(1, Math.min(p.slots.length, Math.ceil(dur / 15)));
+  const step = dur / k;
+  const OVERLAP = 0.2;
+  const parts = Array.from({ length: k }, (_, i) => ({ s: start + i * step, e: i === k - 1 ? end : start + (i + 1) * step + OVERLAP }));
+  const progress = new Array(k).fill(0);
+  const report = () => onCapture(Math.min(dur, progress.reduce((x, y) => x + y, 0)), dur);
+  const bufs = await Promise.all(parts.map((pt, i) => recordPart(p, p.slots[i], id, pt.s, pt.e, (sec) => {
+    progress[i] = Math.min(sec, pt.e - pt.s);
+    report();
+  })));
+  const sr = ctx.sampleRate;
+  const out = new AudioBuffer({ length: Math.max(1, Math.round(dur * sr)), numberOfChannels: 2, sampleRate: sr });
+  const fade = Math.round(0.01 * sr);
+  for (let c = 0; c < 2; c++) {
+    const o = out.getChannelData(c);
+    bufs.forEach((b, i) => {
+      const at = Math.round((parts[i].s - start) * sr);
+      const src = b.getChannelData(c).subarray(0, Math.max(0, o.length - at));
+      if (i === 0) {
+        o.set(src, at);
+        return;
+      }
+      // the previous part runs OVERLAP past this boundary: fade across the first few ms
+      const f = Math.min(fade, src.length);
+      for (let j = 0; j < f; j++) o[at + j] = o[at + j] * (1 - j / f) + src[j] * (j / f);
+      o.set(src.subarray(f), at + f);
+    });
+  }
+  return out;
+}
+
+async function recordPart(p, slot, id, start, end, onSec) {
+  const { ctx } = p;
+  const { el } = slot;
   el.pause();
   el.muted = false;
   el.volume = 1;
@@ -562,11 +609,11 @@ async function captureAudioRange(p, id, start, end, onCapture = () => {}) {
   if (!(await once(el, 'loadedmetadata', 20000))) throw new Error('media did not load');
   el.currentTime = start;
   if ((Math.abs(el.currentTime - start) > 1e-3 || el.seeking) && !(await once(el, 'seeked', 15000))) throw new Error('seek failed');
-  if (!p.source) p.source = ctx.createMediaElementSource(el);
+  if (!slot.source) slot.source = ctx.createMediaElementSource(el);
   const node = new AudioWorkletNode(ctx, 'montage-capture', { channelCount: 2, channelCountMode: 'explicit' });
   const mute = ctx.createGain();
   mute.gain.value = 0;
-  p.source.connect(node);
+  slot.source.connect(node);
   node.connect(mute).connect(ctx.destination);
   const left = [];
   const right = [];
@@ -582,7 +629,7 @@ async function captureAudioRange(p, id, start, end, onCapture = () => {}) {
     await new Promise((r) => setTimeout(r, 120));
     playAt = n;
     await el.play();
-    // wait for the range to play through; stop if it stalls
+    // wait for the range to play through; stop if it stalls (screen off, app in the background)
     await new Promise((resolve, reject) => {
       let last = el.currentTime;
       let still = 0;
@@ -592,14 +639,14 @@ async function captureAudioRange(p, id, start, end, onCapture = () => {}) {
           last = el.currentTime;
           still = 0;
         } else if ((still += 1) > 150) return reject(new Error('playback stalled'));
-        onCapture(Math.max(0, el.currentTime - start), end - start);
+        onSec(Math.max(0, el.currentTime - start));
         setTimeout(tick, 40);
       };
       tick();
     });
   } finally {
     el.pause();
-    try { p.source.disconnect(node); } catch { /* not connected */ }
+    try { slot.source.disconnect(node); } catch { /* not connected */ }
     node.disconnect();
     node.port.onmessage = null;
   }
