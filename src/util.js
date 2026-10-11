@@ -26,7 +26,8 @@ export function formatTimecode(t, fps) {
   const m = Math.floor(totalSec / 60) % 60;
   const h = Math.floor(totalSec / 3600);
   const p = (n) => String(n).padStart(2, '0');
-  return `${neg ? '-' : ''}${p(h)}:${p(m)}:${p(s)}:${p(f)}`;
+  // 100 fps and up count frames with three digits
+  return `${neg ? '-' : ''}${p(h)}:${p(m)}:${p(s)}:${String(f).padStart(fps > 99.5 ? 3 : 2, '0')}`;
 }
 
 /** Parse "HH:MM:SS:FF", "MM:SS:FF", "SS:FF" or plain frame count into seconds. */

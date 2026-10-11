@@ -142,7 +142,7 @@ const FRAME_PRESETS = [
   ['720x480', 'SD 720×480'],
   ['custom', '직접 입력'],
 ];
-const RATES = [23.976, 24, 25, 29.97, 30, 50, 59.94, 60];
+const RATES = [23.976, 24, 25, 29.97, 30, 50, 59.94, 60, 120];
 
 export function openSequenceSettings() {
   const s = store.seq;
@@ -198,7 +198,7 @@ export function openExportDialog() {
   const range = select([['all', '시퀀스 전체'], ['inout', '시작(In)~끝(Out) 표시 구간']], hasInOut ? 'inout' : 'all');
   const scale = select(SCALE_OPTIONS, '1');
   const quality = select([['very-high', '매우 높음 (파일 큼)'], ['high', '높음 (권장)'], ['medium', '보통'], ['low', '낮음 (파일 작음)']], 'high');
-  const fps = select([['', `시퀀스와 같게 (${s.fps} fps)`], ['60', '60 fps'], ['30', '30 fps'], ['24', '24 fps'], ['15', '15 fps'], ['12', '12 fps'], ['10', '10 fps']], '');
+  const fps = select([['', `시퀀스와 같게 (${s.fps} fps)`], ['120', '120 fps'], ['60', '60 fps'], ['30', '30 fps'], ['24', '24 fps'], ['15', '15 fps'], ['12', '12 fps'], ['10', '10 fps']], '');
   const audio = check(true, '소리 포함');
   const summary = note();
   const warn = h('div.note.warn');
@@ -239,6 +239,9 @@ export function openExportDialog() {
     if (presetId === 'shorts' && s.width >= s.height) warnings.push('지금 시퀀스는 가로 화면입니다. 세로(9:16) 영상이 필요하면 먼저 시퀀스 ▸ 자동 리프레임으로 세로 시퀀스를 만드세요.');
     if (f.gif && (r.end - r.start) * rate > 600) warnings.push('GIF가 600프레임을 넘습니다. 시간이 오래 걸리고 파일이 매우 커질 수 있습니다. 시작/끝 표시로 구간을 줄이는 것을 권장합니다.');
     if (sc > 1.01 && !f.audioOnly && !f.still) warnings.push('원본보다 크게 내보내면 화질이 좋아지지는 않습니다 (확대만 됩니다).');
+    // frames are not invented: above the footage's own rate a video frame is simply shown again
+    const srcFps = Math.max(0, ...Object.values(s.clips).filter((c) => c.kind === 'video').map((c) => store.project.media[c.mediaId]?.fps || 0));
+    if (!f.audioOnly && !f.still && srcFps && rate > srcFps + 0.5) warnings.push(`영상 원본이 ${Math.round(srcFps)} fps라 ${rate} fps로 내보내도 영상 장면은 같은 프레임이 반복됩니다. 글자·스티커·애니메이션 움직임만 ${rate} fps로 그려집니다.`);
     warn.textContent = warnings.join(' ');
     warn.hidden = !warnings.length;
   };
