@@ -204,6 +204,7 @@ export function openExportDialog() {
   const warn = h('div.note.warn');
   const prog = progressBar();
   const status = note('');
+  const silentNote = h('div.note.warn', { hidden: true });
   let presetId = null;
   const presetBtns = EXPORT_PRESETS.map((p) => {
     const b = h('button.preset', { onclick: () => applyPreset(p) }, h('b', p.name), h('small', p.desc));
@@ -261,6 +262,7 @@ export function openExportDialog() {
       warn,
       prog.el,
       status,
+      silentNote,
       note('이 탭 안에서 프레임 단위로 렌더링합니다(WebCodecs). 끝날 때까지 탭을 열어 두세요. MP4(H.264)는 Chrome/Edge를 권장합니다.'),
     ],
     buttons: [
@@ -270,6 +272,7 @@ export function openExportDialog() {
           if (running) return false;
           running = true;
           token.cancelled = false;
+          silentNote.hidden = true;
           const f = FORMATS[format.value];
           const btn = modal.footer.querySelector('button.primary');
           btn.disabled = true;
@@ -296,9 +299,13 @@ export function openExportDialog() {
             const name = `${fileName.value || 'export'}.${f.ext}`;
             prog.set(1);
             status.textContent = `${name} 완성 · ${formatBytes(result.blob.size)} · ${result.info}`;
+            if (result.warnings?.length) {
+              silentNote.textContent = `소리를 풀지 못해 이 파일은 소리 없이 들어갔습니다 — ${result.warnings.join(' / ')}. 다른 브라우저(예: Chrome)에서 내보내면 소리가 들어갈 수 있습니다.`;
+              silentNote.hidden = false;
+            }
             if (await downloadBlob(result.blob, name)) {
               status.textContent = `${name} 저장 · ${formatBytes(result.blob.size)} · ${result.info}`;
-              toast(`${name} 파일을 내보냈습니다`);
+              toast(result.warnings?.length ? `${name} 파일을 내보냈습니다 (일부 소리 빠짐)` : `${name} 파일을 내보냈습니다`);
             }
           } catch (err) {
             console.error(err);

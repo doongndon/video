@@ -235,7 +235,11 @@ class ExportProvider {
 
 // ---------------------------------------------------------------- audio mix
 
-export async function renderAudioMix(seq, start, end, sampleRate = 48000, onProgress = () => {}, depth = 0) {
+/**
+ * Mix the sequence's sound offline. skipped (a Map, optional): a file whose sound cannot be decoded
+ * is left silent and noted there (name → reason) instead of failing the whole mix.
+ */
+export async function renderAudioMix(seq, start, end, sampleRate = 48000, onProgress = () => {}, depth = 0, skipped = null) {
   const length = Math.max(1, Math.ceil((end - start) * sampleRate));
   const ctx = new OfflineAudioContext(2, length, sampleRate);
   try { await loadAudioWorklets(ctx); } catch { /* noise gate passes audio through */ }
@@ -269,9 +273,16 @@ export async function renderAudioMix(seq, start, end, sampleRate = 48000, onProg
     const pad = 0.1;
     const srcStart = Math.max(0, lo - pad);
     const srcEnd = Math.min(mdur, hi + pad);
-    const source = m.kind === 'sequence'
-      ? (depth < 8 && store.project.sequences[m.sequenceId] ? await renderAudioMix(store.project.sequences[m.sequenceId], srcStart, srcEnd, sampleRate, () => {}, depth + 1) : null)
-      : await decodeAudioRange(clip.mediaId, srcStart, srcEnd);
+    let source = null;
+    try {
+      source = m.kind === 'sequence'
+        ? (depth < 8 && store.project.sequences[m.sequenceId] ? await renderAudioMix(store.project.sequences[m.sequenceId], srcStart, srcEnd, sampleRate, () => {}, depth + 1, skipped) : null)
+        : await decodeAudioRange(clip.mediaId, srcStart, srcEnd);
+    } catch (err) {
+      if (!skipped) throw err;
+      console.warn('audio decode failed; the clip stays silent', m.name, err);
+      skipped.set(m.name, err.message || String(err));
+    }
     done++;
     onProgress(done / jobs.length);
     if (!source) continue;
@@ -447,18 +458,21 @@ export async function exportSequence(opts) {
   const token = opts.token || { cancelled: false };
   const progress = opts.onProgress || (() => {});
   playback.suspend(true);
+  // files whose sound this browser cannot decode: exported silent and reported (name → reason)
+  const skipped = new Map();
+  const warnings = () => [...skipped].map(([name, why]) => `${name}: ${why}`);
   try {
     await preloadFonts(seq);
     if (fmt.audioOnly) {
       progress(0, '오디오 믹싱 중');
-      const mix = await renderAudioMix(seq, start, end, 48000, (f) => progress(f * (fmt.codec ? 0.6 : 0.9), '오디오 믹싱 중'));
+      const mix = await renderAudioMix(seq, start, end, 48000, (f) => progress(f * (fmt.codec ? 0.6 : 0.9), '오디오 믹싱 중'), 0, skipped);
       if (fmt.codec) {
         const blob = await encodeAudioBuffer(mix, fmt, (f) => progress(0.6 + 0.39 * f, '소리 압축 중'), token);
         progress(1, '완료');
-        return { blob, info: `${fmt.codec.toUpperCase()} · 48 kHz · 스테레오` };
+        return { blob, info: `${fmt.codec.toUpperCase()} · 48 kHz · 스테레오`, warnings: warnings() };
       }
       progress(1, '완료');
-      return { blob: encodeWav(mix), info: 'PCM 16비트 · 48 kHz · 스테레오' };
+      return { blob: encodeWav(mix), info: 'PCM 16비트 · 48 kHz · 스테레오', warnings: warnings() };
     }
 
     const outW = Math.max(2, Math.round((seq.width * opts.scale) / 2) * 2);
@@ -475,7 +489,7 @@ export async function exportSequence(opts) {
     let mix = null;
     if (audioCodec) {
       progress(0, '오디오 믹싱 중');
-      mix = await renderAudioMix(seq, start, end, 48000, (f) => progress(f * 0.05, '오디오 믹싱 중'));
+      mix = await renderAudioMix(seq, start, end, 48000, (f) => progress(f * 0.05, '오디오 믹싱 중'), 0, skipped);
     }
     if (token.cancelled) throw new Error('내보내기를 취소했습니다');
 
@@ -546,7 +560,7 @@ export async function exportSequence(opts) {
     }
     const blob = new Blob([output.target.buffer], { type: opts.format === 'mp4' ? 'video/mp4' : 'video/webm' });
     progress(1, '완료');
-    return { blob, info: `${outW}×${outH} @ ${fps} fps · ${videoCodec.toUpperCase()}${audioCodec ? ' + ' + audioCodec.toUpperCase() : ''}` };
+    return { blob, info: `${outW}×${outH} @ ${fps} fps · ${videoCodec.toUpperCase()}${audioCodec ? ' + ' + audioCodec.toUpperCase() : ''}`, warnings: warnings() };
   } finally {
     playback.suspend(false);
     playback.requestRender();

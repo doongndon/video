@@ -332,9 +332,7 @@ async function buildPeaks(id) {
   }
   if (!done) {
     if (rt.file.size > 400 * 1024 * 1024) return;
-    const ctx = new OfflineAudioContext(1, 1, 44100);
-    const buf = await ctx.decodeAudioData(await rt.file.arrayBuffer());
-    accumulatePeaks(peaks, buf, 0);
+    accumulatePeaks(peaks, await decodeWholeAudio(rt), 0);
   }
   rt.peaks = { data: peaks, rate: PEAK_RATE };
 }
@@ -393,8 +391,14 @@ export async function decodeAudioRange(id, start, end) {
     console.warn('streamed audio decode failed, falling back to decodeAudioData', err);
   }
   if (!rt.decodedFallback) {
-    const ctx = new OfflineAudioContext(2, 1, 48000);
-    rt.decodedFallback = await ctx.decodeAudioData(await rt.file.arrayBuffer());
+    // a file that failed once is not decoded again for every clip that uses it
+    if (rt.audioDecodeError) throw rt.audioDecodeError;
+    try {
+      rt.decodedFallback = await decodeWholeAudio(rt);
+    } catch (err) {
+      rt.audioDecodeError = new Error(`${await audioCodecName(rt)} 소리를 이 브라우저에서 풀 수 없습니다 (${err.message || err})`);
+      throw rt.audioDecodeError;
+    }
   }
   const full = rt.decodedFallback;
   const sr = full.sampleRate;
@@ -404,6 +408,54 @@ export async function decodeAudioRange(id, start, end) {
   const out = new AudioBuffer({ length: s1 - s0, numberOfChannels: full.numberOfChannels, sampleRate: sr });
   for (let c = 0; c < full.numberOfChannels; c++) out.getChannelData(c).set(full.getChannelData(c).subarray(s0, s1));
   return out;
+}
+
+/**
+ * The whole sound of a file through the browser's audio decoder. Some browsers (phones especially)
+ * cannot pull the sound out of a large video file: then the sound track alone is copied into a small
+ * file of its own (packets copied, not re-encoded) and that is decoded instead.
+ */
+async function decodeWholeAudio(rt) {
+  const ctx = new OfflineAudioContext(2, 1, 48000);
+  try {
+    return await ctx.decodeAudioData(await rt.file.arrayBuffer());
+  } catch (err) {
+    const audioOnly = await soundTrackFile(rt).catch((e) => {
+      console.warn('copying the sound track failed', e);
+      return null;
+    });
+    if (!audioOnly) throw err;
+    return ctx.decodeAudioData(audioOnly);
+  }
+}
+
+async function soundTrackFile(rt) {
+  const input = new MB.Input({ source: new MB.BlobSource(rt.file), formats: MB.ALL_FORMATS });
+  try {
+    const at = await input.getPrimaryAudioTrack();
+    if (!at) return null;
+    const formats = [new MB.Mp4OutputFormat(), new MB.WebMOutputFormat(), new MB.OggOutputFormat(), new MB.Mp3OutputFormat(), new MB.AdtsOutputFormat()];
+    const format = formats.find((f) => f.getSupportedAudioCodecs().includes(at.codec));
+    if (!format) return null;
+    const output = new MB.Output({ format, target: new MB.BufferTarget() });
+    const conv = await MB.Conversion.init({ input, output, video: { discard: true }, showWarnings: false });
+    if (!conv.isValid || !conv.utilizedTracks.some((t) => t.type === 'audio')) return null;
+    await conv.execute();
+    return output.target.buffer;
+  } finally {
+    input.dispose?.();
+  }
+}
+
+/** A readable name for a file's sound codec, for messages. */
+async function audioCodecName(rt) {
+  try {
+    const at = await getInput(rt).getPrimaryAudioTrack();
+    const names = { aac: 'AAC', opus: 'Opus', mp3: 'MP3', vorbis: 'Vorbis', flac: 'FLAC', ac3: 'AC-3(돌비)', eac3: 'E-AC-3(돌비)', alaw: 'A-law', ulaw: 'μ-law' };
+    return names[at?.codec] || (at?.codec ? at.codec.toUpperCase() : '알 수 없는 형식의');
+  } catch {
+    return '이 파일의';
+  }
 }
 
 /** The decodable video track of a media item, its first timestamp, and whether it is stored upright. */
