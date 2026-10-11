@@ -6,7 +6,7 @@ import * as edit from '../edit.js';
 import { h, formatTimecode, parseTimecode, formatBytes, downloadBlob, clamp } from '../util.js';
 import { openModal, formRow, toast, showPanel } from './common.js';
 import { FORMATS, EXPORT_PRESETS, exportRange, exportSequence, exportFrame } from '../export.js';
-import { createSyntheticMedia, detectScenes, mediaStatus, getRuntime, audioSyncOffsets, AUDIO_FILE_FORMATS, audioFileFormatSupport, extractAudioFile, importFiles } from '../media.js';
+import { createSyntheticMedia, detectScenes, mediaStatus, getRuntime, audioSyncOffsets, AUDIO_FILE_FORMATS, audioFileFormatSupport, extractAudioFile, importFiles, prepareSoundCapture } from '../media.js';
 import { clipEnd, clipsOnTrack, videoTracks, audioTracks, isTimed, hasSpeedRamp, sourceOut } from '../model.js';
 import { ASR_MODELS, ASR_LANGUAGES, transcribeSequence, createCaptionTrack, stripSoundTags, splitCues } from '../captions.js';
 import { geminiSettings, transcribeWithGemini } from '../ai.js';
@@ -273,6 +273,8 @@ export function openExportDialog() {
           running = true;
           token.cancelled = false;
           silentNote.hidden = true;
+          // must run inside the tap: phone browsers only start audio/media from a gesture
+          if (audio.box.checked) prepareSoundCapture();
           const f = FORMATS[format.value];
           const btn = modal.footer.querySelector('button.primary');
           btn.disabled = true;

@@ -364,7 +364,7 @@ function accumulatePeaks(peaks, buffer, timestamp) {
  * Decode the audio of a media item between [start, end) media-seconds into one AudioBuffer.
  * Returns null when the media has no audio.
  */
-export async function decodeAudioRange(id, start, end) {
+export async function decodeAudioRange(id, start, end, { capture = false, onCapture } = {}) {
   const rt = getRuntime(id);
   start = Math.max(0, start);
   if (end <= start) return null;
@@ -392,12 +392,23 @@ export async function decodeAudioRange(id, start, end) {
   }
   if (!rt.decodedFallback) {
     // a file that failed once is not decoded again for every clip that uses it
-    if (rt.audioDecodeError) throw rt.audioDecodeError;
-    try {
-      rt.decodedFallback = await decodeWholeAudio(rt);
-    } catch (err) {
-      rt.audioDecodeError = new Error(`${await audioCodecName(rt)} 소리를 이 브라우저에서 풀 수 없습니다 (${err.message || err})`);
-      throw rt.audioDecodeError;
+    if (!rt.audioDecodeError) {
+      try {
+        rt.decodedFallback = await decodeWholeAudio(rt);
+      } catch (err) {
+        rt.audioDecodeError = new Error(`${await audioCodecName(rt)} 소리를 이 브라우저에서 풀 수 없습니다 (${err.message || err})`);
+      }
+    }
+    if (!rt.decodedFallback) {
+      if (!capture || rt.captureFailed) throw rt.audioDecodeError;
+      // the browser can still play it: record the range while it plays (real time)
+      try {
+        return await capturedRange(id, start, end, onCapture);
+      } catch (err) {
+        console.warn('capturing the sound by playing it failed', err);
+        rt.captureFailed = true;
+        throw rt.audioDecodeError;
+      }
     }
   }
   const full = rt.decodedFallback;
@@ -456,6 +467,164 @@ async function audioCodecName(rt) {
   } catch {
     return '이 파일의';
   }
+}
+
+// ---------------------------------------------------------------- sound by playing (last resort)
+// Some browsers (seen in an Android in-app browser) play a file's sound but neither WebCodecs nor
+// decodeAudioData can decode it. Then the range is played through a hidden media element into Web Audio
+// and recorded on the audio thread. Lined up by the first sample after the seek, the sound lands
+// within a few milliseconds of where decoding puts it. It takes as long as the sound itself.
+
+const CAPTURE_WORKLET = `registerProcessor('montage-capture', class extends AudioWorkletProcessor {
+  process(inputs) {
+    const i = inputs[0];
+    this.port.postMessage(i && i.length ? [i[0].slice(), (i[1] || i[0]).slice()] : null);
+    return true;
+  }
+});`;
+let capturePrep = null;
+let captureLatency = 0.05;
+
+/** A short silent WAV, played once so the tap that starts an export unlocks the capture element. */
+function silentWav() {
+  const n = 800;
+  const b = new Uint8Array(44 + n * 2);
+  const v = new DataView(b.buffer);
+  const w = (o, str) => [...str].forEach((ch, i) => v.setUint8(o + i, ch.charCodeAt(0)));
+  w(0, 'RIFF'); v.setUint32(4, 36 + n * 2, true); w(8, 'WAVE'); w(12, 'fmt ');
+  v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true); v.setUint32(24, 8000, true);
+  v.setUint32(28, 16000, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true); w(36, 'data'); v.setUint32(40, n * 2, true);
+  let bin = '';
+  for (const x of b) bin += String.fromCharCode(x);
+  return `data:audio/wav;base64,${btoa(bin)}`;
+}
+
+/**
+ * Call synchronously from the tap/click that starts an export: phone browsers (in-app ones especially)
+ * only let audio and media start from a user gesture.
+ */
+export function prepareSoundCapture() {
+  if (capturePrep) return;
+  try {
+    const ctx = new AudioContext();
+    ctx.resume().catch(() => {});
+    const el = document.createElement('audio');
+    el.preload = 'auto';
+    el.src = silentWav();
+    el.play().then(() => el.pause()).catch(() => {});
+    capturePrep = { ctx, el, source: null, worklet: null, ranges: new Map() };
+  } catch (err) {
+    console.warn('sound capture unavailable', err);
+  }
+}
+
+export function releaseSoundCapture() {
+  const p = capturePrep;
+  capturePrep = null;
+  if (!p) return;
+  p.el.pause();
+  p.el.removeAttribute('src');
+  p.ctx.close().catch(() => {});
+}
+
+async function capturedRange(id, start, end, onCapture) {
+  if (!capturePrep) prepareSoundCapture();
+  const p = capturePrep;
+  if (!p) throw new Error('no audio context');
+  // the same range again (several clips of one file): slice what was recorded
+  for (const [key, buf] of p.ranges) {
+    const [mid, s0, s1] = key.split('|');
+    if (mid !== id || +s0 > start + 1e-6 || +s1 < end - 1e-6) continue;
+    const sr = buf.sampleRate;
+    const a = Math.round((start - s0) * sr);
+    const out = new AudioBuffer({ length: Math.max(1, Math.round((end - start) * sr)), numberOfChannels: buf.numberOfChannels, sampleRate: sr });
+    for (let c = 0; c < buf.numberOfChannels; c++) out.getChannelData(c).set(buf.getChannelData(c).subarray(a, a + out.length));
+    return out;
+  }
+  const buf = await captureAudioRange(p, id, start, end, onCapture);
+  p.ranges.set(`${id}|${start}|${end}`, buf);
+  return buf;
+}
+
+async function captureAudioRange(p, id, start, end, onCapture = () => {}) {
+  const { ctx, el } = p;
+  if (!p.worklet) {
+    p.worklet = URL.createObjectURL(new Blob([CAPTURE_WORKLET], { type: 'text/javascript' }));
+    await ctx.audioWorklet.addModule(p.worklet);
+  }
+  await ctx.resume();
+  if (ctx.state !== 'running') throw new Error('audio context did not start');
+  el.pause();
+  el.muted = false;
+  el.volume = 1;
+  el.playbackRate = 1;
+  el.src = mediaUrl(id);
+  if (!(await once(el, 'loadedmetadata', 20000))) throw new Error('media did not load');
+  el.currentTime = start;
+  if ((Math.abs(el.currentTime - start) > 1e-3 || el.seeking) && !(await once(el, 'seeked', 15000))) throw new Error('seek failed');
+  if (!p.source) p.source = ctx.createMediaElementSource(el);
+  const node = new AudioWorkletNode(ctx, 'montage-capture', { channelCount: 2, channelCountMode: 'explicit' });
+  const mute = ctx.createGain();
+  mute.gain.value = 0;
+  p.source.connect(node);
+  node.connect(mute).connect(ctx.destination);
+  const left = [];
+  const right = [];
+  let n = 0;
+  let playAt = -1;
+  node.port.onmessage = (e) => {
+    const d = e.data || [new Float32Array(128), new Float32Array(128)];
+    left.push(d[0]);
+    right.push(d[1]);
+    n += d[0].length;
+  };
+  try {
+    await new Promise((r) => setTimeout(r, 120));
+    playAt = n;
+    await el.play();
+    // wait for the range to play through; stop if it stalls
+    await new Promise((resolve, reject) => {
+      let last = el.currentTime;
+      let still = 0;
+      const tick = () => {
+        if (el.currentTime >= end + 0.25 || el.ended) return resolve();
+        if (el.currentTime > last) {
+          last = el.currentTime;
+          still = 0;
+        } else if ((still += 1) > 150) return reject(new Error('playback stalled'));
+        onCapture(Math.max(0, el.currentTime - start), end - start);
+        setTimeout(tick, 40);
+      };
+      tick();
+    });
+  } finally {
+    el.pause();
+    try { p.source.disconnect(node); } catch { /* not connected */ }
+    node.disconnect();
+    node.port.onmessage = null;
+  }
+  await new Promise((r) => setTimeout(r, 30));
+  const sr = ctx.sampleRate;
+  const L = new Float32Array(n);
+  const R = new Float32Array(n);
+  let o = 0;
+  for (let i = 0; i < left.length; i++) {
+    L.set(left[i], o);
+    R.set(right[i], o);
+    o += left[i].length;
+  }
+  // the first sample after the seek is media time `start`. If the file is digitally silent there, use
+  // the start-up delay seen on earlier captures instead
+  let k0 = Math.max(0, playAt);
+  while (k0 < n && Math.abs(L[k0]) < 1e-6 && Math.abs(R[k0]) < 1e-6) k0++;
+  if (k0 >= n) throw new Error('no sound recorded');
+  if ((k0 - playAt) / sr > 0.6) k0 = playAt + Math.round(captureLatency * sr);
+  else captureLatency = (k0 - playAt) / sr;
+  const len = Math.max(1, Math.round((end - start) * sr));
+  const out = new AudioBuffer({ length: len, numberOfChannels: 2, sampleRate: sr });
+  out.getChannelData(0).set(L.subarray(k0, k0 + len));
+  out.getChannelData(1).set(R.subarray(k0, k0 + len));
+  return out;
 }
 
 /** The decodable video track of a media item, its first timestamp, and whether it is stored upright. */

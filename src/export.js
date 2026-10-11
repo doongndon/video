@@ -5,7 +5,7 @@ import * as MB from '../vendor/mediabunny/mediabunny.min.mjs';
 import { store } from './store.js';
 import { playback, audioTransitionGain } from './playback.js';
 import { Compositor } from './compositor.js';
-import { decodeAudioRange, getRuntime, mediaStatus, mediaUrl, openVideoTrack } from './media.js';
+import { decodeAudioRange, getRuntime, mediaStatus, mediaUrl, openVideoTrack, releaseSoundCapture } from './media.js';
 import {
   audioTracks, clipEnd, clipsOnTrack, evalEffect, mediaTimeAt, sequenceDuration, transitionExtents, videoTracks, hasSpeedRamp,
 } from './model.js';
@@ -237,9 +237,10 @@ class ExportProvider {
 
 /**
  * Mix the sequence's sound offline. skipped (a Map, optional): a file whose sound cannot be decoded
- * is left silent and noted there (name → reason) instead of failing the whole mix.
+ * is recorded while it plays (onNote reports that), or left silent and noted there (name → reason)
+ * instead of failing the whole mix.
  */
-export async function renderAudioMix(seq, start, end, sampleRate = 48000, onProgress = () => {}, depth = 0, skipped = null) {
+export async function renderAudioMix(seq, start, end, sampleRate = 48000, onProgress = () => {}, depth = 0, skipped = null, onNote = () => {}) {
   const length = Math.max(1, Math.ceil((end - start) * sampleRate));
   const ctx = new OfflineAudioContext(2, length, sampleRate);
   try { await loadAudioWorklets(ctx); } catch { /* noise gate passes audio through */ }
@@ -276,8 +277,11 @@ export async function renderAudioMix(seq, start, end, sampleRate = 48000, onProg
     let source = null;
     try {
       source = m.kind === 'sequence'
-        ? (depth < 8 && store.project.sequences[m.sequenceId] ? await renderAudioMix(store.project.sequences[m.sequenceId], srcStart, srcEnd, sampleRate, () => {}, depth + 1, skipped) : null)
-        : await decodeAudioRange(clip.mediaId, srcStart, srcEnd);
+        ? (depth < 8 && store.project.sequences[m.sequenceId] ? await renderAudioMix(store.project.sequences[m.sequenceId], srcStart, srcEnd, sampleRate, () => {}, depth + 1, skipped, onNote) : null)
+        : await decodeAudioRange(clip.mediaId, srcStart, srcEnd, {
+          capture: !!skipped,
+          onCapture: (sec, total) => onNote(`소리를 재생하며 받는 중 · ${m.name} ${Math.floor(sec)}/${Math.ceil(total)}초 (이 브라우저는 이 소리를 바로 풀지 못함)`),
+        });
     } catch (err) {
       if (!skipped) throw err;
       console.warn('audio decode failed; the clip stays silent', m.name, err);
@@ -465,7 +469,7 @@ export async function exportSequence(opts) {
     await preloadFonts(seq);
     if (fmt.audioOnly) {
       progress(0, '오디오 믹싱 중');
-      const mix = await renderAudioMix(seq, start, end, 48000, (f) => progress(f * (fmt.codec ? 0.6 : 0.9), '오디오 믹싱 중'), 0, skipped);
+      const mix = await renderAudioMix(seq, start, end, 48000, (f) => progress(f * (fmt.codec ? 0.6 : 0.9), '오디오 믹싱 중'), 0, skipped, (label) => progress(0, label));
       if (fmt.codec) {
         const blob = await encodeAudioBuffer(mix, fmt, (f) => progress(0.6 + 0.39 * f, '소리 압축 중'), token);
         progress(1, '완료');
@@ -489,7 +493,7 @@ export async function exportSequence(opts) {
     let mix = null;
     if (audioCodec) {
       progress(0, '오디오 믹싱 중');
-      mix = await renderAudioMix(seq, start, end, 48000, (f) => progress(f * 0.05, '오디오 믹싱 중'), 0, skipped);
+      mix = await renderAudioMix(seq, start, end, 48000, (f) => progress(f * 0.05, '오디오 믹싱 중'), 0, skipped, (label) => progress(0, label));
     }
     if (token.cancelled) throw new Error('내보내기를 취소했습니다');
 
@@ -562,6 +566,7 @@ export async function exportSequence(opts) {
     progress(1, '완료');
     return { blob, info: `${outW}×${outH} @ ${fps} fps · ${videoCodec.toUpperCase()}${audioCodec ? ' + ' + audioCodec.toUpperCase() : ''}`, warnings: warnings() };
   } finally {
+    releaseSoundCapture();
     playback.suspend(false);
     playback.requestRender();
   }
