@@ -2286,6 +2286,17 @@ function buildMenus(P) {
       { label: '투명 영역 잘라내기 (트리밍)', disabled: no(), action: () => C.trim() },
     ],
     '레이어': () => layerMenuItems(P, mod),
+    // Photoshop's Type menu; modules add to it through P.extendMenus
+    '문자': () => [
+      { label: '패널', submenu: [{ label: '문자 · 단락 패널', action: () => P.showPanel('char') }, { label: '글리프 패널', action: () => P.showPanel('glyphs') }] },
+      '-',
+      { label: '텍스트 뒤틀기…', disabled: P.doc?.active?.type !== 'text', action: () => P.warpText() },
+      { label: '작업 패스 만들기', disabled: P.doc?.active?.type !== 'text', action: () => C.textToPath?.() },
+      { label: '모양으로 변환', disabled: P.doc?.active?.type !== 'text', action: () => C.textToShape?.() },
+      { label: '문자 레이어 래스터화', disabled: P.doc?.active?.type !== 'text', action: () => C.rasterize('layer') },
+      '-',
+      { label: '텍스트 찾기 / 바꾸기…', disabled: no(), action: () => C.findReplace() },
+    ],
     '선택': () => [
       { label: '모두', key: `${mod}A`, disabled: no(), action: () => C.selectAll() },
       { label: '선택 해제', key: `${mod}D`, disabled: !P.doc?.selection, action: () => C.deselect() },
