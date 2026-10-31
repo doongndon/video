@@ -16,7 +16,9 @@ import {
   ASPECTS, setAspect, targetVisualClips, targetAudioClips,
 } from '../features.js';
 import { setAutoKey, keyCurrentPose, jumpKey, deleteKeysHere, setMotionEase, keyTimes } from '../motionkeys.js';
-import { openSilenceCutDialog, openBeatDialog, openSlideshowDialog, openExtractAudioDialog, openAutoCaptionDialog, openDuckingDialog, openSceneDetectDialog } from './dialogs.js';
+import { openSilenceCutDialog, openBeatDialog, openSlideshowDialog, openExtractAudioDialog, openAutoCaptionDialog, openDuckingDialog, openSceneDetectDialog, openRollCrawlDialog } from './dialogs.js';
+import { captionStyleCommand } from './graphics-menu.js';
+import { CAPTION_STYLES } from '../features.js';
 
 export const QUICK_SECTIONS = [
   ['anim', '애니메이션', 'wand'],
@@ -168,7 +170,7 @@ export function createQuickPanel() {
         const ts = c ? keyTimes(c) : [];
         keyList.replaceChildren(...(ts.length
           ? ts.map((k) => {
-            const b = h('button.small', { onclick: () => store.setPlayhead(Math.min(c.start + k, clipEnd(c) - 1e-3)), title: '이 키프레임으로 이동' }, `◆ ${k.toFixed(2)}초`);
+            const b = h('button.small', { onclick: () => store.setPlayhead(Math.min(c.start + k, clipEnd(c) - 1e-3)), title: '이 키프레임으로 이동' }, icon('diamond', 12), ` ${k.toFixed(2)}초`);
             b.classList.toggle('now', Math.abs(k - t) < 0.5 / store.seq.fps);
             return b;
           })
@@ -262,6 +264,16 @@ export function createQuickPanel() {
     text() {
       const tiles = TEXT_STYLES.map((st) => {
         const v = st.v;
+        // the tile previews the look: outline, a second outline (as a ring) and the shadow / glow
+        const shadows = [];
+        if (v.stroke2Rel) {
+          const r = Math.max(1, Math.round((v.strokeRel || 0) * 22 + v.stroke2Rel * 22));
+          for (const [dx, dy] of [[r, 0], [-r, 0], [0, r], [0, -r], [r, r], [-r, -r], [r, -r], [-r, r]]) shadows.push(`${dx * 0.7}px ${dy * 0.7}px 0 ${v.stroke2Color}`);
+        }
+        if (v.shadowOn) {
+          const d = Math.round((v.shadowDistance ?? 8) / 3);
+          shadows.push(`${d}px ${d}px ${Math.max(1, Math.round((v.shadowBlur ?? 12) / 2))}px ${hexA(v.shadowColor || '#000000', (v.shadowOpacity ?? 75) / 100)}`);
+        }
         const sample = h('span.qp-tsample', {
           style: {
             fontFamily: `"${v.font || 'Noto Sans KR'}", "Noto Sans KR", sans-serif`,
@@ -270,6 +282,7 @@ export function createQuickPanel() {
             WebkitTextStroke: v.strokeRel ? `${Math.max(1, Math.round(v.strokeRel * 22))}px ${v.strokeColor}` : '0',
             paintOrder: 'stroke fill',
             fontWeight: v.bold === false ? '400' : '700',
+            textShadow: shadows.join(', ') || 'none',
           },
         }, '가나다 Abc');
         return h('button.qp-style', {
@@ -282,11 +295,14 @@ export function createQuickPanel() {
       });
       return [
         h('div.qp-row',
-          h('button.primary', { onclick: () => { edit.addTextClip(); store.emit('reveal-effect-controls', { focusText: true }); } }, '＋ 텍스트 추가'),
-          h('button', { onclick: () => store.emit('reveal-effect-controls', { focusText: true }) }, '내용·글꼴 편집')),
+          h('button.primary', { onclick: () => { edit.addTextClip(); store.emit('reveal-effect-controls', { focusText: true }); } }, icon('plus'), ' 텍스트 추가'),
+          h('button', { onclick: () => store.emit('reveal-effect-controls', { focusText: true }) }, '내용·글꼴 편집'),
+          h('button', { onclick: () => openRollCrawlDialog(), title: '선택한 텍스트를 위로 올리거나(엔딩 크레딧) 옆으로 흐르게(뉴스 띠)' }, icon('roll'), ' 롤/크롤…')),
         title('글자 스타일 (텍스트 클립 선택 후)'),
         grid(tiles, '.styles'),
-        hint('글꼴은 효과 컨트롤 ▸ 텍스트 ▸ 글꼴에서 74종 중에 고를 수 있습니다. 등장 효과는 "애니메이션"에서 넣으세요.'),
+        title('캡션 스타일 (자막 트랙 전체)'),
+        grid(CAPTION_STYLES.map((st) => h('button.qp-chip', { onclick: () => captionStyleCommand(st.id), title: '선택한 자막이 있는 트랙의 자막 모두에 적용 (선택이 없으면 자막이 가장 많은 트랙)' }, st.name))),
+        hint('글꼴은 효과 컨트롤 ▸ 텍스트 ▸ 글꼴에서 미리 보며 고를 수 있습니다. 등장 효과는 "애니메이션"에서 넣으세요.'),
       ];
     },
 
@@ -384,9 +400,10 @@ export function createQuickPanel() {
       const fade = (edge) => {
         const ids = targetAudioClips();
         if (!ids.length) return needClip('소리 클립');
-        store.transact(edge === 'in' ? '소리 페이드 인' : '소리 페이드 아웃', () => {
-          for (const id of ids) edit.applyTransition(id, edge, 'constantPower', 1);
-        });
+        // one undo step for all the clips
+        const mark = store.undoMark();
+        for (const id of ids) edit.applyTransition(id, edge, 'constantPower', 1);
+        store.squashSince(mark, edge === 'in' ? '소리 페이드 인' : '소리 페이드 아웃');
       };
       const mute = () => {
         const ids = targetAudioClips();
@@ -404,7 +421,7 @@ export function createQuickPanel() {
           h('button', { onclick: mute }, '소리 끄기/켜기')),
         title('목소리 효과'), voiceBtns,
         h('div.qp-row',
-          h('button', { onclick: () => window.montage?.commands.voiceover() }, '🎙 보이스오버 녹음'),
+          h('button', { onclick: () => window.montage?.commands.voiceover() }, icon('mic'), ' 보이스오버 녹음'),
           h('button', { onclick: () => { const c = store.selectedClips().find((x) => x.mediaId); if (c) openExtractAudioDialog({ clipId: c.id }); else toast('영상 클립을 먼저 선택하세요'); } }, '영상에서 소리 추출…'),
           h('button', { onclick: openDuckingDialog }, '자동 더킹…')),
       ];

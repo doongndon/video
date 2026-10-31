@@ -90,8 +90,11 @@ export function parseAco(buf) {
       else if (space === 1) rgb = hsbRgb((w / 65535) * 360, x / 65535, y / 65535);
       else if (space === 2) rgb = cmykRgb(1 - w / 65535, 1 - x / 65535, 1 - y / 65535, 1 - z / 65535);
       else if (space === 7) rgb = labRgb(w / 100, (x << 16 >> 16) / 100, (y << 16 >> 16) / 100);
-      else if (space === 8) rgb = [255 - (w / 10000) * 255, 255 - (w / 10000) * 255, 255 - (w / 10000) * 255].map((v) => 255 - v);
-      else if (space === 9) rgb = cmykRgb(w / 10000, x / 10000, y / 10000, z / 10000);
+      else if (space === 8) {
+        // grayscale is stored as ink (K): 0 = white, 10000 = black
+        const v = 255 * (1 - Math.min(10000, w) / 10000);
+        rgb = [v, v, v];
+      } else if (space === 9) rgb = cmykRgb(w / 10000, x / 10000, y / 10000, z / 10000);
       if (rgb) out.push({ c: rgbHex(...rgb), n: name });
     }
     return out;
@@ -183,11 +186,12 @@ export function acoBytes(colors) {
       u16(b * 257);
       u16(0);
       if (ver === 2) {
-        const nm = s.n || s.c;
+        const nm = (s.n || s.c).slice(0, 1000);
         const len = nm.length + 1;
         u16(0);
         u16(len);
-        for (const ch of nm) u16(ch.charCodeAt(0));
+        // UTF-16 code units, so characters outside the BMP (emoji) keep the length right
+        for (let k = 0; k < nm.length; k++) u16(nm.charCodeAt(k));
         u16(0);
       }
     }
@@ -280,7 +284,7 @@ export function buildSwatchesPanel(P) {
   ], x, y);
   const render = () => {
     list.replaceChildren(...groups.map((g) => {
-      const head = h('div.ph-swhead', { title: '오른쪽 클릭: 그룹 메뉴' }, h('button.ph-twist', { 'aria-expanded': String(!g.closed), onclick: () => { g.closed = !g.closed; save(); render(); } }, g.closed ? '▸' : '▾'), h('span', g.name), h('small', ` ${g.colors.length}`));
+      const head = h('div.ph-swhead', { title: '오른쪽 클릭: 그룹 메뉴' }, h('button.ph-twist', { 'aria-expanded': String(!g.closed), 'aria-label': `${g.name} ${g.closed ? '펼치기' : '접기'}`, onclick: () => { g.closed = !g.closed; save(); render(); } }, icon(g.closed ? 'chevronRight' : 'chevronDown', 12)), h('span', g.name), h('small', ` ${g.colors.length}`));
       onContext(head, (x, y) => groupMenu(g, x, y));
       const grid = g.closed ? null : h('div.ph-swatches', g.colors.map((s) => {
         const b = h('button.ph-swatch', { style: { background: s.c }, title: `${s.n ? `${s.n} · ` : ''}${s.c}\n클릭: 전경색 · Ctrl+클릭: 배경색 · Alt+클릭: 삭제`, 'aria-label': s.n || s.c });
@@ -300,7 +304,7 @@ export function buildSwatchesPanel(P) {
   };
   const bar = h('div.ph-swbar',
     h('button.small', { title: '지금 전경색을 "내 견본"에 추가', onclick: () => { mine().colors.push({ c: P.fg, n: '' }); save(); render(); } }, icon('plus', 13), ' 전경색 추가'),
-    h('button.small', { onclick: (e) => menuAt(e, [8, 12, 16, 24].map((n) => ({ label: `${n}색`, action: () => fromPicture(n) }))) }, '사진에서 색 뽑기 ▾'),
+    h('button.small', { onclick: (e) => menuAt(e, [8, 12, 16, 24].map((n) => ({ label: `${n}색`, action: () => fromPicture(n) }))) }, '사진에서 색 뽑기 ', icon('down', 12)),
     h('button.small', { 'aria-label': '견본 메뉴', onclick: (e) => menuAt(e, [
       { label: '견본 가져오기… (.aco · .ase · .gpl · .txt)', action: importFiles },
       { label: '포토샵 견본으로 내보내기 (.aco)', action: () => exportAs('aco') },
@@ -308,8 +312,10 @@ export function buildSwatchesPanel(P) {
       '-',
       { label: '새 그룹…', action: async () => { const v = await promptDialog('새 견본 그룹', '이름', '새 그룹'); if (v?.trim()) addGroup(v.trim(), []); } },
       { label: '기본 견본으로 되돌리기', action: async () => { if (await confirmDialog('견본 되돌리기', '추가하거나 가져온 견본을 모두 지우고 기본 견본으로 되돌릴까요?')) { groups = DEFAULT_SWATCHES(); save(); render(); } } },
-    ]) }, '⋯'));
+    ]) }, icon('more', 14)));
   render();
+  // the Color Picker's 견본에 추가 (colorpicker.js)
+  P.addSwatch = (c, n = '') => { mine().colors.push({ c, n }); save(); render(); };
   return h('div.ph-panel.swatchesp', bar, list, h('div.note', '클릭: 전경색 · Ctrl+클릭: 배경색 · Alt+클릭: 삭제 · 오른쪽 클릭(길게 누르기): 메뉴'));
 }
 
@@ -376,7 +382,9 @@ export function installGlyphs(P) {
       });
       box.replaceChildren(...[sel, recent.length && !compact ? h('div.ph-sub', '최근') : null, recent.length && !compact ? grid(recent) : null, grid(split(GLYPHS[cat][1]))].filter(Boolean));
     };
-    P.on('glyphs', () => box.isConnected && render());
+    // the panel's grid keeps its "recent" row up to date even while another tab is shown; the small
+    // grid in the text box has no such row and is thrown away when closed (no listener to leak)
+    if (!compact) P.on('glyphs', render);
     render();
     return box;
   };
@@ -479,7 +487,8 @@ export function buildToolPresetsPanel(P) {
     savePref('photo.toolPresets.only', onlyCurrent);
     render();
   });
-  P.on('tool', () => list.isConnected && render());
+  // also while the panel is hidden, so it is right when its tab comes back
+  P.on('tool', () => onlyCurrent && render());
   render();
   return h('div.ph-panel.toolpresetsp',
     h('div.ph-swbar',
@@ -497,8 +506,10 @@ export function buildToolPresetsPanel(P) {
 
 // ---------------------------------------------------------------- timeline (frame animation)
 
-const DELAYS = [[0, '0초'], [0.1, '0.1초'], [0.2, '0.2초'], [0.5, '0.5초'], [1, '1초'], [2, '2초'], [5, '5초'], [10, '10초']];
+const DELAYS = [[0, '지연 없음'], [0.1, '0.1초'], [0.2, '0.2초'], [0.5, '0.5초'], [1, '1초'], [2, '2초'], [5, '5초'], [10, '10초']];
+const LOOPS = [[1, '한 번'], [3, '3번'], [0, '계속']];
 let frameSeq = 0;
+const newFrameId = () => ++frameSeq + Date.now();
 const posOf = (l) => (l.kind === 'smart' ? [l.smart.m[4], l.smart.m[5]] : ['group', 'adjust', 'fill'].includes(l.kind) ? null : [l.x || 0, l.y || 0]);
 
 /** What a frame remembers of every layer: shown, opacity and position. */
@@ -508,27 +519,74 @@ export function snapFrameState(d) {
   return st;
 }
 
+/** Whether two frame states show the layers the same way (layers missing from either are ignored). */
+export function sameFrameState(a, b) {
+  for (const id of Object.keys(a)) {
+    const x = a[id];
+    const y = b[id];
+    if (!y) continue;
+    if (x.v !== y.v || Math.abs(x.o - y.o) > 1e-3) return false;
+    if (x.p && y.p && (Math.abs(x.p[0] - y.p[0]) > 0.5 || Math.abs(x.p[1] - y.p[1]) > 0.5)) return false;
+  }
+  return true;
+}
+
 /** Put the layers the way a frame remembers them (layers made later keep their look). */
 export function applyFrameState(d, st) {
+  // every layer goes to its own remembered place: linked layers must not drag each other along
+  const links = [];
   for (const l of d.layers) {
-    const s = st[l.id];
-    if (!s) continue;
-    let changed = false;
-    if ((l.visible !== false) !== s.v) {
-      l.visible = s.v;
-      changed = true;
-    }
-    if (Math.abs((l.opacity ?? 1) - s.o) > 1e-4) {
-      l.opacity = s.o;
-      changed = true;
-    }
-    const p = posOf(l);
-    if (p && s.p && (Math.abs(p[0] - s.p[0]) > 1e-3 || Math.abs(p[1] - s.p[1]) > 1e-3)) d.translateLayers([l], s.p[0] - p[0], s.p[1] - p[1]);
-    else if (changed) {
-      l._styled = null;
-      d.touch(l);
-    }
+    if (!l.linkId) continue;
+    links.push([l, l.linkId]);
+    l.linkId = null;
   }
+  try {
+    for (const l of d.layers) {
+      const s = st[l.id];
+      if (!s) continue;
+      let changed = false;
+      if ((l.visible !== false) !== s.v) {
+        l.visible = s.v;
+        changed = true;
+      }
+      if (Math.abs((l.opacity ?? 1) - s.o) > 1e-4) {
+        l.opacity = s.o;
+        changed = true;
+      }
+      const p = posOf(l);
+      if (p && s.p && (Math.abs(p[0] - s.p[0]) > 1e-3 || Math.abs(p[1] - s.p[1]) > 1e-3)) d.translateLayers([l], s.p[0] - p[0], s.p[1] - p[1]);
+      else if (changed) {
+        l._styled = null;
+        d.touch(l);
+      }
+    }
+  } finally {
+    for (const [l, id] of links) l.linkId = id;
+  }
+}
+
+/**
+ * The picture a frame shows, at most maxSide pixels on its long side (0: full size). The layers are
+ * put back the way they were (not a history step, the document doesn't count as changed).
+ */
+export function renderFrameCanvas(doc, st, { maxSide = 0, fg, bg } = {}) {
+  const saved = doc.saved;
+  const back = snapFrameState(doc);
+  let full;
+  try {
+    applyFrameState(doc, st);
+    full = doc.flatten({ fg, bg });
+  } finally {
+    applyFrameState(doc, back);
+    doc.saved = saved;
+  }
+  if (!maxSide || Math.max(full.width, full.height) <= maxSide) return full;
+  const k = maxSide / Math.max(full.width, full.height);
+  const c = makeCanvas(Math.max(1, Math.round(full.width * k)), Math.max(1, Math.round(full.height * k)));
+  const g = c.getContext('2d');
+  g.imageSmoothingQuality = 'high';
+  g.drawImage(full, 0, 0, c.width, c.height);
+  return c;
 }
 
 function tweenStates(a, b, t) {
@@ -540,24 +598,84 @@ function tweenStates(a, b, t) {
       out[id] = { ...(x || y) };
       continue;
     }
-    // a layer that appears or disappears fades in or out
+    // a layer that appears or disappears fades in or out; positions stay on whole pixels (sharp)
     const ox = x.v ? x.o : 0;
     const oy = y.v ? y.o : 0;
     const o = ox + (oy - ox) * t;
-    out[id] = { v: x.v || y.v, o: x.v && y.v ? x.o + (y.o - x.o) * t : o, p: x.p && y.p ? [x.p[0] + (y.p[0] - x.p[0]) * t, x.p[1] + (y.p[1] - x.p[1]) * t] : x.p || y.p };
+    out[id] = { v: x.v || y.v, o: x.v && y.v ? x.o + (y.o - x.o) * t : o, p: x.p && y.p ? [Math.round(x.p[0] + (y.p[0] - x.p[0]) * t), Math.round(x.p[1] + (y.p[1] - x.p[1]) * t)] : x.p || y.p };
   }
   return out;
+}
+
+/** One shared palette for all frames (see-through kept), then an animated GIF. */
+function framesToGif(rgba, delays, W, H, loop) {
+  const want = 30000;
+  const per = Math.max(1, Math.floor(want / rgba.length));
+  const s = [];
+  let clear = false;
+  for (const px of rgba) {
+    const stepPx = Math.max(1, Math.floor((W * H) / per));
+    for (let p = 0; p < W * H; p += stepPx) {
+      const i = p * 4;
+      if (px[i + 3] < 128) {
+        clear = true;
+        continue;
+      }
+      s.push(px[i], px[i + 1], px[i + 2]);
+    }
+    if (!clear) for (let p = 0; p < W * H; p += 7) if (px[p * 4 + 3] < 128) { clear = true; break; }
+  }
+  const pal = s.length ? medianCut(new Uint8Array(s), clear ? 255 : 256) : [[0, 0, 0]];
+  const T = clear ? pal.length : -1;
+  const palette = [...pal];
+  if (clear) palette.push([0, 0, 0]);
+  const cache = new Int16Array(32768).fill(-1);
+  const nearest = (r, g, b) => {
+    const key = ((r >> 3) << 10) | ((g >> 3) << 5) | (b >> 3);
+    if (cache[key] >= 0) return cache[key];
+    let best = 0;
+    let bd = Infinity;
+    for (let k = 0; k < pal.length; k++) {
+      const c = pal[k];
+      const dd = (c[0] - r) ** 2 + (c[1] - g) ** 2 + (c[2] - b) ** 2;
+      if (dd < bd) {
+        bd = dd;
+        best = k;
+      }
+    }
+    cache[key] = best;
+    return best;
+  };
+  const frames = rgba.map((px, fi) => {
+    const idx = new Uint8Array(W * H);
+    for (let p = 0; p < W * H; p++) idx[p] = clear && px[p * 4 + 3] < 128 ? T : nearest(px[p * 4], px[p * 4 + 1], px[p * 4 + 2]);
+    return { indices: idx, delay: Math.round((delays[fi] || 0) * 100) };
+  });
+  // loop: 0 = forever, 1 = once (no loop block), n = n times in all
+  return encodeIndexedGif(frames, palette, W, H, { transparent: T, loop: loop === 1 ? null : loop === 0 ? 0 : loop - 1 });
 }
 
 export function buildTimelinePanel(P) {
   const el = h('div.ph-panel.timelinep');
   let playing = null;
   let applying = false;
+  // frame id → { canvas, ver }: small pictures of the frames; `ver` is the content version they show
   const thumbs = new Map();
+  // goes up whenever the layers' pixels may have changed (any history step that isn't a timeline edit)
+  let contentVer = 0;
+  let onion = { on: false, prev: true, next: false, opacity: 35, ...loadPref('photo.timeline.onion', {}) };
   const d = () => P.doc;
   const frames = () => d()?.frames || [];
   const cur = () => Math.min(frames().length - 1, Math.max(0, d()?.frameIndex || 0));
-  const run = (label, fn) => P.run(label, fn);
+  /** A timeline edit as one history step; meanwhile the layers' state isn't copied into a frame. */
+  const edit = (label, fn) => {
+    applying = true;
+    try {
+      P.run(label, fn);
+    } finally {
+      applying = false;
+    }
+  };
 
   /** Show frame i: the layers take its state (not a history step, like Photoshop). */
   const go = (i) => {
@@ -571,46 +689,107 @@ export function buildTimelinePanel(P) {
     P.redraw();
     render();
   };
+  /**
+   * A document just shown (opened, restored, switched to): its layers may show another frame than
+   * the remembered index (the index isn't saved in files). Point at the frame they show, or show
+   * the remembered frame, so the next edit isn't copied into the wrong frame.
+   */
+  const syncFrame = () => {
+    const doc = d();
+    if (!doc?.frames?.length) return;
+    const now = snapFrameState(doc);
+    const i = cur();
+    if (sameFrameState(now, doc.frames[i].state)) return;
+    const k = doc.frames.findIndex((f) => sameFrameState(now, f.state));
+    if (k >= 0) doc.frameIndex = k;
+    else {
+      doc.frameIndex = i;
+      applying = true;
+      const saved = doc.saved;
+      applyFrameState(doc, doc.frames[i].state);
+      doc.saved = saved;
+      applying = false;
+      P.redraw();
+    }
+  };
   // after a change (moving, hiding, fading a layer), the current frame remembers it
   P.on('history', () => {
     const doc = d();
-    if (applying || playing || !doc?.frames?.length) return;
-    const i = cur();
-    doc.frames = doc.frames.map((f, k) => (k === i ? { ...f, state: snapFrameState(doc) } : f));
+    if (applying || playing) return;
+    contentVer++;
+    if (doc?.frames?.length) {
+      const i = cur();
+      doc.frames = doc.frames.map((f, k) => (k === i ? { ...f, state: snapFrameState(doc) } : f));
+    }
     render();
   });
-  // a small picture of the frame on screen
+  // the small picture of the frame on screen follows the picture
+  let shownRev = -1;
   P.on('redraw', () => {
     const doc = d();
-    if (!doc?.frames?.length || !el.isConnected) return;
+    if (!doc?.frames?.length || !el.isConnected || playing || applying) return;
     const f = doc.frames[cur()];
-    const k = `${f.id}`;
+    const t = thumbs.get(`${f.id}`);
+    if (t && t.ver === contentVer && shownRev === `${doc.id}:${doc.rev}`) return;
+    shownRev = `${doc.id}:${doc.rev}`;
     const src = P.viewSource ? P.viewSource(96 / Math.max(doc.width, doc.height)) : null;
     if (!src) return;
+    setThumb(f, src);
+  });
+  const thumbSize = (w, hh) => {
+    const k = 64 / Math.max(w, hh);
+    return [Math.max(1, Math.round(w * k)), Math.max(1, Math.round(hh * k))];
+  };
+  const setThumb = (f, src) => {
+    const k = `${f.id}`;
     let t = thumbs.get(k);
-    const w = Math.max(1, Math.round((src.width / Math.max(src.width, src.height)) * 64));
-    const hh = Math.max(1, Math.round((src.height / Math.max(src.width, src.height)) * 64));
+    const [w, hh] = thumbSize(src.width, src.height);
     if (!t) {
-      t = makeCanvas(w, hh);
+      t = { canvas: makeCanvas(w, hh), ver: -1 };
       thumbs.set(k, t);
     }
-    if (t.width !== w || t.height !== hh) {
-      t.width = w;
-      t.height = hh;
+    const c = t.canvas;
+    if (c.width !== w || c.height !== hh) {
+      c.width = w;
+      c.height = hh;
     }
-    const g = t.getContext('2d');
+    const g = c.getContext('2d');
     g.clearRect(0, 0, w, hh);
+    g.imageSmoothingQuality = 'high';
     g.drawImage(src, 0, 0, w, hh);
-    const shown = el.querySelector(`canvas[data-frame="${k}"]`);
-    if (shown && shown !== t) shown.replaceWith(t);
-    t.dataset.frame = k;
-  });
+    t.ver = contentVer;
+    c.dataset.frame = k;
+    const shown = el.querySelector(`[data-frame-pic="${k}"]`);
+    if (shown && !shown.contains(c)) shown.replaceChildren(c);
+  };
+  // the other frames' pictures are made in the background, one at a time
+  let thumbTimer = 0;
+  const scheduleThumbs = () => {
+    if (thumbTimer) return;
+    thumbTimer = setTimeout(() => {
+      thumbTimer = 0;
+      const doc = d();
+      if (!doc?.frames?.length || !el.isConnected || playing || P.transform || document.querySelector('.modal-backdrop')) return;
+      // very big pictures: only the frame on screen gets a fresh picture (rendering each is slow)
+      const big = doc.width * doc.height > 12e6;
+      const i = cur();
+      const f = doc.frames.find((x, k) => k !== i && (!thumbs.has(`${x.id}`) || (!big && thumbs.get(`${x.id}`).ver !== contentVer)));
+      if (!f) return;
+      applying = true;
+      try {
+        setThumb(f, renderFrameCanvas(doc, f.state, { maxSide: 128, fg: P.fg, bg: P.bg }));
+      } finally {
+        applying = false;
+      }
+      scheduleThumbs();
+    }, 60);
+  };
 
   const create = () => {
     const doc = d();
     if (!doc) return toast('문서가 없습니다');
-    run('타임라인 만들기', () => {
-      doc.frames = [{ id: ++frameSeq + Date.now(), delay: 0.5, state: snapFrameState(doc) }];
+    edit('타임라인 만들기', () => {
+      doc.frames = [{ id: newFrameId(), delay: 0.5, state: snapFrameState(doc) }];
       doc.frameIndex = 0;
       doc.frameLoop = doc.frameLoop ?? 0;
     });
@@ -619,25 +798,27 @@ export function buildTimelinePanel(P) {
   };
   const duplicate = () => {
     const doc = d();
+    if (!doc?.frames?.length) return;
     const i = cur();
     const f = doc.frames[i];
-    const copy = { ...f, id: ++frameSeq + Date.now(), state: snapFrameState(doc) };
-    run('프레임 복제', () => {
+    const copy = { ...f, id: newFrameId(), state: snapFrameState(doc) };
+    edit('프레임 복제', () => {
       doc.frames = [...doc.frames.slice(0, i + 1), copy, ...doc.frames.slice(i + 1)];
       doc.frameIndex = i + 1;
     });
     const t = thumbs.get(`${f.id}`);
     if (t) {
-      const c = makeCanvas(t.width, t.height);
-      c.getContext('2d').drawImage(t, 0, 0);
-      thumbs.set(`${copy.id}`, c);
+      const c = makeCanvas(t.canvas.width, t.canvas.height);
+      c.getContext('2d').drawImage(t.canvas, 0, 0);
+      thumbs.set(`${copy.id}`, { canvas: c, ver: t.ver });
     }
     render();
   };
   const remove = () => {
     const doc = d();
+    if (!doc?.frames?.length) return;
     if (doc.frames.length <= 1) {
-      run('타임라인 지우기', () => {
+      edit('타임라인 지우기', () => {
         doc.frames = [];
         doc.frameIndex = 0;
       });
@@ -645,8 +826,9 @@ export function buildTimelinePanel(P) {
       return;
     }
     const i = cur();
-    run('프레임 삭제', () => {
+    edit('프레임 삭제', () => {
       doc.frames = doc.frames.filter((_, k) => k !== i);
+      doc.frameIndex = Math.min(i, doc.frames.length - 1);
     });
     go(Math.min(i, doc.frames.length - 1));
   };
@@ -659,16 +841,18 @@ export function buildTimelinePanel(P) {
     if (i === doc.frames.length - 1) withSel.value = 'prev';
     openModal({
       title: '트윈 (사이 프레임 만들기)',
-      body: [formRow('사이에 넣을 프레임 수', nIn), formRow('지금 프레임과', withSel), h('div.note', '위치와 불투명도가 조금씩 바뀌는 프레임을 만듭니다. 나타나거나 사라지는 레이어는 서서히 나타나고 사라집니다.')],
-      buttons: [{ label: '취소' }, { label: '만들기', primary: true, action: () => {
+      body: [formRow('추가할 프레임', nIn), formRow('트윈 대상', withSel), h('div.note', '위치와 불투명도가 조금씩 바뀌는 프레임을 만듭니다. 나타나거나 사라지는 레이어는 서서히 나타나고 사라집니다.')],
+      buttons: [{ label: '취소' }, { label: '확인', primary: true, action: () => {
         const n = Math.max(1, Math.min(60, Math.round(+nIn.value || 5)));
         const a = withSel.value === 'next' ? i : i - 1;
         if (a < 0 || a + 1 >= doc.frames.length) return toast('그쪽에는 프레임이 없습니다');
         const A = doc.frames[a];
         const B = doc.frames[a + 1];
-        const mid = Array.from({ length: n }, (_, k) => ({ id: ++frameSeq + Date.now(), delay: A.delay, state: tweenStates(A.state, B.state, (k + 1) / (n + 1)) }));
-        run('트윈', () => {
+        const mid = Array.from({ length: n }, (_, k) => ({ id: newFrameId(), delay: A.delay, state: tweenStates(A.state, B.state, (k + 1) / (n + 1)) }));
+        edit('트윈', () => {
           doc.frames = [...doc.frames.slice(0, a + 1), ...mid, ...doc.frames.slice(a + 1)];
+          // the frame on screen keeps its place in the list
+          doc.frameIndex = i > a ? i + n : i;
         });
         go(a + 1);
         return undefined;
@@ -687,19 +871,63 @@ export function buildTimelinePanel(P) {
     const list = tops.slice(1).map((l) => {
       const st = {};
       for (const [id, s] of Object.entries(now)) {
-        const top = doc.layer(id);
-        const topId = top && (doc.ancestors(top).pop()?.id || top.id);
-        st[id] = { ...s, v: topId === base.id || topId === l.id ? (doc.layer(id).parent ? s.v : true) : doc.layer(id).parent ? s.v : false };
+        const layer = doc.layer(id);
+        // layers inside groups keep their own visibility; the top-level ones show base + this one
+        st[id] = layer.parent ? { ...s } : { ...s, v: id === base.id || id === l.id };
       }
-      return { id: ++frameSeq + Date.now(), delay: 0.5, state: st };
+      return { id: newFrameId(), delay: 0.5, state: st };
     });
-    run('레이어로 프레임 만들기', () => {
+    edit('레이어로 프레임 만들기', () => {
       doc.frames = list;
       doc.frameIndex = 0;
       doc.frameLoop = doc.frameLoop ?? 0;
     });
     go(0);
     return undefined;
+  };
+  /** Each frame's picture as a new layer, hidden in the other frames (Flatten Frames Into Layers). */
+  const flattenFrames = () => {
+    const doc = d();
+    if (!doc?.frames?.length) return toast('타임라인에 프레임이 없습니다');
+    if (doc.width * doc.height * 4 * doc.frames.length > 1.2e9) return toast('프레임이 너무 많거나 그림이 너무 커서 레이어로 만들 수 없습니다');
+    applying = true;
+    const pics = doc.frames.map((f) => renderFrameCanvas(doc, f.state, { fg: P.fg, bg: P.bg }));
+    applying = false;
+    edit('프레임을 레이어로 병합', () => {
+      const made = pics.map((c, k) => newLayer('raster', { name: `프레임 ${k + 1}`, canvas: c }));
+      doc.layers.push(...made);
+      doc.frames = doc.frames.map((f, k) => {
+        const st = { ...f.state };
+        made.forEach((l, j) => { st[l.id] = { v: j === k, o: 1, p: [0, 0] }; });
+        return { ...f, state: st };
+      });
+      const top = made[made.length - 1];
+      doc.activeId = top.id;
+      doc.selectedIds = [top.id];
+    });
+    go(cur());
+    toast(`프레임 ${pics.length}개를 레이어로 만들었습니다`);
+    return undefined;
+  };
+  const reverseFrames = () => {
+    const doc = d();
+    if (!doc || doc.frames.length < 2) return;
+    const i = cur();
+    edit('프레임 반전', () => {
+      doc.frames = [...doc.frames].reverse();
+      doc.frameIndex = doc.frames.length - 1 - i;
+    });
+    render();
+  };
+  const setAllDelays = async () => {
+    const doc = d();
+    if (!doc?.frames?.length) return;
+    const v = await promptDialog('모든 프레임의 시간', '초', String(doc.frames[cur()].delay ?? 0.5));
+    if (v == null) return;
+    const sec = Math.max(0, Math.min(60, +v));
+    if (!Number.isFinite(sec)) return;
+    edit('프레임 시간', () => { doc.frames = doc.frames.map((x) => ({ ...x, delay: sec })); });
+    render();
   };
   const stop = () => {
     if (!playing) return;
@@ -708,6 +936,7 @@ export function buildTimelinePanel(P) {
     playing = null;
     // back to the frame shown before playing (only on that document: the user may have switched tabs)
     if (doc === d()) go(back);
+    else render();
   };
   const play = () => {
     const doc = d();
@@ -716,7 +945,12 @@ export function buildTimelinePanel(P) {
     playing = { back: cur(), loops: 0, doc };
     let i = cur();
     const step = () => {
-      if (!playing || P.doc !== doc) return void (playing = null);
+      if (!playing) return;
+      if (P.doc !== doc || !doc.frames.length) {
+        playing = null;
+        return;
+      }
+      i = Math.min(i, doc.frames.length - 1);
       applying = true;
       doc.frameIndex = i;
       applyFrameState(doc, doc.frames[i].state);
@@ -741,165 +975,335 @@ export function buildTimelinePanel(P) {
   };
   P.timelinePlay = play;
 
-  /** The frames as an animated GIF (one shared palette; see-through kept). */
-  const exportGif = async ({ scale = 1, loop = 0 } = {}) => {
-    const doc = d();
-    const saved = doc.capture();
+  /** Every frame's pixels at a scale: [{ data, delay }]. */
+  const framePixels = async (doc, scale) => {
     const W = Math.max(1, Math.round(doc.width * scale));
     const H = Math.max(1, Math.round(doc.height * scale));
-    const full = makeCanvas(doc.width, doc.height);
     const small = makeCanvas(W, H);
-    const sg = small.getContext('2d');
-    const rgba = [];
+    const sg = small.getContext('2d', { willReadFrequently: true });
+    sg.imageSmoothingQuality = 'high';
+    const out = [];
+    applying = true;
     try {
-      applying = true;
       for (const f of doc.frames) {
-        applyFrameState(doc, f.state);
-        const fg = full.getContext('2d');
-        fg.clearRect(0, 0, full.width, full.height);
-        doc.render(fg, { fg: P.fg, bg: P.bg });
+        const full = renderFrameCanvas(doc, f.state, { fg: P.fg, bg: P.bg });
         sg.clearRect(0, 0, W, H);
-        sg.imageSmoothingQuality = 'high';
         sg.drawImage(full, 0, 0, W, H);
-        rgba.push(sg.getImageData(0, 0, W, H).data);
+        out.push({ data: sg.getImageData(0, 0, W, H).data, delay: f.delay || 0 });
         await new Promise((r) => setTimeout(r, 0));
       }
     } finally {
-      doc.restore(saved);
       applying = false;
       P.redraw();
     }
-    // a palette from all frames, then each pixel's nearest colour (index 255 = see-through)
-    const want = 30000;
-    const per = Math.max(1, Math.floor(want / rgba.length));
-    const s = [];
-    let clear = false;
-    for (const px of rgba) {
-      const stepPx = Math.max(1, Math.floor((W * H) / per));
-      for (let p = 0; p < W * H; p += stepPx) {
-        const i = p * 4;
-        if (px[i + 3] < 128) {
-          clear = true;
-          continue;
-        }
-        s.push(px[i], px[i + 1], px[i + 2]);
+    return { W, H, out };
+  };
+  /** The frames as an animated GIF (one shared palette; see-through kept). */
+  const exportGif = async ({ scale = 1, loop = 0 } = {}) => {
+    const doc = d();
+    const { W, H, out } = await framePixels(doc, scale);
+    return framesToGif(out.map((x) => x.data), out.map((x) => x.delay), W, H, loop);
+  };
+  P.exportAnimatedGif = exportGif;
+  /** The frames as a video file (MP4 or WebM) made by the browser's encoder. */
+  const exportVideo = async ({ format = 'mp4', scale = 1, repeat = 1, fps = 30, onProgress = () => {} } = {}) => {
+    const doc = d();
+    const MB = await import('../../vendor/mediabunny/mediabunny.min.mjs');
+    const W = Math.max(2, Math.round((doc.width * scale) / 2) * 2);
+    const H = Math.max(2, Math.round((doc.height * scale) / 2) * 2);
+    const quality = MB.QUALITY_HIGH;
+    const codecs = format === 'mp4' ? ['avc', 'vp9', 'av1', 'hevc'] : ['vp9', 'vp8', 'av1'];
+    const codec = await MB.getFirstEncodableVideoCodec(codecs, { width: W, height: H, frameRate: fps, quality });
+    if (!codec) throw new Error(`이 브라우저는 ${format.toUpperCase()} 영상을 만들 수 없습니다. 다른 형식을 고르거나 최신 Chrome·Edge를 쓰세요.`);
+    const canvas = makeCanvas(W, H);
+    const g = canvas.getContext('2d', { alpha: false });
+    g.imageSmoothingQuality = 'high';
+    const output = new MB.Output({ format: format === 'mp4' ? new MB.Mp4OutputFormat({ fastStart: 'in-memory' }) : new MB.WebMOutputFormat(), target: new MB.BufferTarget() });
+    const source = new MB.CanvasSource(canvas, { codec, quality, keyFrameInterval: 2 });
+    output.addVideoTrack(source, { frameRate: fps });
+    await output.start();
+    applying = true;
+    try {
+      // each frame is rendered once and shown for its time (whole video frames)
+      const pics = [];
+      for (const f of doc.frames) {
+        pics.push(renderFrameCanvas(doc, f.state, { maxSide: Math.max(W, H), fg: P.fg, bg: P.bg }));
+        await new Promise((r) => setTimeout(r, 0));
       }
-      if (!clear) for (let p = 0; p < W * H; p += 7) if (px[p * 4 + 3] < 128) { clear = true; break; }
+      let t = 0;
+      const total = pics.length * repeat;
+      for (let n = 0; n < total; n++) {
+        const k = n % pics.length;
+        const dur = Math.max(1, Math.round((doc.frames[k].delay || 0) * fps)) / fps;
+        g.fillStyle = '#ffffff';
+        g.fillRect(0, 0, W, H);
+        g.drawImage(pics[k], 0, 0, W, H);
+        await source.add(t, dur);
+        t += dur;
+        onProgress((n + 1) / total);
+      }
+      await output.finalize();
+    } catch (err) {
+      try { await output.cancel(); } catch { /* already stopped */ }
+      throw err;
+    } finally {
+      applying = false;
+      P.redraw();
     }
-    const pal = s.length ? medianCut(new Uint8Array(s), clear ? 255 : 256) : [[0, 0, 0]];
-    const T = clear ? pal.length : -1;
-    const palette = [...pal];
-    if (clear) palette.push([0, 0, 0]);
-    const cache = new Int16Array(32768).fill(-1);
-    const nearest = (r, g, b) => {
-      const key = ((r >> 3) << 10) | ((g >> 3) << 5) | (b >> 3);
-      if (cache[key] >= 0) return cache[key];
-      let best = 0;
-      let bd = Infinity;
-      for (let k = 0; k < pal.length; k++) {
-        const c = pal[k];
-        const dd = (c[0] - r) ** 2 + (c[1] - g) ** 2 + (c[2] - b) ** 2;
-        if (dd < bd) {
-          bd = dd;
-          best = k;
-        }
-      }
-      cache[key] = best;
-      return best;
-    };
-    const frames = rgba.map((px, fi) => {
-      const idx = new Uint8Array(W * H);
-      for (let p = 0; p < W * H; p++) idx[p] = clear && px[p * 4 + 3] < 128 ? T : nearest(px[p * 4], px[p * 4 + 1], px[p * 4 + 2]);
-      return { indices: idx, delay: Math.round((doc.frames[fi].delay || 0) * 100) };
-    });
-    return encodeIndexedGif(frames, palette, W, H, { transparent: T, loop: loop === 1 ? null : loop === 0 ? 0 : loop - 1 });
+    return { blob: new Blob([output.target.buffer], { type: format === 'mp4' ? 'video/mp4' : 'video/webm' }), codec, W, H };
+  };
+  P.exportAnimationVideo = exportVideo;
+
+  const sizeSelect = (doc) => {
+    const s = h('select', [[1, '100%'], [0.75, '75%'], [0.5, '50%'], [0.25, '25%']].map(([v, n]) => h('option', { value: v }, `${n} (${Math.round(doc.width * v)}×${Math.round(doc.height * v)})`)));
+    if (doc.width * doc.height > 1.5e6) s.value = '0.5';
+    return s;
   };
   const exportDialog = () => {
     const doc = d();
-    if (!doc?.frames?.length) return toast('타임라인에 프레임이 없습니다');
-    const size = h('select', [[1, '100%'], [0.75, '75%'], [0.5, '50%'], [0.25, '25%']].map(([v, n]) => h('option', { value: v }, `${n} (${Math.round(doc.width * v)}×${Math.round(doc.height * v)})`)));
-    if (doc.width * doc.height > 1.5e6) size.value = '0.5';
-    const loop = h('select', [[0, '계속 반복'], [1, '한 번만'], [3, '3번']].map(([v, n]) => h('option', { value: v, selected: v === (doc.frameLoop || 0) }, n)));
+    if (!doc?.frames?.length) return toast('타임라인에 프레임이 없습니다. 창 ▸ 타임라인에서 프레임을 만드세요.');
+    const size = sizeSelect(doc);
+    const loop = h('select', LOOPS.map(([v, n]) => h('option', { value: v, selected: v === (doc.frameLoop || 0) }, n)));
     openModal({
       title: '애니메이션 GIF로 내보내기',
       body: [formRow('크기', size), formRow('반복', loop), h('div.note', `프레임 ${doc.frames.length}개 · GIF는 256색까지라 사진은 색이 조금 거칠어질 수 있습니다.`)],
       buttons: [{ label: '취소' }, { label: '내보내기', primary: true, action: async () => {
         toast('GIF를 만드는 중…');
         const blob = await exportGif({ scale: +size.value, loop: +loop.value });
-        await downloadBlob(blob, `${doc.name || '애니메이션'}.gif`);
+        if (await downloadBlob(blob, `${doc.name || '애니메이션'}.gif`)) toast(`GIF를 저장했습니다 (${(blob.size / 1024).toFixed(0)} KB)`);
         return undefined;
       } }],
     });
     return undefined;
   };
-  P.exportAnimatedGif = exportGif;
+  /** File ▸ Export ▸ Render Video: the frames as an MP4 or WebM file. */
+  const videoDialog = () => {
+    const doc = d();
+    if (!doc?.frames?.length) return toast('타임라인에 프레임이 없습니다. 창 ▸ 타임라인에서 프레임을 만드세요.');
+    const fmt = h('select', h('option', { value: 'mp4' }, 'MP4 (H.264, 가장 널리 쓰임)'), h('option', { value: 'webm' }, 'WebM (VP9, 웹용)'));
+    const size = sizeSelect(doc);
+    const repeat = h('input.ph-num', { type: 'number', min: 1, max: 100, value: 1 });
+    const fps = h('select', [[24, '24'], [30, '30'], [60, '60']].map(([v, n]) => h('option', { value: v, selected: v === 30 }, `${n} fps`)));
+    const bar = h('progress', { max: 1, value: 0, style: { width: '100%' }, hidden: true });
+    const total = doc.frames.reduce((s, f) => s + Math.max(1 / 30, f.delay || 0), 0);
+    openModal({
+      title: '비디오 렌더',
+      body: [formRow('형식', fmt), formRow('크기', size), formRow('반복 횟수', repeat), formRow('프레임 속도', fps), bar,
+        h('div.note', `프레임 ${doc.frames.length}개 · 한 번 재생에 약 ${total.toFixed(1)}초. 각 프레임은 정한 시간만큼 보입니다. 투명한 곳은 흰색이 됩니다.`)],
+      buttons: [{ label: '취소' }, { label: '렌더', primary: true, action: async () => {
+        bar.hidden = false;
+        try {
+          const r = await exportVideo({ format: fmt.value, scale: +size.value, repeat: Math.max(1, Math.min(100, Math.round(+repeat.value || 1))), fps: +fps.value, onProgress: (f) => { bar.value = f; } });
+          if (await downloadBlob(r.blob, `${doc.name || '애니메이션'}.${fmt.value}`)) toast(`영상을 저장했습니다 (${r.W}×${r.H}, ${r.codec.toUpperCase()}, ${(r.blob.size / 1024).toFixed(0)} KB)`);
+          return undefined;
+        } catch (err) {
+          toast(String(err?.message || err));
+          bar.hidden = true;
+          return false;
+        }
+      } }],
+    });
+    return undefined;
+  };
+  P.timelineExportGif = exportDialog;
+  P.timelineRenderVideo = videoDialog;
+
+  // ---- onion skin: what changes in the previous (and next) frame drawn faintly over the picture
+  const onionCache = { key: '', prev: null, next: null, building: false };
+  /**
+   * The other frame's state with only the layers that look different from the current frame shown
+   * (and the groups they are in), so its ghost doesn't cover the picture; null when nothing differs.
+   */
+  const ghostState = (doc, other, current) => {
+    const diff = new Set();
+    for (const l of doc.layers) {
+      const a = other[l.id];
+      const b = current[l.id];
+      if (a && b && !sameFrameState({ [l.id]: a }, { [l.id]: b })) diff.add(l.id);
+    }
+    if (!diff.size) return null;
+    const keep = new Set(diff);
+    for (const id of diff) for (const g of doc.ancestors(doc.layer(id))) keep.add(g.id);
+    const st = {};
+    for (const l of doc.layers) {
+      const s0 = other[l.id] || { v: l.visible !== false, o: l.opacity ?? 1, p: posOf(l) };
+      st[l.id] = keep.has(l.id) ? s0 : { ...s0, v: false };
+    }
+    return st;
+  };
+  const onionKey = (doc) => `${doc.id}:${cur()}:${contentVer}:${doc.frames.length}:${onion.prev}:${onion.next}`;
+  const buildOnion = () => {
+    const doc = d();
+    if (!doc?.frames?.length || onionCache.building) return;
+    onionCache.building = true;
+    setTimeout(() => {
+      onionCache.building = false;
+      const dd = d();
+      if (!dd?.frames?.length || !onion.on || playing) return;
+      const i = cur();
+      const max = Math.min(2048, Math.max(dd.width, dd.height));
+      applying = true;
+      try {
+        const now = dd.frames[i].state;
+        const ghost = (k) => {
+          const st = k >= 0 && k < dd.frames.length ? ghostState(dd, dd.frames[k].state, now) : null;
+          return st ? renderFrameCanvas(dd, st, { maxSide: max, fg: P.fg, bg: P.bg }) : null;
+        };
+        onionCache.prev = onion.prev ? ghost(i - 1) : null;
+        onionCache.next = onion.next ? ghost(i + 1) : null;
+      } finally {
+        applying = false;
+      }
+      onionCache.key = onionKey(dd);
+      P.redraw();
+    }, 40);
+  };
+  // drawn over the picture after the other view extras; hooked in once every module is installed
+  // (this panel is built before the view extras, which replace the hook)
+  const drawOnion = (g) => {
+    const doc = d();
+    if (!onion.on || playing || !doc?.frames || doc.frames.length < 2) return;
+    if (onionCache.key !== onionKey(doc)) {
+      buildOnion();
+      if (!onionCache.key.startsWith(`${doc.id}:`)) return;
+    }
+    const v = doc.view;
+    g.save();
+    g.globalAlpha = Math.max(0.05, Math.min(1, onion.opacity / 100));
+    for (const c of [onionCache.prev, onionCache.next]) if (c) g.drawImage(c, v.x, v.y, doc.width * v.zoom, doc.height * v.zoom);
+    g.restore();
+  };
+  P.extendMenus = [...(P.extendMenus || []), () => {
+    const prevExtras = P.drawViewExtras;
+    P.drawViewExtras = (g) => {
+      prevExtras?.(g);
+      drawOnion(g);
+    };
+  }];
+  const setOnion = (o) => {
+    onion = { ...onion, ...o };
+    savePref('photo.timeline.onion', onion);
+    onionCache.key = '';
+    P.redraw();
+    render();
+  };
+  const onionDialog = () => {
+    const op = h('input', { type: 'range', min: 5, max: 90, value: onion.opacity });
+    const prev = h('input', { type: 'checkbox', checked: onion.prev });
+    const next = h('input', { type: 'checkbox', checked: onion.next });
+    openModal({
+      title: '어니언 스킨 설정',
+      body: [formRow('이전 프레임 보기', prev), formRow('다음 프레임 보기', next), formRow('불투명도', op), h('div.note', '앞뒤 프레임을 지금 프레임 위에 흐리게 겹쳐 보여 줍니다. 화면에만 보이고 내보내기에는 들어가지 않습니다.')],
+      buttons: [{ label: '취소' }, { label: '확인', primary: true, action: () => setOnion({ on: true, prev: prev.checked, next: next.checked, opacity: +op.value }) }],
+    });
+  };
+  P.toggleOnionSkin = () => setOnion({ on: !onion.on });
 
   const highlight = () => {
     const i = cur();
     el.querySelectorAll('.ph-frame').forEach((x, k) => x.classList.toggle('on', k === i));
   };
+  const menuItems = (doc) => [
+    { label: '새 프레임 (지금 프레임 복제)', action: duplicate },
+    { label: '프레임 삭제', action: remove },
+    { label: '트윈…', disabled: doc.frames.length < 2, action: tween },
+    { label: '프레임 반전', disabled: doc.frames.length < 2, action: reverseFrames },
+    { label: '모든 프레임 시간 설정…', action: setAllDelays },
+    '-',
+    { label: '레이어로 프레임 만들기 (기존 프레임 대신)', action: fromLayers },
+    { label: '프레임을 레이어로 병합', action: flattenFrames },
+    '-',
+    { label: '어니언 스킨 사용', checked: onion.on, action: () => setOnion({ on: !onion.on }) },
+    { label: '어니언 스킨 설정…', action: onionDialog },
+    '-',
+    { label: '애니메이션 GIF로 내보내기…', action: exportDialog },
+    { label: '비디오 렌더… (MP4 · WebM)', action: videoDialog },
+    '-',
+    { label: '타임라인 지우기 (모든 프레임)', action: () => { edit('타임라인 지우기', () => { doc.frames = []; doc.frameIndex = 0; }); render(); } },
+  ];
+  P.timelineMenu = () => (d()?.frames?.length ? menuItems(d()) : [{ label: '타임라인 만들기 (첫 프레임)', disabled: !d(), action: create }, { label: '레이어로 프레임 만들기', disabled: !d(), action: fromLayers }]);
   const render = () => {
     const doc = d();
     if (!doc) return void el.replaceChildren(h('div.empty-hint', '문서가 없습니다'));
     if (!doc.frames?.length) {
       el.replaceChildren(
-        h('div.note', '레이어를 보이고 숨기고, 옮기고, 흐리게 하는 것을 프레임마다 다르게 해서 움직이는 GIF를 만듭니다.'),
-        h('div.ph-swbar', h('button.primary.small', { onclick: create }, '타임라인 만들기 (첫 프레임)'), h('button.small', { onclick: fromLayers }, '레이어로 프레임 만들기')));
+        h('div.note', '레이어를 보이고 숨기고, 옮기고, 흐리게 하는 것을 프레임마다 다르게 해서 움직이는 GIF나 영상을 만듭니다.'),
+        h('div.ph-swbar', h('button.primary.small', { onclick: create }, '프레임 애니메이션 만들기'), h('button.small', { onclick: fromLayers }, '레이어로 프레임 만들기')));
       return;
     }
     const i = cur();
-    const loop = h('select', { 'aria-label': '반복', title: '반복' }, [[0, '계속'], [1, '한 번'], [3, '3번']].map(([v, n]) => h('option', { value: v, selected: v === (doc.frameLoop || 0) }, n)));
-    loop.addEventListener('change', () => run('반복 설정', () => { doc.frameLoop = +loop.value; }));
+    const loop = h('select', { 'aria-label': '반복', title: '반복' }, LOOPS.map(([v, n]) => h('option', { value: v, selected: v === (doc.frameLoop || 0) }, n)));
+    if (!LOOPS.some(([v]) => v === (doc.frameLoop || 0))) loop.prepend(h('option', { value: doc.frameLoop, selected: true }, `${doc.frameLoop}번`));
+    loop.append(h('option', { value: 'other' }, '기타…'));
+    loop.addEventListener('change', async () => {
+      let v = loop.value;
+      if (v === 'other') v = await promptDialog('반복 횟수', '번 (0 = 계속)', String(doc.frameLoop || 0));
+      const n = Math.max(0, Math.min(1000, Math.round(+v)));
+      if (v == null || !Number.isFinite(n)) return render();
+      edit('반복 설정', () => { doc.frameLoop = n; });
+      render();
+      return undefined;
+    });
+    let missing = false;
     const cards = doc.frames.map((f, k) => {
       const t = thumbs.get(`${f.id}`);
-      const pic = t || h('div.ph-frame-ph', String(k + 1));
-      if (t) t.dataset.frame = `${f.id}`;
-      const delay = h('select.ph-frame-delay', { 'aria-label': '시간', title: '이 프레임을 보여 주는 시간' }, DELAYS.map(([v, n]) => h('option', { value: v, selected: Math.abs(v - (f.delay || 0)) < 1e-6 }, n)));
+      if (!t) missing = true;
+      else if (t.ver !== contentVer && k !== i) missing = true;
+      const pic = h('div.ph-frame-pic', { 'data-frame-pic': `${f.id}` }, t ? t.canvas : h('div.ph-frame-ph', String(k + 1)));
+      const delay = h('select.ph-frame-delay', { 'aria-label': '프레임 시간', title: '이 프레임을 보여 주는 시간' }, DELAYS.map(([v, n]) => h('option', { value: v, selected: Math.abs(v - (f.delay || 0)) < 1e-6 }, n)));
       if (!DELAYS.some(([v]) => Math.abs(v - (f.delay || 0)) < 1e-6)) delay.prepend(h('option', { value: f.delay, selected: true }, `${f.delay}초`));
-      delay.append(h('option', { value: 'other' }, '다른 값…'));
+      delay.append(h('option', { value: 'other' }, '기타…'));
       delay.addEventListener('click', (e) => e.stopPropagation());
       delay.addEventListener('change', async () => {
         let v = delay.value;
         if (v === 'other') v = await promptDialog('프레임 시간', '초', String(f.delay || 0.5));
         const sec = Math.max(0, Math.min(60, +v));
-        if (!Number.isFinite(sec)) return render();
-        run('프레임 시간', () => { doc.frames = doc.frames.map((x) => (x === f ? { ...x, delay: sec } : x)); });
+        if (v == null || !Number.isFinite(sec)) return render();
+        edit('프레임 시간', () => { doc.frames = doc.frames.map((x) => (x.id === f.id ? { ...x, delay: sec } : x)); });
         render();
         return undefined;
       });
-      const card = h(`div.ph-frame${k === i ? '.on' : ''}`, { role: 'button', tabindex: 0, title: `프레임 ${k + 1}` }, h('div.ph-frame-pic', pic), h('div.ph-frame-foot', h('b', String(k + 1)), delay));
-      card.addEventListener('click', () => go(k));
+      const card = h(`div.ph-frame${k === i ? '.on' : ''}`, { role: 'button', tabindex: 0, title: `프레임 ${k + 1}`, 'aria-label': `프레임 ${k + 1}` }, pic, h('div.ph-frame-foot', h('b', String(k + 1)), delay));
+      card.addEventListener('click', () => {
+        if (card.dataset.longpress) return void delete card.dataset.longpress;
+        if (!playing) go(k);
+      });
+      card.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          go(k);
+        }
+      });
       onContext(card, (x, y) => showMenu([
         { label: '이 프레임 복제', action: () => { go(k); duplicate(); } },
         { label: '이 프레임 삭제', action: () => { go(k); remove(); } },
-        { label: '모든 프레임에 이 시간 쓰기', action: () => run('프레임 시간', () => { doc.frames = doc.frames.map((x) => ({ ...x, delay: f.delay })); }) },
+        { label: '모든 프레임에 이 시간 쓰기', action: () => { edit('프레임 시간', () => { doc.frames = doc.frames.map((x) => ({ ...x, delay: f.delay })); }); render(); } },
       ], x, y));
       return card;
     });
     el.replaceChildren(
       h('div.ph-swbar.ph-tlbar',
-        h('button.small', { title: '처음 프레임', 'aria-label': '처음 프레임', onclick: () => go(0) }, icon('goIn', 14)),
-        h('button.small', { title: '이전 프레임', 'aria-label': '이전 프레임', onclick: () => go(i - 1) }, icon('stepBack', 14)),
-        h('button.small', { title: playing ? '정지' : '재생', 'aria-label': playing ? '정지' : '재생', onclick: play }, icon(playing ? 'stop' : 'play', 14)),
-        h('button.small', { title: '다음 프레임', 'aria-label': '다음 프레임', onclick: () => go(i + 1) }, icon('stepForward', 14)),
+        h('button.small', { title: '첫 프레임 선택', 'aria-label': '첫 프레임 선택', onclick: () => go(0) }, icon('goIn', 14)),
+        h('button.small', { title: '이전 프레임 선택', 'aria-label': '이전 프레임 선택', onclick: () => go(i - 1) }, icon('stepBack', 14)),
+        h('button.small', { title: playing ? '정지' : '애니메이션 재생', 'aria-label': playing ? '정지' : '애니메이션 재생', onclick: play }, icon(playing ? 'stop' : 'play', 14)),
+        h('button.small', { title: '다음 프레임 선택', 'aria-label': '다음 프레임 선택', onclick: () => go(i + 1) }, icon('stepForward', 14)),
         loop,
-        h('button.small', { title: '지금 프레임 복제', onclick: duplicate }, icon('plus', 13), ' 프레임'),
-        h('button.small', { onclick: tween }, '트윈…'),
-        h('button.small', { title: '지금 프레임 삭제', 'aria-label': '프레임 삭제', onclick: remove }, icon('trash', 13)),
-        h('button.small', { 'aria-label': '타임라인 메뉴', onclick: (e) => menuAt(e, [
-          { label: '애니메이션 GIF로 내보내기…', action: exportDialog },
-          { label: '레이어로 프레임 만들기 (기존 프레임 대신)', action: fromLayers },
-          { label: '모든 프레임 지우기', action: () => { run('타임라인 지우기', () => { doc.frames = []; doc.frameIndex = 0; }); render(); } },
-        ]) }, '⋯')),
+        h('button.small', { title: '애니메이션 프레임 트윈', onclick: tween }, '트윈…'),
+        h('button.small', { title: '선택한 프레임 복제', 'aria-label': '선택한 프레임 복제', onclick: duplicate }, icon('plus', 13)),
+        h('button.small', { title: '선택한 프레임 삭제', 'aria-label': '선택한 프레임 삭제', onclick: remove }, icon('trash', 13)),
+        h(`button.small${onion.on ? '.on' : ''}`, { title: '어니언 스킨 (앞뒤 프레임 겹쳐 보기)', 'aria-label': '어니언 스킨', 'aria-pressed': String(onion.on), onclick: () => setOnion({ on: !onion.on }) }, icon('copy', 13)),
+        h('button.small', { title: '타임라인 메뉴', 'aria-label': '타임라인 메뉴', onclick: (e) => menuAt(e, menuItems(doc)) }, icon('more', 14))),
       h('div.ph-frames', cards),
       h('div.note', `프레임 ${i + 1}/${doc.frames.length} · 레이어를 보이기/숨기기·옮기기·불투명도를 바꾸면 지금 프레임에 기억됩니다.`),
-      h('button.small', { onclick: exportDialog }, '애니메이션 GIF로 내보내기…'));
+      h('div.ph-swbar', h('button.small', { onclick: exportDialog }, 'GIF로 내보내기…'), h('button.small', { onclick: videoDialog }, '비디오 렌더…')));
+    if (missing && !playing) scheduleThumbs();
   };
   P.on('doc', () => {
     stop();
+    syncFrame();
+    onionCache.key = '';
     render();
   });
-  P.on('history', () => !applying && !playing && render());
   render();
   return el;
 }

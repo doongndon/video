@@ -1,7 +1,7 @@
 // Building blocks for the filters in fx3.js and the filter gallery (fxgallery.js): pixel access,
 // fast blurs on float arrays, edges, noise and stroke textures, embossed shading, cells.
 
-import { blurred, remap, sampler, medianData } from './fx2.js';
+import { blurred, remap, sampler, medianData } from './fxcore.js';
 
 export { blurred, remap, sampler, medianData };
 
@@ -47,27 +47,39 @@ export function grayOf(img) {
   return L;
 }
 
-/** One box blur pass (radius r) along x then y, edges clamped. */
+/** One box blur pass (radius r) along x then y, edges clamped (row by row: cache friendly). */
 function boxPass(a, w, h, r) {
   if (r < 1) return a;
   const t = new Float32Array(a.length);
   const out = new Float32Array(a.length);
   const k = 1 / (2 * r + 1);
+  const wl = w - 1;
   for (let y = 0; y < h; y++) {
     const row = y * w;
     let s = a[row] * (r + 1);
-    for (let x = 1; x <= r; x++) s += a[row + Math.min(w - 1, x)];
+    for (let x = 1; x <= r; x++) s += a[row + (x < w ? x : wl)];
     for (let x = 0; x < w; x++) {
       t[row + x] = s * k;
-      s += a[row + Math.min(w - 1, x + r + 1)] - a[row + Math.max(0, x - r)];
+      const ad = x + r + 1;
+      const sb = x - r;
+      s += a[row + (ad < w ? ad : wl)] - a[row + (sb > 0 ? sb : 0)];
     }
   }
-  for (let x = 0; x < w; x++) {
-    let s = t[x] * (r + 1);
-    for (let y = 1; y <= r; y++) s += t[Math.min(h - 1, y) * w + x];
-    for (let y = 0; y < h; y++) {
-      out[y * w + x] = s * k;
-      s += t[Math.min(h - 1, y + r + 1) * w + x] - t[Math.max(0, y - r) * w + x];
+  // columns: one running sum per column, rows visited in order
+  const col = new Float32Array(w);
+  const hl = h - 1;
+  for (let x = 0; x < w; x++) col[x] = t[x] * (r + 1);
+  for (let yy = 1; yy <= r; yy++) {
+    const row = (yy < h ? yy : hl) * w;
+    for (let x = 0; x < w; x++) col[x] += t[row + x];
+  }
+  for (let y = 0; y < h; y++) {
+    const row = y * w;
+    const ad = (y + r + 1 < h ? y + r + 1 : hl) * w;
+    const sb = (y - r > 0 ? y - r : 0) * w;
+    for (let x = 0; x < w; x++) {
+      out[row + x] = col[x] * k;
+      col[x] += t[ad + x] - t[sb + x];
     }
   }
   return out;
@@ -111,7 +123,7 @@ export function sobelF(L, w, h) {
       const i = yc + x;
       gx[i] = sx;
       gy[i] = sy;
-      mag[i] = Math.hypot(sx, sy);
+      mag[i] = Math.sqrt(sx * sx + sy * sy);
     }
   }
   return { gx, gy, mag };

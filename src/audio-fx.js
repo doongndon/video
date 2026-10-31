@@ -4,9 +4,19 @@
 import { EFFECTS } from './effects.js';
 import { evalEffect } from './model.js';
 import { dbToGain, clamp } from './util.js';
+import { DSP_WORKLET_SRC } from './audio-dsp-src.js';
 
 /** Audio effects handled by the chain (Volume/Panner/Amplify are applied as plain gain/pan). */
-export const CHAIN_FX = new Set(['eq3', 'highpass', 'lowpass', 'compressor', 'reverb', 'delay', 'bandpass', 'noiseGate', 'humRemove', 'ringMod']);
+export const CHAIN_FX = new Set(['gain', 'eq3', 'highpass', 'lowpass', 'compressor', 'reverb', 'delay', 'bandpass', 'noiseGate', 'humRemove', 'ringMod']);
+
+/**
+ * More chain units, registered by other modules (audio-fx2.js): type → {
+ *   build(ctx, fx, unit, ready) — wire unit.input → … → unit.output, set unit.apply(values, when, mode)
+ *     and unit.latency (seconds of delay the unit adds); ready: the context's worklets are loaded,
+ *   worklet: true when build needs the AudioWorklet processors (the chain is rebuilt once they load),
+ *   signature(fx): extra text that forces a rebuild when structural params change }.
+ */
+export const UNIT_BUILDERS = {};
 
 // ---- AudioWorklet processors (loaded from a blob so the app needs no extra files)
 const WORKLET_SRC = `
@@ -19,8 +29,13 @@ class GateProcessor extends AudioWorkletProcessor {
       { name: 'release', defaultValue: 150 },
     ];
   }
-  constructor() { super(); this.env = 0; this.gain = 1; }
+  constructor() {
+    super();
+    this.env = 0; this.gain = 1; this.dead = false;
+    this.port.onmessage = (e) => { if (e.data === 'dispose') this.dead = true; };
+  }
   process(inputs, outputs, p) {
+    if (this.dead) return false;
     const inp = inputs[0];
     const out = outputs[0];
     if (!inp || !inp.length) return true;
@@ -42,6 +57,7 @@ class GateProcessor extends AudioWorkletProcessor {
   }
 }
 registerProcessor('montage-gate', GateProcessor);
+${DSP_WORKLET_SRC}
 `;
 
 const workletReady = new WeakSet();
@@ -62,15 +78,70 @@ export function loadAudioWorklets(ctx) {
 }
 
 export function chainEffects(clip) {
-  return clip.effects.filter((e) => e.enabled && CHAIN_FX.has(e.type) && EFFECTS[e.type]);
+  return clip.effects.filter((e) => e.enabled && (CHAIN_FX.has(e.type) || UNIT_BUILDERS[e.type]) && EFFECTS[e.type]);
 }
+
+/**
+ * Built-in nodes that delay the sound: the dynamics compressor (a fixed look-ahead) and the wave
+ * shaper's oversampling filters. Measured once per sample rate so export can make up for them.
+ */
+const nodeDelay = new Map();
+export async function measureNodeDelays(sampleRate) {
+  if (nodeDelay.has(sampleRate)) return nodeDelay.get(sampleRate);
+  const result = { compressor: 0, shaper4x: 0 };
+  nodeDelay.set(sampleRate, result);
+  try {
+    const n = 4096;
+    const ctx = new OfflineAudioContext(2, n, sampleRate);
+    const imp = ctx.createBuffer(1, n, sampleRate);
+    imp.getChannelData(0)[0] = 0.5;
+    const src = ctx.createBufferSource();
+    src.buffer = imp;
+    const merge = ctx.createChannelMerger(2);
+    const comp = ctx.createDynamicsCompressor();
+    comp.threshold.value = 0;
+    comp.knee.value = 0;
+    comp.ratio.value = 1;
+    const shaper = ctx.createWaveShaper();
+    shaper.curve = new Float32Array([-1, 1]);
+    shaper.oversample = '4x';
+    src.connect(comp).connect(merge, 0, 0);
+    src.connect(shaper).connect(merge, 0, 1);
+    merge.connect(ctx.destination);
+    src.start();
+    const out = await ctx.startRendering();
+    const argmax = (d) => {
+      let best = 0;
+      let at = 0;
+      for (let i = 0; i < d.length; i++) {
+        if (Math.abs(d[i]) > best) {
+          best = Math.abs(d[i]);
+          at = i;
+        }
+      }
+      return at;
+    };
+    result.compressor = argmax(out.getChannelData(0)) / sampleRate;
+    result.shaper4x = argmax(out.getChannelData(1)) / sampleRate;
+  } catch (err) {
+    console.warn('could not measure node delays', err);
+  }
+  return result;
+}
+export const nodeDelays = (ctx) => nodeDelay.get(ctx.sampleRate) || { compressor: 0, shaper4x: 0 };
+
+/** True when the context has the app's worklet processors loaded. */
+export const workletsReady = (ctx) => workletReady.has(ctx);
 
 /** Structural signature: rebuild the chain only when this changes. */
 export function chainSignature(clip, ctx) {
+  const ready = ctx && workletReady.has(ctx) ? 'ready' : 'pending';
   return chainEffects(clip).map((e) => {
-    const extra = e.type === 'reverb' ? e.params.decay.value
-      : e.type === 'humRemove' ? `${e.params.freq.value}/${e.params.harmonics.value}/${e.params.q.value}`
-        : e.type === 'noiseGate' ? (ctx && workletReady.has(ctx) ? 'ready' : 'pending') : '';
+    const b = UNIT_BUILDERS[e.type];
+    const extra = b ? `${b.signature ? b.signature(e) : ''}${b.worklet ? ready : ''}`
+      : e.type === 'reverb' ? e.params.decay.value
+        : e.type === 'humRemove' ? `${e.params.freq.value}/${e.params.harmonics.value}/${e.params.q.value}`
+          : e.type === 'noiseGate' ? ready : '';
     return `${e.id}:${e.type}:${extra}`;
   }).join('|');
 }
@@ -120,6 +191,8 @@ export function createChain(ctx, clip) {
     input,
     output,
     units,
+    /** Seconds by which the chain delays the sound (look-ahead and FFT frames); export makes up for it. */
+    latency: units.reduce((sum, u) => sum + (u.latency || 0), 0),
     apply(c, tLocal, when = 0, mode = 'now') {
       for (const u of units) {
         const fx = c.effects.find((e) => e.id === u.fxId);
@@ -132,14 +205,24 @@ export function createChain(ctx, clip) {
         return fx && Object.values(fx.params).some((p) => p.kf?.length);
       });
     },
+    /** Unhook the chain and stop what keeps running on its own (oscillators, worklet processors). */
     disconnect() {
       try { input.disconnect(); } catch { /* ignore */ }
       try { output.disconnect(); } catch { /* ignore */ }
+      for (const u of units) {
+        try { u.dispose?.(); } catch { /* ignore */ }
+      }
     },
   };
 }
 
-function setParam(param, value, when, mode) {
+/** Stop a worklet node's processor (it would otherwise keep running after being unhooked). */
+export function disposeWorklet(node) {
+  try { node.port.postMessage('dispose'); } catch { /* ignore */ }
+  try { node.disconnect(); } catch { /* ignore */ }
+}
+
+export function setParam(param, value, when, mode) {
   if (!Number.isFinite(value)) return;
   if (mode === 'now') param.value = value;
   else if (mode === 'ramp') param.linearRampToValueAtTime(value, when);
@@ -149,8 +232,29 @@ function setParam(param, value, when, mode) {
 function buildUnit(ctx, fx) {
   const input = ctx.createGain();
   const output = ctx.createGain();
-  const unit = { fxId: fx.id, input, output, apply() {} };
+  const unit = { fxId: fx.id, input, output, latency: 0, apply() {} };
+  const custom = UNIT_BUILDERS[fx.type];
+  if (custom) {
+    try {
+      custom.build(ctx, fx, unit, workletReady.has(ctx));
+    } catch (err) {
+      // a unit that cannot be built passes the sound through rather than silencing the clip
+      console.warn('audio effect unavailable', fx.type, err);
+      try { input.disconnect(); } catch { /* not connected */ }
+      input.connect(output);
+      unit.apply = () => {};
+      unit.latency = 0;
+    }
+    return unit;
+  }
   switch (fx.type) {
+    case 'gain': {
+      // 증폭 (Amplify) works where it sits in the effect list, like the other effects
+      const g = ctx.createGain();
+      input.connect(g).connect(output);
+      unit.apply = (v, when, mode) => setParam(g.gain, dbToGain(v.gain), when, mode);
+      break;
+    }
     case 'eq3': {
       const low = ctx.createBiquadFilter();
       low.type = 'lowshelf';
@@ -186,6 +290,7 @@ function buildUnit(ctx, fx) {
       const comp = ctx.createDynamicsCompressor();
       const makeup = ctx.createGain();
       input.connect(comp).connect(makeup).connect(output);
+      unit.latency = nodeDelays(ctx).compressor;
       unit.apply = (v, when, mode) => {
         setParam(comp.threshold, v.threshold, when, mode);
         setParam(comp.ratio, v.ratio, when, mode);
@@ -234,6 +339,7 @@ function buildUnit(ctx, fx) {
       }
       const node = new AudioWorkletNode(ctx, 'montage-gate', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2] });
       input.connect(node).connect(output);
+      unit.dispose = () => disposeWorklet(node);
       unit.apply = (v, when, mode) => {
         for (const k of ['threshold', 'reduction', 'attack', 'release']) setParam(node.parameters.get(k), v[k], when, mode);
       };
@@ -249,6 +355,9 @@ function buildUnit(ctx, fx) {
       osc.frequency.value = fx.params.freq.value;
       osc.connect(ring.gain);
       osc.start();
+      unit.dispose = () => {
+        try { osc.stop(); } catch { /* already stopped */ }
+      };
       input.connect(dry).connect(output);
       input.connect(ring).connect(wet).connect(output);
       unit.apply = (v, when, mode) => {

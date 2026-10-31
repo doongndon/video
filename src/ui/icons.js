@@ -142,11 +142,90 @@ const P = {
   quickMask: '<rect x="2" y="3" width="12" height="10" rx="1.5"/><circle cx="8" cy="8" r="3" stroke-dasharray="1.5 1.2"/>',
   channels: '<circle cx="6" cy="6.5" r="3.5"/><circle cx="10" cy="6.5" r="3.5"/><circle cx="8" cy="10" r="3.5"/>',
   ease: '<path d="M2 13.5C7 13.5 9 2.5 14 2.5"/><circle cx="2" cy="13.5" r="1.2" fill="currentColor"/><circle cx="14" cy="2.5" r="1.2" fill="currentColor"/>',
+  // effect controls / effects panel
+  tlview: '<rect x="1.5" y="3" width="13" height="10" rx="1"/><path d="M6.5 3v10"/><path d="M9.5 6h.01M12 6h.01M8.5 9.5h4"/>',
+  maskEllipse: '<ellipse cx="8" cy="8" rx="6" ry="4.5"/>',
+  maskPoly: '<path d="M3 4.5 12.5 3 13.5 12 4 13z"/><circle cx="3" cy="4.5" r=".9" fill="currentColor"/><circle cx="12.5" cy="3" r=".9" fill="currentColor"/><circle cx="13.5" cy="12" r=".9" fill="currentColor"/><circle cx="4" cy="13" r=".9" fill="currentColor"/>',
+  star: '<path d="m8 2 1.8 3.7 4.1.6-3 2.8.8 4L8 11.2l-3.7 1.9.8-4-3-2.8 4.1-.6z"/>',
+  starFill: '<path d="m8 2 1.8 3.7 4.1.6-3 2.8.8 4L8 11.2l-3.7 1.9.8-4-3-2.8 4.1-.6z" fill="currentColor"/>',
+  // shell: menus, dialogs, status
+  chevRight: '<path d="M6 3.5 10.5 8 6 12.5"/>',
+  chevLeft: '<path d="M10 3.5 5.5 8l4.5 4.5"/>',
+  chevDown: '<path d="M3.5 6 8 10.5 12.5 6"/>',
+  keyboard: '<rect x="1.5" y="4" width="13" height="8.5" rx="1.5"/><path d="M4 6.8h.01M6.5 6.8h.01M9 6.8h.01M11.5 6.8h.01M4.5 9.8h7"/>',
+  search: '<circle cx="7" cy="7" r="4.3"/><path d="m10.3 10.3 3.7 3.7"/>',
+  clock: '<circle cx="8" cy="8" r="5.8"/><path d="M8 4.8V8l2.2 1.5"/>',
+  minus: '<path d="M3.5 8h9"/>',
+  alert: '<path d="M8 2.2 14.3 13.5H1.7z"/><path d="M8 6.5v3.2M8 11.6v.2"/>',
+  info: '<circle cx="8" cy="8" r="6"/><path d="M8 7.2v4M8 4.8v.2"/>',
+  maximize: '<path d="M2.5 6V2.5H6M10 2.5h3.5V6M13.5 10v3.5H10M6 13.5H2.5V10"/>',
+  restore: '<path d="M6 2.5V6H2.5M13.5 6H10V2.5M10 13.5V10h3.5M2.5 10H6v3.5"/>',
+  external: '<path d="M9.5 2.5h4v4M13.5 2.5 7.5 8.5M11.5 9.5v4h-9v-9h4"/>',
+  // editing (Premiere tools, panels and commands)
+  graph: '<path d="M2 13.5h12M2 2.5v11"/><path d="M3.5 11.5C6 11.5 6.5 4 9 4s2.5 3 4.5 3"/>',
+  bezier: '<path d="M2.5 12.5C4 5 12 11 13.5 3.5"/><path d="M2.5 12.5 4 6M13.5 3.5 12 10"/><circle cx="4" cy="6" r="1.1" fill="currentColor"/><circle cx="12" cy="10" r="1.1" fill="currentColor"/>',
+  eq: '<path d="M4 2.5v11M8 2.5v11M12 2.5v11"/><path d="M2.5 10h3M6.5 5h3M10.5 8.5h3"/>',
+  loudness: '<path d="M3 13.5v-3M6 13.5v-6M9 13.5V5M12 13.5V3"/><path d="M1.5 6.5h13" stroke-dasharray="1.5 1.3" stroke-opacity=".6"/>',
+  gain: '<path d="M2.5 6v4h2.5l3.5 3V3L5 6z"/><path d="M11 8h3.5M12.75 6.25v3.5"/>',
+  subclip: '<rect x="2" y="3" width="12" height="10" rx="1"/><path d="M6 5.5H5v5h1M10 5.5h1v5h-1"/>',
+  slide: '<path d="M5.5 4.5h5v7h-5z"/><path d="M1.5 8h2.5M12 8h2.5M3 6.5 1.5 8 3 9.5M13 6.5 14.5 8 13 9.5"/>',
+  rateStretch: '<rect x="5" y="4.5" width="6" height="7" rx="1"/><path d="M1.5 8H5M11 8h3.5M3 6.5 1.5 8 3 9.5M13 6.5 14.5 8 13 9.5"/><path d="M8 6.2V8l1.2.8"/>',
+  trackSelectBack: '<path d="M14 8H5M8 5 5 8l3 3M3 3v10"/>',
+  countdown: '<circle cx="8" cy="8" r="5.8"/><path d="M8 1.5v13M1.5 8h13"/><circle cx="8" cy="8" r="2.6"/>',
+  bars: '<rect x="2" y="3" width="12" height="10" rx="1"/><path d="M5 3v7M8 3v7M11 3v7M2 10h12"/>',
+  captions: '<rect x="1.5" y="3.5" width="13" height="9" rx="1.5"/><path d="M7 6.8a1.8 1.8 0 1 0 0 2.4M12 6.8a1.8 1.8 0 1 0 0 2.4"/>',
+  group: '<rect x="2" y="2" width="7" height="7" rx="1"/><rect x="7" y="7" width="7" height="7" rx="1"/>',
+  nest: '<rect x="2" y="2.5" width="12" height="11" rx="1"/><rect x="5" y="5.5" width="6" height="5" rx=".5"/>',
+  compare: '<rect x="1.5" y="3" width="13" height="10" rx="1"/><path d="M8 1.5v13"/><path d="M3.5 10.5l2.5-3 1.5 1.5" />',
+  chevronRight: '<path d="M6 3.5 10.5 8 6 12.5"/>',
+  chevronDown: '<path d="M3.5 6 8 10.5 12.5 6"/>',
+  roll: '<rect x="2.5" y="1.5" width="11" height="13" rx="1"/><path d="M5 5h6M5 8h6M5 11h4M14.5 5v6M13.2 9.7l1.3 1.3 1.3-1.3"/>',
+  // photo tools: align / distribute, crop, transform
+  alignLeft: '<path d="M2.5 2v12"/><rect x="4.5" y="4" width="8" height="3"/><rect x="4.5" y="9" width="5" height="3"/>',
+  alignHCenter: '<path d="M8 2v12"/><rect x="3" y="4" width="10" height="3"/><rect x="5" y="9" width="6" height="3"/>',
+  alignRight: '<path d="M13.5 2v12"/><rect x="3.5" y="4" width="8" height="3"/><rect x="6.5" y="9" width="5" height="3"/>',
+  alignTop: '<path d="M2 2.5h12"/><rect x="4" y="4.5" width="3" height="8"/><rect x="9" y="4.5" width="3" height="5"/>',
+  alignVCenter: '<path d="M2 8h12"/><rect x="4" y="3" width="3" height="10"/><rect x="9" y="5" width="3" height="6"/>',
+  alignBottom: '<path d="M2 13.5h12"/><rect x="4" y="3.5" width="3" height="8"/><rect x="9" y="6.5" width="3" height="5"/>',
+  distH: '<rect x="1.5" y="5" width="3" height="6"/><rect x="6.5" y="3.5" width="3" height="9"/><rect x="11.5" y="5" width="3" height="6"/><path d="M3 2.5v.01M8 1.5v.01M13 2.5v.01"/>',
+  distV: '<rect x="5" y="1.5" width="6" height="3"/><rect x="3.5" y="6.5" width="9" height="3"/><rect x="5" y="11.5" width="6" height="3"/><path d="M2.5 3h.01M1.5 8h.01M2.5 13h.01"/>',
+  swap: '<path d="M3 5.5h9.5M10 3l2.5 2.5L10 8M13 10.5H3.5M6 8l-2.5 2.5L6 13"/>',
+  straighten: '<path d="M2 11 14 6"/><path d="M2 13.5h12" stroke-dasharray="1.6 1.4"/><circle cx="8" cy="8.5" r="1.3"/>',
+  perspWarp: '<path d="M2 13 5 3h6l3 10z"/><path d="M8 3v10M3.5 8h9"/>',
+  splitH: '<rect x="2" y="3" width="12" height="10" rx="1"/><path d="M2 8h12"/>',
+  splitV: '<rect x="2" y="3" width="12" height="10" rx="1"/><path d="M8 3v10"/>',
+  splitCross: '<rect x="2" y="3" width="12" height="10" rx="1"/><path d="M8 3v10M2 8h12"/>',
+  // type and paths (photo editor)
+  paraLeft: '<path d="M2 3.5h12M2 6.5h8M2 9.5h12M2 12.5h7"/>',
+  paraCenter: '<path d="M2 3.5h12M4 6.5h8M2 9.5h12M4.5 12.5h7"/>',
+  paraRight: '<path d="M2 3.5h12M6 6.5h8M2 9.5h12M7 12.5h7"/>',
+  paraJustLeft: '<path d="M2 3.5h12M2 6.5h12M2 9.5h12M2 12.5h6"/>',
+  paraJustCenter: '<path d="M2 3.5h12M2 6.5h12M2 9.5h12M5 12.5h6"/>',
+  paraJustRight: '<path d="M2 3.5h12M2 6.5h12M2 9.5h12M8 12.5h6"/>',
+  paraJustAll: '<path d="M2 3.5h12M2 6.5h12M2 9.5h12M2 12.5h12"/>',
+  pathFill: '<path d="M3 12.5C3 7 6 3 8 3s5 4 5 9.5z" fill="currentColor" stroke="none"/><path d="M3 12.5C3 7 6 3 8 3s5 4 5 9.5z"/>',
+  pathStroke: '<path d="M3 12.5C3 7 6 3 8 3s5 4 5 9.5" stroke-width="2.2"/>',
+  pathToSel: '<path d="M3 12.5C3 7 6 3 8 3s5 4 5 9.5z" stroke-dasharray="1.8 1.6"/>',
+  selToPath: '<rect x="2" y="3" width="8" height="8" stroke-dasharray="1.8 1.6"/><path d="M7 13.5c2-4 4.5-6 7-6.5"/><circle cx="14" cy="7" r="1" fill="currentColor"/>',
+  curvaturePen: '<path d="M3 13l2-5 6-6 3 3-6 6z"/><path d="M1.5 6c1.5-3 4-4 6.5-3.5" stroke-dasharray="1.6 1.4"/>',
+  rectShape: '<rect x="2.5" y="3.5" width="11" height="9" rx="1"/>',
+  ellipseShape: '<ellipse cx="8" cy="8" rx="5.8" ry="4.6"/>',
+  triangleShape: '<path d="M8 2.8 14 13H2z"/>',
+  polygonShape: '<path d="M8 2.2l5.5 4-2.1 6.6H4.6L2.5 6.2z"/>',
+  lineShape: '<path d="M2.5 13.5 13.5 2.5"/>',
+  customShape: '<path d="M8 13.5S2.5 10 2.5 6.2A2.9 2.9 0 0 1 8 4.8a2.9 2.9 0 0 1 5.5 1.4C13.5 10 8 13.5 8 13.5z"/>',
+  textPath: '<path d="M2 12c2-5 10-5 12 0"/><path d="M5.5 3h5M8 3v5"/>',
+  fillAdjust: '<circle cx="8" cy="8" r="5.5"/><path d="M8 2.5a5.5 5.5 0 0 1 0 11z" fill="currentColor" stroke="none"/>',
+  lockAlpha: '<rect x="2.5" y="2.5" width="11" height="11"/><path d="M2.5 8h11M8 2.5v11"/><path d="M2.5 2.5h5.5v5.5H2.5zM8 8h5.5v5.5H8z" fill="currentColor" stroke="none" opacity=".6"/>',
+  swapColors: '<path d="M4 11.5V6a2 2 0 0 1 2-2h5.5M9.5 2l2 2-2 2M2 9.5l2 2 2-2"/>',
+  defaultColors: '<rect x="2" y="2" width="7" height="7" fill="currentColor" stroke="none"/><rect x="7" y="7" width="7" height="7"/>',
 };
 
 export function icon(name, size = 16) {
   const span = document.createElement('span');
   span.className = 'ico';
+  // the size scales with 보기 ▸ 화면 크기 like the rest of the interface (see .ico in app.css)
+  if (size !== 16) span.style.setProperty('--ico', `${size}px`);
   span.innerHTML = `<svg viewBox="0 0 16 16" width="${size}" height="${size}" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">${P[name] || ''}</svg>`;
   return span;
 }
@@ -167,3 +246,6 @@ export function iconButton(name, title, onclick, { label = null, cls = '' } = {}
   if (onclick) b.addEventListener('click', onclick);
   return b;
 }
+
+/** True when the set has an icon of that name. */
+export const hasIcon = (name) => Object.prototype.hasOwnProperty.call(P, name);

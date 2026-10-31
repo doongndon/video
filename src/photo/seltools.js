@@ -1,14 +1,19 @@
 // Photoshop's selection tools and commands: single row / column marquee, magnetic lasso, quick
-// selection, object selection, select subject / sky, colour range, grow / similar / border / smooth,
-// quick mask, save / load selection, alpha channels and the channel view, plus the mask target
-// shared by the painting tools (layer mask, quick mask or an alpha channel).
+// selection, object selection (with Object Finder), select subject / sky, colour range (with its
+// selection previews), luminosity selections and masks, grow / similar and the Modify dialogs,
+// quick mask, save / load selection, alpha channels and the Channels panel, plus the mask target
+// shared by the painting tools (layer mask, quick mask or an alpha channel). The marquees, the magic
+// wand and arrow-key nudging live in selmarquee.js, adjustments on alpha channels in selchan.js.
 
 import { h, clamp } from '../util.js';
 import { toast, promptDialog, openModal, loadPref, savePref } from '../ui/common.js';
+import { icon } from '../ui/icons.js';
 import { makeCanvas, cloneCanvas } from './doc.js';
 import { TOOLS, TOOL_BY_ID, TOOL_GROUPS, SEL_MODE_OPT, selMode, tinyOutline, deselectByClick } from './tools.js';
 import * as SEL from './selection.js';
 import * as SX from './selectx.js';
+import { installMarquee } from './selmarquee.js';
+import { installChannelEdit } from './selchan.js';
 
 const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
 
@@ -229,7 +234,7 @@ const magLasso = {
 
 const quickSel = {
   id: 'quickSel', name: '빠른 선택', key: 'W', icon: 'quickSel', group: 'select', cursor: 'brush',
-  options: [['mode', '선택 방식', 'select', null, null, 'new', [['new', '새 선택'], ['add', '더하기 (Shift)'], ['sub', '빼기 (Alt)']]], ['size', '크기', 'range', 1, 400, 30], ['sampleAll', '모든 레이어 샘플링', 'bool', null, null, false], ['enhance', '가장자리 향상', 'bool', null, null, false]],
+  options: [['mode', '선택 방식', 'select', null, null, 'new', [['new', '새 선택'], ['add', '더하기 (Shift)'], ['sub', '빼기 (Alt)']]], ['size', '크기', 'range', 1, 400, 30], ['sampleAll', '모든 레이어 샘플링', 'bool', null, null, false], ['enhance', '자동 향상', 'bool', null, null, false]],
   source(E) {
     const o = E.opts('quickSel');
     const key = `${E.doc.id}:${E.doc.rev}:${o.sampleAll}:${E.doc.activeId}`;
@@ -302,15 +307,52 @@ const quickSel = {
 
 const objSel = {
   id: 'objSel', name: '개체 선택', key: 'W', icon: 'objSel', group: 'select', cursor: 'crosshair',
-  options: [SEL_MODE_OPT, ['shape', '모드', 'select', null, null, 'rect', [['rect', '사각형'], ['lasso', '올가미']]], ['sampleAll', '모든 레이어 샘플링', 'bool', null, null, true]],
+  options: [['finder', '개체 찾기', 'bool', null, null, true], SEL_MODE_OPT, ['shape', '모드', 'select', null, null, 'rect', [['rect', '사각형'], ['lasso', '올가미']]], ['sampleAll', '모든 레이어 샘플링', 'bool', null, null, true], ['hard', '하드 가장자리', 'bool', null, null, false], ['objSub', '개체 빼기', 'bool', null, null, true]],
   down(E, p, e) {
     this.d = { a: p, b: p, pts: [p], mode: selMode(E, e, 'objSel') };
+    this.found = null;
+    clearTimeout(this.ht);
   },
   move(E, p) {
     if (!this.d) return;
     this.d.b = p;
     this.d.pts.push(p);
     E.overlay();
+  },
+  /** Object Finder: after the pointer rests a moment, the object under it is highlighted. */
+  hover(E, p) {
+    if (this.d || !E.opts('objSel').finder) return;
+    clearTimeout(this.ht);
+    const f = this.found;
+    if (f && f.key === this.finderKey(E) && f.label[this.cell(f, p)]) return;
+    if (f) {
+      this.found = null;
+      E.overlay();
+    }
+    this.ht = setTimeout(() => {
+      if (this.d || E.tool !== 'objSel') return;
+      this.find(E, p);
+      E.overlay();
+    }, 250);
+  },
+  finderKey(E) {
+    return `${E.doc.id}:${E.doc.rev}:${!!E.opts('objSel').sampleAll}`;
+  },
+  cell(f, p) {
+    const x = Math.max(0, Math.min(f.sw - 1, Math.floor(p.x * f.s)));
+    const y = Math.max(0, Math.min(f.sh - 1, Math.floor(p.y * f.s)));
+    return y * f.sw + x;
+  },
+  /** The object under p (cached per picture; null on open background). */
+  find(E, p) {
+    const doc = E.doc;
+    if (p.x < 0 || p.y < 0 || p.x >= doc.width || p.y >= doc.height) return null;
+    const key = this.finderKey(E);
+    if (this.cache?.key !== key) this.cache = { key };
+    if (!this.cache.src) this.cache.src = sampleCanvas(E, E.opts('objSel').sampleAll);
+    const f = SX.findObjectAt(this.cache.src, p.x, p.y, this.cache);
+    this.found = f ? { ...f, key, tint: null } : null;
+    return this.found;
   },
   up(E) {
     const d = this.d;
@@ -325,14 +367,41 @@ const objSel = {
       const ys = d.pts.map((q) => q.y);
       r = { x: Math.min(...xs), y: Math.min(...ys), w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys) };
     } else r = { x: Math.min(d.a.x, d.b.x), y: Math.min(d.a.y, d.b.y), w: Math.abs(d.b.x - d.a.x), h: Math.abs(d.b.y - d.a.y) };
-    if (r.w < 4 || r.h < 4) {
+    if (Math.max(r.w, r.h) * E.view.zoom < 6) {
+      // a click: with Object Finder, the object under the pointer
+      if (o.finder) {
+        E.toast('개체를 찾는 중…');
+        setTimeout(() => {
+          const f = this.find(E, d.a);
+          if (!f) {
+            E.toast('여기에서는 개체를 찾지 못했습니다');
+            return;
+          }
+          const m = SX.foundToSelection(this.cache.src, f, { hard: !!o.hard });
+          const before = E.doc.capture();
+          E.doc.selection = SEL.combine(E.doc, m, d.mode);
+          this.found = null;
+          E.commit('개체 선택', before);
+        }, 30);
+        return;
+      }
       E.toast('개체 둘레로 사각형(또는 올가미)을 끌어 그리세요');
+      return;
+    }
+    if (r.w < 4 || r.h < 4) return;
+    // Object Subtract off: subtracting takes away the whole drawn area, not the object in it
+    if (d.mode === 'sub' && !o.objSub) {
+      const doc = E.doc;
+      const before = doc.capture();
+      const area = lasso ? SEL.polyPath(d.pts.map((q) => [q.x, q.y])) : SEL.rectPath(r.x, r.y, r.w, r.h);
+      doc.selection = SEL.combine(doc, SEL.shapeMask(doc, area), 'sub');
+      E.commit('개체 선택', before);
       return;
     }
     E.toast('개체를 찾는 중…');
     setTimeout(() => {
       const src = sampleCanvas(E, o.sampleAll);
-      let m = SX.objectSelect(src, r, { poly: lasso ? d.pts.map((q) => [q.x, q.y]) : null });
+      let m = SX.objectSelect(src, r, { poly: lasso ? d.pts.map((q) => [q.x, q.y]) : null, hard: !!o.hard });
       if (!m) {
         // a box drawn inside one object (all one colour): the object is the like-coloured area around it
         const w = SEL.magicWand(E.doc, src, r.x + r.w / 2, r.y + r.h / 2, { tolerance: 40, contiguous: true });
@@ -348,8 +417,43 @@ const objSel = {
       E.commit('개체 선택', before);
     }, 30);
   },
+  deactivate(E) {
+    clearTimeout(this.ht);
+    this.d = null;
+    this.found = null;
+    this.cache = null;
+    E.overlay?.();
+  },
+  cancel(E) {
+    this.d = null;
+    E.overlay();
+  },
   overlay(E, g) {
     const d = this.d;
+    const f = this.found;
+    if (!d && f && f.key === this.finderKey(E)) {
+      // the found object, tinted blue like Photoshop's Object Finder
+      if (!f.tint) {
+        const c = makeCanvas(f.sw, f.sh);
+        const cg = c.getContext('2d');
+        const img = cg.createImageData(f.sw, f.sh);
+        for (let i = 0; i < f.label.length; i++) {
+          if (!f.label[i]) continue;
+          img.data[i * 4] = 40;
+          img.data[i * 4 + 1] = 120;
+          img.data[i * 4 + 2] = 255;
+          img.data[i * 4 + 3] = 110;
+        }
+        cg.putImageData(img, 0, 0);
+        f.tint = c;
+      }
+      const [x0, y0] = E.toScreen(0, 0);
+      const [x1, y1] = E.toScreen(E.doc.width, E.doc.height);
+      g.save();
+      g.imageSmoothingEnabled = true;
+      g.drawImage(f.tint, x0, y0, x1 - x0, y1 - y0);
+      g.restore();
+    }
     if (!d) return;
     g.save();
     g.strokeStyle = '#4aa3ff';
@@ -385,6 +489,8 @@ export function installSelectionTools(P) {
   if (!grp('lasso').includes('polyLasso')) grp('lasso').splice(1, 0, 'polyLasso');
   const wand = grp('wand');
   wand.splice(0, wand.length, 'objSel', 'quickSel', 'wand');
+  installMarquee(P);
+  installChannelEdit(P);
 
   // option bar extras for the selection tools
   const samBtn = () => h('button.small', { onclick: () => C.selectAndMask(), title: '선택 및 마스크 (Alt+Ctrl+R)' }, '선택 및 마스크…');
@@ -402,6 +508,7 @@ export function installSelectionTools(P) {
   for (const id of ['rect', 'ellipse', 'row', 'col', 'lasso', 'polyLasso', 'magLasso', 'quickSel', 'objSel', 'wand']) {
     const t = TOOL_BY_ID[id];
     t.optionButtons = () => [
+      ...(t.styleFields ? t.styleFields(P) : []),
       deselectBtn(t),
       id === 'polyLasso' ? h('button.small', { onclick: () => t.finish?.(P) }, '다각형 닫기') : null,
       id === 'magLasso' ? h('button.small', { onclick: () => t.finish?.(P) }, '닫기') : null,
@@ -508,8 +615,15 @@ export function installSelectionTools(P) {
 
   let disp = { key: null, canvas: null };
   /** The composite as the Channels panel wants it shown (single channels, alpha overlays, quick mask). */
+  let crDisp = { key: null, canvas: null };
   P.displayCanvas = (comp) => {
     const doc = P.doc;
+    const pv = P._crPreview;
+    if (pv && pv.doc === doc && pv.mode !== 'none') {
+      const key = `${pv.ver}|${pv.mode}|${comp.width}x${comp.height}|${doc.rev}`;
+      if (crDisp.key !== key) crDisp = { key, canvas: colorRangePreview(P, comp, pv) };
+      return crDisp.canvas;
+    }
     const st = P.chState();
     const all = st.comps.size === 3;
     const alphas = doc.channels.filter((c) => st.alpha.has(c.id));
@@ -619,18 +733,80 @@ export function installSelectionTools(P) {
     const a = SX.similarSelect(SX.pixelsOf(c), c.width, c.height, docAlpha(), wandTol(), false);
     if (a) setAlpha('유사 영역 선택', a);
   };
-  const modify = async (label, def, max, fn) => {
-    if (!needSel()) return;
-    const v = await promptDialog(label, `픽셀 (1~${max})`, String(def));
-    const n = parseFloat(v);
-    if (!Number.isFinite(n) || n <= 0) return;
-    const doc = P.doc;
-    setAlpha(label, fn(docAlpha(), doc.width, doc.height, Math.min(max, n)));
+  // Select ▸ Modify: Photoshop's dialogs (amount in pixels, "Apply effect at canvas bounds"),
+  // remembering the last values
+  const modPrefs = loadPref('photo.selmod', {});
+  const modifyDialog = (title, field, key, def, max, bounds) => new Promise((resolve) => {
+    const num = h('input', { type: 'number', min: key === 'feather' ? 0.1 : 1, max, step: key === 'feather' ? 0.1 : 1, value: modPrefs[key] ?? def, style: { width: '90px' } });
+    const atB = h('input', { type: 'checkbox', checked: !!modPrefs[`${key}Bounds`] });
+    openModal({
+      title,
+      body: h('div',
+        h('div.form-row', h('label', field), h('div.inline', num, h('small', '픽셀'))),
+        bounds ? h('label.ph-samchk', atB, ' 캔버스 경계에 효과 적용') : null),
+      onClose: () => resolve(null),
+      buttons: [{ label: '취소' }, {
+        label: '확인', primary: true, action: () => {
+          const n = Math.min(max, parseFloat(num.value));
+          if (!Number.isFinite(n) || n <= 0) return false;
+          modPrefs[key] = n;
+          modPrefs[`${key}Bounds`] = atB.checked;
+          savePref('photo.selmod', modPrefs);
+          resolve({ n, atBounds: bounds && atB.checked });
+        },
+      }],
+    });
+    setTimeout(() => num.select(), 0);
+  });
+  /** Run fn on the selection alpha; atBounds pads the picture with unselected pixels first. */
+  const modifyAlpha = (a, w, hh, atBounds, pad, fn) => {
+    if (!atBounds) return fn(a, w, hh);
+    const W2 = w + 2 * pad;
+    const H2 = hh + 2 * pad;
+    const big = new Float32Array(W2 * H2);
+    for (let y = 0; y < hh; y++) big.set(a.subarray(y * w, y * w + w), (y + pad) * W2 + pad);
+    const r = fn(big, W2, H2);
+    const out = new Float32Array(w * hh);
+    for (let y = 0; y < hh; y++) out.set(r.subarray((y + pad) * W2 + pad, (y + pad) * W2 + pad + w), y * w);
+    return out;
   };
-  C.border = () => modify('테두리', 10, 200, (a, w, hh, n) => SX.borderAlpha(a, w, hh, n));
-  C.smooth = () => modify('매끄럽게', 5, 500, (a, w, hh, n) => SX.smoothAlpha(a, w, hh, n));
-  C.expand = () => modify('확대', 5, 500, (a, w, hh, n) => SX.expandAlpha(a, w, hh, n));
-  C.contract = () => modify('축소', 5, 500, (a, w, hh, n) => SX.expandAlpha(a, w, hh, -n));
+  /**
+   * A Modify command: asks for the amount when not given, then runs again through P.cmd with the
+   * values, so an action being recorded keeps them (like the core's feather used to).
+   */
+  const modify = async (name, label, title, field, key, def, max, bounds, fn, value, atBounds) => {
+    if (!needSel()) return undefined;
+    if (value === undefined) {
+      const r = await modifyDialog(title, field, key, def, max, bounds);
+      if (!r || !P.doc?.selection) return undefined;
+      return P.cmd[name](r.n, r.atBounds);
+    }
+    const n = Math.min(max, +value);
+    if (!Number.isFinite(n) || n <= 0) return undefined;
+    const doc = P.doc;
+    const pad = Math.ceil(n) + 2;
+    setAlpha(label, modifyAlpha(docAlpha(), doc.width, doc.height, bounds && !!atBounds, pad, (a, w, hh) => fn(a, w, hh, n)));
+    if (!doc.selection) toast('선택된 픽셀이 없습니다');
+    return undefined;
+  };
+  C.border = (v, b) => modify('border', '테두리', '테두리 선택 영역', '폭', 'border', 10, 200, false, (a, w, hh, n) => SX.borderAlpha(a, w, hh, n), v, b);
+  C.smooth = (v, b) => modify('smooth', '매끄럽게', '선택 영역 매끄럽게', '샘플 반경', 'smooth', 5, 500, true, (a, w, hh, n) => SX.smoothAlpha(a, w, hh, n), v, b);
+  C.expand = (v, b) => modify('expand', '확대', '선택 영역 확대', '확대량', 'expand', 5, 500, true, (a, w, hh, n) => SX.expandAlpha(a, w, hh, n), v, b);
+  C.contract = (v, b) => modify('contract', '축소', '선택 영역 축소', '축소량', 'contract', 5, 500, true, (a, w, hh, n) => SX.expandAlpha(a, w, hh, -n), v, b);
+  // Select ▸ Modify ▸ Feather (Shift+F6): Photoshop's dialog with "Apply effect at canvas bounds"
+  C.feather = async (value, atBounds = false) => {
+    if (!needSel()) return undefined;
+    if (value === undefined) {
+      const r = await modifyDialog('선택 영역 페더', '페더 반경', 'feather', 10, 1000, true);
+      if (!r || !P.doc?.selection) return undefined;
+      return P.cmd.feather(r.n, r.atBounds);
+    }
+    const n = +value;
+    if (!Number.isFinite(n) || n <= 0) return undefined;
+    P.run('페더', () => { P.doc.selection = SEL.feather(P.doc, n, !!atBounds); });
+    if (!P.doc.selection) toast('선택된 픽셀이 없습니다');
+    return undefined;
+  };
 
   // ---------------------------------------------------------------- channels
 
@@ -662,7 +838,7 @@ export function installSelectionTools(P) {
     return id;
   };
   /** Load a channel (alpha id, 'r' | 'g' | 'b' | 'rgb', 'layer', 'mask') as the selection. */
-  C.channelToSelection = (which, mode = 'new', invert = false) => {
+  C.channelToSelection = (which, mode = 'new', invert = false, label = '선택 영역 불러오기') => {
     const doc = P.doc;
     if (!doc) return;
     let c;
@@ -683,7 +859,8 @@ export function installSelectionTools(P) {
       tg.drawImage(c, 0, 0);
       c = t;
     }
-    P.run('선택 영역 불러오기', () => { doc.selection = SEL.combine(doc, c, mode); });
+    P.run(label, () => { doc.selection = SEL.combine(doc, c, mode); });
+    if (!doc.selection && mode === 'new') toast('선택된 픽셀이 없습니다 (채널이 모두 검정입니다)');
   };
   C.deleteChannel = (id = P.chState().active) => {
     const doc = P.doc;
@@ -691,12 +868,93 @@ export function installSelectionTools(P) {
     P.run('채널 삭제', () => { doc.channels = doc.channels.filter((c) => c.id !== id); });
     P.emit('channels');
   };
-  C.duplicateChannel = (id = P.chState().active) => {
+  const COLOR_NAMES = { rgb: 'RGB', r: '빨강', g: '녹색', b: '파랑' };
+  /** A channel's picture as alpha: an alpha channel's own, or a colour channel's brightness. */
+  const channelCanvas = (id) => {
     const doc = P.doc;
     const ch = doc?.channels.find((c) => c.id === id);
-    if (!ch) return;
-    P.run('채널 복제', () => { doc.channels = [...doc.channels, { id: newId(), name: `${ch.name} 복사`, canvas: cloneCanvas(ch.canvas) }]; });
+    if (ch) return cloneCanvas(ch.canvas);
+    if (COLOR_NAMES[id]) return SX.channelAlpha(P.composite(), id);
+    return null;
+  };
+  const channelName = (id) => P.doc?.channels.find((c) => c.id === id)?.name || COLOR_NAMES[id] || '';
+  const inverted = (c) => {
+    const t = makeCanvas(c.width, c.height);
+    const tg = t.getContext('2d');
+    tg.fillRect(0, 0, t.width, t.height);
+    tg.globalCompositeOperation = 'destination-out';
+    tg.drawImage(c, 0, 0);
+    return t;
+  };
+  /**
+   * Duplicate a channel as a new alpha channel; a colour channel (빨강 / 녹색 / 파랑, or RGB for the
+   * brightness) gives a greyscale copy to make a mask from, as in the classic channel-mask workflow.
+   */
+  C.duplicateChannel = (id = P.chState().active, { name = null, invert = false, show = false } = {}) => {
+    const doc = P.doc;
+    let c = channelCanvas(id);
+    if (!doc || !c) return null;
+    if (invert) c = inverted(c);
+    const nid = newId();
+    P.run('채널 복제', () => { doc.channels = [...doc.channels, { id: nid, name: name || `${channelName(id)} 복사`, canvas: c }]; });
+    // Photoshop shows a duplicated colour channel on its own, ready for Levels and painting
+    if (show) C.viewChannel(nid);
+    else P.emit('channels');
+    return nid;
+  };
+  C.duplicateChannelDialog = (id = P.chState().active || 'rgb') => {
+    if (!P.doc) return;
+    const name = h('input', { type: 'text', value: `${channelName(id)} 복사` });
+    const inv = h('input', { type: 'checkbox' });
+    openModal({
+      title: '채널 복제',
+      body: h('div', h('div.form-row', h('label', '복제'), h('b', channelName(id))), h('div.form-row', h('label', '대상'), name), h('div.form-row', h('label', '반전'), inv)),
+      buttons: [{ label: '취소' }, { label: '확인', primary: true, action: () => { C.duplicateChannel(id, { name: name.value.trim() || null, invert: inv.checked, show: !!COLOR_NAMES[id] }); } }],
+    });
+  };
+  C.newChannelDialog = async () => {
+    if (!P.doc) return;
+    const n = await promptDialog('새 채널', '이름', chName());
+    if (n == null) return;
+    const id = C.newChannel(null, n.trim() || null);
+    if (id) C.viewChannel(id);
+  };
+  /** Select ▸ Luminosity: the picture's brightness as a selection (Ctrl+Alt+2). */
+  C.selectLuminosity = (mode = 'new') => {
+    if (!P.doc) return;
+    C.channelToSelection('rgb', mode, false, '광도 선택');
+  };
+  /**
+   * Luminosity masks: lights k = L^k, darks k = (1 − L)^k, midtones k = (1 − L^k)(1 − (1 − L)^k), the
+   * selections Photoshop users build by intersecting the luminosity with itself. toChannel saves
+   * the whole set as alpha channels instead.
+   */
+  const lumaMask = (kind, k) => {
+    const L = SX.alphaOf(SX.channelAlpha(P.composite(), 'rgb'));
+    const a = new Float32Array(L.length);
+    for (let i = 0; i < L.length; i++) {
+      const l = L[i];
+      a[i] = kind === 'lights' ? l ** k : kind === 'darks' ? (1 - l) ** k : (1 - l ** k) * (1 - (1 - l) ** k);
+    }
+    return SX.alphaCanvas(a, P.doc.width, P.doc.height);
+  };
+  const LUMA_NAMES = { lights: '밝은 영역', darks: '어두운 영역', mids: '중간 영역' };
+  C.luminosityMask = (kind = 'lights', k = 1, mode = 'new') => {
+    const doc = P.doc;
+    if (!doc) return;
+    const c = lumaMask(kind, k);
+    P.run(`광도 마스크 (${LUMA_NAMES[kind]} ${k})`, () => { doc.selection = SEL.combine(doc, c, mode); });
+    if (!doc.selection) toast('선택된 픽셀이 없습니다');
+  };
+  C.luminosityChannels = () => {
+    const doc = P.doc;
+    if (!doc) return;
+    const set = [['lights', 1], ['lights', 2], ['lights', 3], ['lights', 4], ['mids', 1], ['mids', 2], ['darks', 1], ['darks', 2], ['darks', 3], ['darks', 4]];
+    P.run('광도 마스크 채널 만들기', () => {
+      doc.channels = [...doc.channels, ...set.map(([kind, k]) => ({ id: newId(), name: `${LUMA_NAMES[kind]} ${k}`, canvas: lumaMask(kind, k) }))];
+    });
     P.emit('channels');
+    toast('광도 마스크 10개를 채널로 만들었습니다. 채널을 Ctrl+클릭하면 선택 영역이 됩니다.');
   };
   C.renameChannel = async (id = P.chState().active) => {
     const doc = P.doc;
@@ -814,78 +1072,240 @@ export function installSelectionTools(P) {
 
   C.colorRange = () => colorRangeDialog(P);
   C.selectAndMask = () => import('./selmask.js').then((m) => m.selectAndMaskDialog(P));
+
+  // ---------------------------------------------------------------- Select menu additions
+  P.extendMenus = [...(P.extendMenus || []), () => {
+    const orig = P.menus['선택'];
+    if (!orig) return;
+    P.menus['선택'] = () => {
+      const items = orig();
+      const no = !P.doc;
+      const at = (start) => items.findIndex((x) => typeof x === 'object' && x?.label?.startsWith(start));
+      // the subject and sky commands now work like Photoshop's
+      const subj = at('피사체');
+      if (subj >= 0) items[subj] = { ...items[subj], label: '피사체' };
+      const sky = at('하늘');
+      if (sky >= 0) items[sky] = { ...items[sky], label: '하늘' };
+      // Luminosity next to Color Range (the core menu may list it at the end: moved, not doubled)
+      const old = at('광도');
+      if (old >= 0) items.splice(old, 1);
+      const cr = at('색상 범위');
+      const lum = (kind, label) => ({ label, submenu: [1, 2, 3, 4].filter((k) => kind !== 'mids' || k < 4).map((k) => ({ label: `${label} ${k}`, action: () => C.luminosityMask(kind, k) })) });
+      items.splice(cr >= 0 ? cr + 1 : items.length, 0,
+        { label: '광도 선택', key: `${/Mac|iPhone|iPad/.test(navigator.platform) ? '⌘' : 'Ctrl+'}Alt+2`, disabled: no, action: () => C.selectLuminosity() },
+        { label: '광도 마스크', disabled: no, submenu: [
+          lum('lights', '밝은 영역'), lum('mids', '중간 영역'), lum('darks', '어두운 영역'),
+          '-',
+          { label: '모두 채널로 만들기', action: () => C.luminosityChannels() },
+        ] });
+      return items;
+    };
+  }];
 }
 
 // ---------------------------------------------------------------- colour range dialog
 
+const CR_PREVIEWS = [['none', '없음'], ['gray', '회색 음영'], ['black', '검정 매트'], ['white', '흰색 매트'], ['quick', '빠른 마스크']];
+const CR_DEFAULTS = { select: 'sampled', fuzziness: 40, localized: false, range: 100, invert: false, toneFuzz: 20, shadowsHi: 65, highlightsLo: 190, midLo: 105, midHi: 150, preview: 'none' };
+
+/** What the document shows while Colour Range is open (선택 영역 미리 보기), see P.displayCanvas. */
+export function colorRangePreview(P, comp, pv) {
+  const W = comp.width;
+  const H = comp.height;
+  const out = makeCanvas(W, H);
+  const g = out.getContext('2d');
+  // the selection at full size
+  const a = makeCanvas(W, H);
+  const ag = a.getContext('2d');
+  ag.imageSmoothingEnabled = true;
+  ag.imageSmoothingQuality = 'high';
+  ag.drawImage(pv.alpha, 0, 0, W, H);
+  if (pv.mode === 'gray') {
+    g.fillStyle = '#000';
+    g.fillRect(0, 0, W, H);
+    ag.globalCompositeOperation = 'source-in';
+    ag.fillStyle = '#fff';
+    ag.fillRect(0, 0, W, H);
+    g.drawImage(a, 0, 0);
+  } else if (pv.mode === 'black' || pv.mode === 'white') {
+    g.fillStyle = pv.mode === 'black' ? '#000' : '#fff';
+    g.fillRect(0, 0, W, H);
+    ag.globalCompositeOperation = 'source-in';
+    ag.drawImage(comp, 0, 0);
+    g.drawImage(a, 0, 0);
+  } else {
+    // quick mask: the colour over the unselected areas
+    const qm = P.qmOpts || { color: '#ff0000', opacity: 50 };
+    g.drawImage(comp, 0, 0);
+    const t = makeCanvas(W, H);
+    const tg = t.getContext('2d');
+    tg.fillStyle = qm.color;
+    tg.fillRect(0, 0, W, H);
+    tg.globalCompositeOperation = 'destination-out';
+    tg.drawImage(a, 0, 0);
+    g.globalAlpha = qm.opacity / 100;
+    g.drawImage(t, 0, 0);
+  }
+  return out;
+}
+
 function colorRangeDialog(P) {
   const doc = P.doc;
   if (!doc) return;
+  if (P.transform) P.applyTransform();
   const comp = P.composite();
   const W = comp.width;
   const H = comp.height;
-  const s = Math.min(1, 300 / Math.max(W, H));
-  const pw = Math.max(1, Math.round(W * s));
-  const ph = Math.max(1, Math.round(H * s));
-  const small = makeCanvas(pw, ph);
-  const sg = small.getContext('2d');
-  sg.imageSmoothingQuality = 'high';
-  sg.drawImage(comp, 0, 0, pw, ph);
-  const spx = sg.getImageData(0, 0, pw, ph).data;
+  // like Photoshop, an existing selection limits the command to it
+  const within = doc.selection ? SX.alphaOf(doc.selection.canvas) : null;
+  const shrunk = (k) => {
+    const w = Math.max(1, Math.round(W * k));
+    const hh = Math.max(1, Math.round(H * k));
+    const c = makeCanvas(w, hh);
+    const g = c.getContext('2d');
+    g.imageSmoothingQuality = 'high';
+    g.drawImage(comp, 0, 0, w, hh);
+    const lim = within ? SX.alphaOf((() => { const m = makeCanvas(w, hh); const mg = m.getContext('2d'); mg.imageSmoothingQuality = 'high'; mg.drawImage(doc.selection.canvas, 0, 0, w, hh); return m; })()) : null;
+    return { c, w, h: hh, px: g.getImageData(0, 0, w, hh).data, lim, k };
+  };
+  // the dialog's own preview (≤ 300 px) and the document preview (≤ about a megapixel)
+  const S = shrunk(Math.min(1, 300 / Math.max(W, H)));
+  const M = shrunk(Math.min(1, Math.sqrt(1e6 / (W * H))));
   const n = parseInt(P.fg.slice(1), 16);
-  const st = loadPref('photo.colorRange', { select: 'sampled', fuzziness: 40, localized: false, range: 100, invert: false, toneFuzz: 20 });
-  const o = { ...st, samples: [[(n >> 16) & 255, (n >> 8) & 255, n & 255]], subtract: [], points: [] };
-  const view = h('canvas.ph-crprev', { width: pw, height: ph });
+  const o = { ...CR_DEFAULTS, ...loadPref('photo.colorRange', {}), samples: [[(n >> 16) & 255, (n >> 8) & 255, n & 255]], subtract: [], points: [] };
+  const opts = (sz) => {
+    const tones = o.select === 'shadows' ? { low: 0, high: o.shadowsHi } : o.select === 'highlights' ? { low: o.highlightsLo, high: 255 } : { low: Math.min(o.midLo, o.midHi), high: Math.max(o.midLo, o.midHi) };
+    return { ...o, tones, points: o.points.map(([x, y]) => [x * sz.k, y * sz.k]) };
+  };
+  const alphaFor = (sz) => {
+    const a = SX.colorRange(sz.px, sz.w, sz.h, opts(sz));
+    if (sz.lim) for (let i = 0; i < a.length; i++) a[i] *= sz.lim[i];
+    return a;
+  };
+  const view = h('canvas.ph-crprev', { width: S.w, height: S.h, title: '눌러서 색 고르기 (Shift+클릭 더하기, Alt+클릭 빼기)' });
   const sel = h('select', ...SX.COLOR_RANGE_PRESETS.map(([v, t]) => h('option', { value: v }, t)));
   sel.value = o.select;
-  const fuzz = h('input', { type: 'range', min: 0, max: 200, value: o.fuzziness });
-  const fuzzN = h('span.ph-val', String(o.fuzziness));
+  const slider = (min, max, value, label) => {
+    const r = h('input', { type: 'range', min, max, value, 'aria-label': label });
+    const num = h('input.ph-num', { type: 'number', min, max, value, 'aria-label': label, style: { width: '64px' } });
+    r.addEventListener('input', () => { num.value = r.value; });
+    num.addEventListener('change', () => {
+      r.value = clamp(+num.value || 0, min, max);
+      num.value = r.value;
+      r.dispatchEvent(new Event('input'));
+    });
+    return { r, num, row: (text, unit) => h('div.form-row', h('label', text), h('div.inline', r, num, unit ? h('small', unit) : null)) };
+  };
+  const fuzz = slider(0, 200, o.select === 'sampled' ? o.fuzziness : o.toneFuzz, '허용량');
+  const range = slider(1, 100, o.range, '범위');
+  const toneA = slider(0, 255, 0, '범위');
+  const toneB = slider(0, 255, 0, '범위 끝');
   const local = h('input', { type: 'checkbox', checked: o.localized });
-  const range = h('input', { type: 'range', min: 1, max: 100, value: o.range });
   const inv = h('input', { type: 'checkbox', checked: o.invert });
+  const pvSel = h('select', { 'aria-label': '선택 영역 미리 보기' }, ...CR_PREVIEWS.map(([v, t]) => h('option', { value: v }, t)));
+  pvSel.value = o.preview;
+  const fuzzRow = fuzz.row('허용량');
+  const fuzzUnit = h('small');
+  fuzzRow.querySelector('.inline').append(fuzzUnit);
+  const localRow = h('div.form-row', h('label', '지역화된 색상 클러스터'), local);
+  const rangeRow = range.row('범위', '%');
+  const toneRow = h('div.form-row', h('label', '범위'), h('div.inline', toneA.r, toneA.num));
+  const toneRow2 = h('div.form-row', h('label', '범위 끝'), h('div.inline', toneB.r, toneB.num));
   let pick = 'set';
-  const pickBtns = [['set', '스포이드'], ['add', '+ 추가 (Shift)'], ['sub', '− 빼기 (Alt)']].map(([v, t]) => {
-    const b = h('button.small.ph-tog', { onclick: () => { pick = v; pickBtns.forEach((x) => x.classList.toggle('on', x === b)); } }, t);
+  const pickBtns = [['set', 'eyedropper', '스포이드'], ['add', 'plus', '샘플에 추가 (Shift)'], ['sub', 'minus', '샘플에서 빼기 (Alt)']].map(([v, ic, t]) => {
+    const b = h('button.small.ph-tog', { title: t, 'aria-label': t, onclick: () => { pick = v; pickBtns.forEach((x) => x.classList.toggle('on', x === b)); } }, icon('eyedropper'), v === 'set' ? null : icon(ic));
     if (v === pick) b.classList.add('on');
     return b;
   });
   const showSel = h('input', { type: 'radio', name: 'crview', checked: true });
   const showImg = h('input', { type: 'radio', name: 'crview' });
-  const draw = () => {
-    o.select = sel.value;
-    o.fuzziness = +fuzz.value;
-    o.toneFuzz = Math.round(+fuzz.value / 2);
-    fuzzN.textContent = o.select === 'sampled' ? String(o.fuzziness) : `${o.toneFuzz}%`;
-    o.localized = local.checked;
-    o.range = +range.value;
-    o.invert = inv.checked;
-    range.disabled = !o.localized;
-    const g = view.getContext('2d');
-    if (showImg.checked) {
-      g.drawImage(small, 0, 0);
-      return;
-    }
-    const a = SX.colorRange(spx, pw, ph, { ...o, points: o.points.map(([x, y]) => [x * s, y * s]), range: o.range });
-    const img = g.createImageData(pw, ph);
-    for (let i = 0; i < a.length; i++) {
-      const v = Math.round(a[i] * 255);
-      img.data[i * 4] = img.data[i * 4 + 1] = img.data[i * 4 + 2] = v;
-      img.data[i * 4 + 3] = 255;
-    }
-    g.putImageData(img, 0, 0);
+  const tone = () => ['highlights', 'shadows', 'midtones'].includes(o.select);
+  /** Show the controls the chosen kind uses (like Photoshop's dialog). */
+  const layout = () => {
+    const sampled = o.select === 'sampled';
+    localRow.hidden = !sampled;
+    rangeRow.hidden = !sampled;
+    range.r.disabled = range.num.disabled = !o.localized;
+    fuzzRow.hidden = !sampled && !tone();
+    fuzz.r.max = fuzz.num.max = sampled ? 200 : 100;
+    fuzz.r.value = fuzz.num.value = sampled ? o.fuzziness : o.toneFuzz;
+    fuzzUnit.textContent = sampled ? '' : '%';
+    toneRow.hidden = !tone();
+    toneRow2.hidden = o.select !== 'midtones';
+    const [va, vb] = o.select === 'shadows' ? [o.shadowsHi, 0] : o.select === 'highlights' ? [o.highlightsLo, 0] : [o.midLo, o.midHi];
+    toneA.r.value = toneA.num.value = va;
+    toneB.r.value = toneB.num.value = vb;
+    for (const b of pickBtns) b.disabled = !sampled;
   };
-  view.addEventListener('pointerdown', (e) => {
-    if (sel.value !== 'sampled') {
-      sel.value = 'sampled';
+  let docTimer = 0;
+  const pushDoc = () => {
+    // the document preview (선택 영역 미리 보기) follows a moment later
+    cancelAnimationFrame(docTimer);
+    docTimer = requestAnimationFrame(() => {
+      if (o.preview === 'none') {
+        P._crPreview = null;
+      } else {
+        const a = alphaFor(M);
+        P._crPreview = { doc, mode: o.preview, alpha: SX.alphaCanvas(a, M.w, M.h), ver: (P._crPreview?.ver || 0) + 1 };
+      }
+      P.redraw();
+    });
+  };
+  const draw = () => {
+    const g = view.getContext('2d');
+    if (showImg.checked) g.drawImage(S.c, 0, 0);
+    else {
+      const a = alphaFor(S);
+      const img = g.createImageData(S.w, S.h);
+      for (let i = 0; i < a.length; i++) {
+        const v = Math.round(a[i] * 255);
+        img.data[i * 4] = img.data[i * 4 + 1] = img.data[i * 4 + 2] = v;
+        img.data[i * 4 + 3] = 255;
+      }
+      g.putImageData(img, 0, 0);
     }
+    pushDoc();
+  };
+  sel.addEventListener('change', () => {
+    o.select = sel.value;
+    layout();
+    draw();
+  });
+  fuzz.r.addEventListener('input', () => {
+    if (o.select === 'sampled') o.fuzziness = +fuzz.r.value;
+    else o.toneFuzz = +fuzz.r.value;
+    draw();
+  });
+  range.r.addEventListener('input', () => { o.range = +range.r.value; draw(); });
+  toneA.r.addEventListener('input', () => {
+    const v = +toneA.r.value;
+    if (o.select === 'shadows') o.shadowsHi = v;
+    else if (o.select === 'highlights') o.highlightsLo = v;
+    else o.midLo = v;
+    draw();
+  });
+  toneB.r.addEventListener('input', () => { o.midHi = +toneB.r.value; draw(); });
+  local.addEventListener('change', () => { o.localized = local.checked; layout(); draw(); });
+  inv.addEventListener('change', () => { o.invert = inv.checked; draw(); });
+  pvSel.addEventListener('change', () => { o.preview = pvSel.value; pushDoc(); });
+  for (const el of [showSel, showImg]) el.addEventListener('change', draw);
+  view.addEventListener('pointerdown', (e) => {
     const r = view.getBoundingClientRect();
-    const x = Math.floor(((e.clientX - r.left) / r.width) * pw);
-    const y = Math.floor(((e.clientY - r.top) / r.height) * ph);
-    const i = (clamp(y, 0, ph - 1) * pw + clamp(x, 0, pw - 1)) * 4;
-    const c = [spx[i], spx[i + 1], spx[i + 2]];
+    const x = clamp(Math.floor(((e.clientX - r.left) / r.width) * S.w), 0, S.w - 1);
+    const y = clamp(Math.floor(((e.clientY - r.top) / r.height) * S.h), 0, S.h - 1);
+    const i = (y * S.w + x) * 4;
+    const c = [S.px[i], S.px[i + 1], S.px[i + 2]];
     const mode = e.shiftKey ? 'add' : e.altKey ? 'sub' : pick;
-    const docPt = [x / s, y / s];
-    if (mode === 'add') {
+    const docPt = [x / S.k, y / S.k];
+    if (o.select !== 'sampled') {
+      // clicking the picture switches to sampled colours, as in Photoshop
+      o.select = 'sampled';
+      sel.value = 'sampled';
+      o.samples = [c];
+      o.subtract = [];
+      o.points = [docPt];
+      layout();
+    } else if (mode === 'add') {
       o.samples.push(c);
       o.points.push(docPt);
     } else if (mode === 'sub') o.subtract.push(c);
@@ -896,30 +1316,46 @@ function colorRangeDialog(P) {
     }
     draw();
   });
-  for (const el of [sel, fuzz, local, range, inv, showSel, showImg]) el.addEventListener('input', draw);
   const body = h('div.ph-crdlg',
     h('div.form-row', h('label', '선택'), sel),
-    h('div.form-row', h('label', '지역화된 색상 클러스터'), local),
-    h('div.form-row', h('label', '허용량'), h('div.inline', fuzz, fuzzN)),
-    h('div.form-row', h('label', '범위'), range),
+    localRow,
+    fuzzRow,
+    rangeRow,
+    toneRow,
+    toneRow2,
     h('div.ph-crwrap', view),
     h('div.inline', h('label', showSel, ' 선택 영역'), h('label', showImg, ' 이미지')),
     h('div.inline', ...pickBtns),
+    h('div.form-row', h('label', '선택 영역 미리 보기'), pvSel),
     h('div.form-row', h('label', '반전'), inv),
-    h('div.note', '미리 보기를 눌러 색을 고르세요 (Shift+클릭 더하기, Alt+클릭 빼기). 처음 샘플은 전경색입니다. 포토샵의 색상 범위와 같은 방식(Lab 색 거리)을 흉내 낸 근사치입니다.'));
+    h('div.note', within
+      ? '지금 선택 영역 안에서만 고릅니다. 미리 보기를 눌러 색을 고르세요 (Shift+클릭 더하기, Alt+클릭 빼기).'
+      : '미리 보기를 눌러 색을 고르세요 (Shift+클릭 더하기, Alt+클릭 빼기). 처음 샘플은 전경색입니다. 창 숨기기(H)로 그림 전체의 미리 보기를 볼 수 있습니다.'));
+  const save = () => {
+    const keep = {};
+    for (const k of Object.keys(CR_DEFAULTS)) keep[k] = o[k];
+    savePref('photo.colorRange', keep);
+  };
   openModal({
     title: '색상 범위',
-    width: 'min(420px, 96vw)',
+    width: 'min(440px, 96vw)',
     body,
+    onClose: () => {
+      cancelAnimationFrame(docTimer);
+      P._crPreview = null;
+      P.redraw();
+    },
     buttons: [{ label: '취소' }, {
       label: '확인', primary: true, action: () => {
-        savePref('photo.colorRange', { select: o.select, fuzziness: o.fuzziness, localized: o.localized, range: o.range, invert: o.invert, toneFuzz: o.toneFuzz });
-        const a = SX.colorRange(SX.pixelsOf(comp), W, H, o);
+        save();
+        const a = SX.colorRange(SX.pixelsOf(comp), W, H, opts({ k: 1 }));
+        if (within) for (let i = 0; i < a.length; i++) a[i] *= within[i];
         P.run('색상 범위', () => { doc.selection = SEL.combine(doc, SX.alphaCanvas(a, W, H), 'new'); });
         if (!doc.selection) toast('선택된 픽셀이 없습니다');
       },
     }],
   });
+  layout();
   draw();
 }
 
@@ -927,52 +1363,87 @@ function colorRangeDialog(P) {
 
 export function buildChannelsPanel(P) {
   const list = h('div.ph-layers', { role: 'listbox', 'aria-label': '채널' });
+  const btn = (ic, title, onclick) => h('button.small', { title, 'aria-label': title, onclick }, icon(ic));
+  const panelMenu = () => {
+    const st = P.chState?.();
+    const a = st?.active || null;
+    return [
+      { label: '새 채널…', disabled: !P.doc, action: () => P.cmd.newChannelDialog() },
+      { label: '채널 복제…', disabled: !P.doc, action: () => P.cmd.duplicateChannelDialog(a || (st && st.comps.size === 1 ? [...st.comps][0] : 'rgb')) },
+      { label: '채널 삭제', disabled: !a, action: () => P.cmd.deleteChannel(a) },
+      '-',
+      { label: '채널 옵션…', disabled: !a, action: () => P.cmd.renameChannel(a) },
+      { label: '선택 영역을 채널로 저장', disabled: !P.doc?.selection, action: () => P.cmd.selectionToChannel() },
+      { label: '채널을 선택 영역으로 불러오기', disabled: !P.doc, action: () => (a ? P.cmd.channelToSelection(a) : P.cmd.loadSelection()) },
+      { label: '광도 마스크를 채널로 만들기', disabled: !P.doc, action: () => P.cmd.luminosityChannels() },
+      '-',
+      { label: '빠른 마스크 옵션…', action: () => P.cmd.quickMaskOptions() },
+    ];
+  };
+  const menuBtn = h('button.small', {
+    title: '채널 패널 메뉴', 'aria-label': '채널 패널 메뉴',
+    onclick: (e) => {
+      const r = e.currentTarget.getBoundingClientRect();
+      import('../ui/common.js').then(({ showMenu }) => showMenu(panelMenu(), r.left, r.bottom));
+    },
+  }, icon('menu'));
   const foot = h('div.ph-lfoot',
-    h('button.small', { title: '채널을 선택 영역으로 불러오기 (Ctrl+클릭과 같음)', 'aria-label': '채널을 선택 영역으로', onclick: () => { const a = P.chState?.().active; if (a) P.cmd.channelToSelection(a); else P.cmd.loadSelection(); } }, '⬚'),
-    h('button.small', { title: '선택 영역을 채널로 저장', 'aria-label': '선택 영역 저장', onclick: () => P.cmd.selectionToChannel() }, '◘'),
-    h('button.small', { title: '새 채널', 'aria-label': '새 채널', onclick: () => P.cmd.newChannel() }, '+'),
-    h('button.small', { title: '채널 삭제', 'aria-label': '채널 삭제', onclick: () => P.cmd.deleteChannel() }, '🗑'));
+    btn('selEllipse', '채널을 선택 영역으로 불러오기 (채널을 Ctrl+클릭해도 됩니다)', () => { const a = P.chState?.().active; if (a) P.cmd.channelToSelection(a); else P.cmd.loadSelection(); }),
+    btn('mask', '선택 영역을 채널로 저장', () => P.cmd.selectionToChannel()),
+    btn('plus', '새 채널', () => P.cmd.newChannelDialog()),
+    btn('trash', '채널 삭제', () => P.cmd.deleteChannel()),
+    menuBtn);
   const el = h('div.ph-panel.layers.channels', list, foot);
-  const thumbs = new Map();
-  const thumbOf = (key, make) => {
+  // thumbnails: the colour ones follow the picture, an alpha channel's its own canvas
+  let colorKey = '';
+  let colorPx = null;
+  const alphaThumbs = new WeakMap();
+  const T = 40;
+  const fit = () => {
     const doc = P.doc;
-    const k = `${doc.id}:${doc.rev}:${key}`;
-    let t = thumbs.get(key);
-    if (t?.k !== k) {
-      const c = h('canvas.ph-thumb', { width: 40, height: 40 });
+    const s = Math.min(T / doc.width, T / doc.height);
+    return { s, ox: (T - doc.width * s) / 2, oy: (T - doc.height * s) / 2 };
+  };
+  const colorThumb = (which) => {
+    const doc = P.doc;
+    const k = `${doc.id}:${doc.rev}:${doc.width}x${doc.height}`;
+    if (colorKey !== k) {
+      const c = makeCanvas(T, T);
       const g = c.getContext('2d');
-      const s = Math.min(40 / doc.width, 40 / doc.height);
+      const { s, ox, oy } = fit();
       g.fillStyle = '#000';
-      g.fillRect(0, 0, 40, 40);
-      g.translate((40 - doc.width * s) / 2, (40 - doc.height * s) / 2);
-      g.scale(s, s);
-      make(g);
-      t = { k, c };
-      thumbs.set(key, t);
+      g.fillRect(0, 0, T, T);
+      g.drawImage(P.composite(), ox, oy, doc.width * s, doc.height * s);
+      colorPx = g.getImageData(0, 0, T, T);
+      colorKey = k;
     }
-    const out = h('canvas.ph-thumb', { width: 40, height: 40 });
-    out.getContext('2d').drawImage(t.c, 0, 0);
+    const out = h('canvas.ph-thumb', { width: T, height: T });
+    const img = new ImageData(new Uint8ClampedArray(colorPx.data), T, T);
+    const c = { r: 0, g: 1, b: 2 }[which];
+    if (c !== undefined) for (let i = 0; i < img.data.length; i += 4) img.data[i] = img.data[i + 1] = img.data[i + 2] = img.data[i + c];
+    out.getContext('2d').putImageData(img, 0, 0);
     return out;
   };
-  const colorThumb = (which) => (g) => {
-    g.drawImage(P.composite(), 0, 0);
-    if (which === 'rgb') return;
-    // one channel, shown grey
-    const c = { r: 0, g: 1, b: 2 }[which];
-    const img = g.getImageData(0, 0, 40, 40);
-    const d = img.data;
-    for (let i = 0; i < d.length; i += 4) d[i] = d[i + 1] = d[i + 2] = d[i + c];
-    g.putImageData(img, 0, 0);
-  };
-  const alphaThumb = (canvas) => (g) => {
-    const doc = P.doc;
-    const t = makeCanvas(doc.width, doc.height);
-    const tg = t.getContext('2d');
-    tg.drawImage(canvas, 0, 0);
-    tg.globalCompositeOperation = 'source-in';
-    tg.fillStyle = '#fff';
-    tg.fillRect(0, 0, t.width, t.height);
-    g.drawImage(t, 0, 0);
+  const alphaThumb = (canvas) => {
+    let t = alphaThumbs.get(canvas);
+    if (!t || t.w !== P.doc.width || t.h !== P.doc.height) {
+      const c = makeCanvas(T, T);
+      const g = c.getContext('2d');
+      const { s, ox, oy } = fit();
+      // white where selected, on black
+      g.drawImage(canvas, ox, oy, P.doc.width * s, P.doc.height * s);
+      g.globalCompositeOperation = 'source-in';
+      g.fillStyle = '#fff';
+      g.fillRect(0, 0, T, T);
+      g.globalCompositeOperation = 'destination-over';
+      g.fillStyle = '#000';
+      g.fillRect(0, 0, T, T);
+      t = { c, w: P.doc.width, h: P.doc.height };
+      alphaThumbs.set(canvas, t);
+    }
+    const out = h('canvas.ph-thumb', { width: T, height: T });
+    out.getContext('2d').drawImage(t.c, 0, 0);
+    return out;
   };
   const loadMode = (e) => (e.shiftKey && e.altKey ? 'inter' : e.shiftKey ? 'add' : e.altKey ? 'sub' : 'new');
   const render = () => {
@@ -980,9 +1451,10 @@ export function buildChannelsPanel(P) {
     list.replaceChildren();
     if (!doc || !P.chState) return;
     const st = P.chState();
-    const row = (key, label, thumb, { visible, on, eye, click, menu, dbl, italic, shortcut }) => {
-      const eyeBtn = h(`button.ph-eye${visible ? '.on' : ''}`, { 'aria-label': `${label} 보이기`, title: '보기 켜기/끄기', onclick: (e) => { e.stopPropagation(); eye(); } }, visible ? '👁' : '');
-      const r = h(`div.ph-layer${on ? '.on.active' : ''}`, { role: 'option', 'aria-selected': String(!!on) }, eyeBtn, thumb, h('span.ph-lname', italic ? h('i', label) : label), shortcut ? h('small.ph-lkey', shortcut) : null);
+    const row = (key, label, thumb, { visible, on, eye, click, menu, dbl, italic }) => {
+      const eyeBtn = h(`button.ph-eye${visible ? '.on' : ''}`, { 'aria-label': `${label} 보이기`, 'aria-pressed': String(!!visible), title: '보기 켜기/끄기', onclick: (e) => { e.stopPropagation(); eye(); } }, visible ? icon('eye') : '');
+      thumb.title = 'Ctrl+클릭: 선택 영역으로 불러오기 (Shift 더하기, Alt 빼기, Shift+Alt 교차)';
+      const r = h(`div.ph-layer${on ? '.on.active' : ''}`, { role: 'option', 'aria-selected': String(!!on) }, eyeBtn, thumb, h('span.ph-lname', italic ? h('i', label) : label));
       r.addEventListener('click', (e) => {
         if (e.ctrlKey || e.metaKey) {
           P.cmd.channelToSelection(key, loadMode(e));
@@ -1000,21 +1472,25 @@ export function buildChannelsPanel(P) {
       list.append(r);
     };
     const allOn = st.comps.size === 3;
-    row('rgb', 'RGB', thumbOf('rgb', colorThumb('rgb')), { visible: allOn, on: allOn && !st.active, eye: () => P.cmd.toggleChannelEye('rgb'), click: () => P.cmd.viewChannel('rgb') });
+    const colorMenu = (k) => () => [
+      { label: '선택 영역으로 불러오기', action: () => P.cmd.channelToSelection(k) },
+      { label: '채널 복제…', action: () => P.cmd.duplicateChannelDialog(k) },
+    ];
+    row('rgb', 'RGB', colorThumb('rgb'), { visible: allOn, on: allOn && !st.active, eye: () => P.cmd.toggleChannelEye('rgb'), click: () => P.cmd.viewChannel('rgb'), menu: colorMenu('rgb') });
     for (const [k, name] of [['r', '빨강'], ['g', '녹색'], ['b', '파랑']]) {
-      row(k, name, thumbOf(k, colorThumb(k)), {
+      row(k, name, colorThumb(k), {
         visible: st.comps.has(k), on: st.comps.has(k) && !st.active, eye: () => P.cmd.toggleChannelEye(k), click: (e) => P.cmd.viewChannel(k, { toggle: e.shiftKey }),
-        menu: () => [{ label: '선택 영역으로 불러오기', action: () => P.cmd.channelToSelection(k) }],
+        menu: colorMenu(k),
       });
     }
     for (const ch of doc.channels) {
-      row(ch.id, ch.name, thumbOf(`a:${ch.id}`, alphaThumb(ch.canvas)), {
+      row(ch.id, ch.name, alphaThumb(ch.canvas), {
         visible: st.alpha.has(ch.id), on: st.active === ch.id, eye: () => P.cmd.toggleChannelEye(ch.id), click: (e) => P.cmd.viewChannel(ch.id, { toggle: e.shiftKey }),
         dbl: () => P.cmd.renameChannel(ch.id),
         menu: () => [
           { label: '선택 영역으로 불러오기', action: () => P.cmd.channelToSelection(ch.id) },
-          { label: '이름 바꾸기…', action: () => P.cmd.renameChannel(ch.id) },
-          { label: '채널 복제', action: () => P.cmd.duplicateChannel(ch.id) },
+          { label: '채널 옵션…', action: () => P.cmd.renameChannel(ch.id) },
+          { label: '채널 복제…', action: () => P.cmd.duplicateChannelDialog(ch.id) },
           { label: '반전', action: () => P.cmd.invertChannel(ch.id) },
           '-',
           { label: '채널 삭제', action: () => P.cmd.deleteChannel(ch.id) },
@@ -1022,12 +1498,12 @@ export function buildChannelsPanel(P) {
       });
     }
     if (doc.quickMask) {
-      row('quick', '빠른 마스크', thumbOf('quick', alphaThumb(doc.quickMask.canvas)), {
+      row('quick', '빠른 마스크', alphaThumb(doc.quickMask.canvas), {
         visible: true, on: true, italic: true, eye: () => {}, click: () => {},
         menu: () => [{ label: '빠른 마스크 모드 끝 (Q)', action: () => P.cmd.quickMask(false) }, { label: '빠른 마스크 옵션…', action: () => P.cmd.quickMaskOptions() }],
       });
     }
-    if (!doc.channels.length && !doc.quickMask) list.append(h('div.note', '선택 영역 ▸ 선택 영역 저장으로 알파 채널을 만들 수 있습니다. 채널을 Ctrl+클릭하면 선택 영역으로 불러옵니다.'));
+    if (!doc.channels.length && !doc.quickMask) list.append(h('div.note', '선택 영역 ▸ 선택 영역 저장으로 알파 채널을 만들 수 있습니다. 채널을 Ctrl+클릭하면 선택 영역으로 불러오고, 빨강·녹색·파랑 채널을 복제하면 마스크를 만들 수 있습니다.'));
   };
   for (const ev of ['channels', 'history', 'layers', 'quickmask']) P.on(ev, render);
   render();

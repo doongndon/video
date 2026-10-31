@@ -1,13 +1,21 @@
-// Pen tools, path selection tools, path commands and the vector-mask hooks. Paths are edited on a
-// "target": the work path, a saved path, the active layer's vector mask, or a path shape layer.
+// Pen tools (펜, 자유 형태 펜 with 자석, 곡률 펜, anchor tools), path selection tools, path commands
+// (패스 칠 / 패스 획 / 선택 영역 만들기 / 작업 패스 만들기 with Photoshop's dialogs) and the vector-mask
+// hooks. Paths are edited on a "target": the work path, a saved path, the active layer's vector
+// mask, or a path shape layer.
 
-import { newLayer, makeCanvas } from './doc.js';
-import { TOOLS, TOOL_BY_ID, TOOL_GROUPS, Stroke, brushOpts } from './tools.js';
+import { h, clamp } from '../util.js';
+import { newLayer, makeCanvas, BLEND_MODES } from './doc.js';
+import { TOOLS, TOOL_BY_ID, TOOL_GROUPS } from './tools.js';
 import * as PT from './paths.js';
 import * as SEL from './selection.js';
-import { toast, promptDialog } from '../ui/common.js';
+import * as SX from './selectx.js';
+import { compositeOnto } from './blend.js';
+import { listPatterns, patternCanvas } from './resources.js';
+import { toast, promptDialog, openModal } from '../ui/common.js';
+import { installShapes2 } from './shapes2.js';
 
 const near = (a, b, tol) => Math.hypot(a[0] - b[0], a[1] - b[1]) <= tol;
+const reverseSub = (sp) => ({ ...sp, knots: [...sp.knots].reverse().map((k) => ({ ...k, in: k.out, out: k.in })) });
 
 // ---------------------------------------------------------------- targets
 
@@ -29,8 +37,11 @@ function normaliseShape(doc, l) {
 function writeShape(doc, l, sps) {
   const b = PT.pathBounds(sps) || { x: l.x, y: l.y, w: 1, h: 1 };
   const w = Math.max(1, b.w);
-  const h = Math.max(1, b.h);
-  l.shape = { ...l.shape, type: 'path', subpaths: PT.translatePath(sps, -b.x, -b.y), w, h, pw: w, ph: h };
+  const h2 = Math.max(1, b.h);
+  // a line keeps its stroke as a path; live properties (corners, arrowheads…) end here, like Photoshop
+  const s = { ...l.shape };
+  for (const k of ['radii', 'radius', 'sides', 'starRatio', 'smooth', 'smoothIndents', 'indent', 'custom', 'arrowStart', 'arrowEnd', 'arrowW', 'arrowL', 'arrowC']) delete s[k];
+  l.shape = { ...s, type: 'path', subpaths: PT.translatePath(sps, -b.x, -b.y), w, h: h2, pw: w, ph: h2 };
   l.x = b.x;
   l.y = b.y;
   l.rotation = 0;
@@ -52,6 +63,7 @@ export function installPathTools(P) {
     if (t?.kind === 'work' && doc.workPath) return t;
     return null;
   };
+  const targetKey = () => JSON.stringify(P.resolvePathTarget());
   /** The edited path in doc coordinates (empty array when there is none). */
   P.getPath = () => {
     const doc = P.doc;
@@ -102,6 +114,7 @@ export function installPathTools(P) {
     if ((t?.kind === 'shape' || t?.kind === 'vmask') && t.layerId !== l?.id) {
       P.pathTarget = l?.kind === 'shape' ? { kind: 'shape', layerId: l.id } : P.doc?.workPath ? { kind: 'work' } : null;
       P.pathSel = { subs: new Set(), knots: new Set() };
+      P.penDraw = null;
       P.emit('paths');
     }
   });
@@ -120,30 +133,20 @@ export function installPathTools(P) {
 
   // ---------------------------------------------------------------- overlay
 
+  const PEN_TOOLS = ['pen', 'freePen', 'curvaturePen', 'addAnchor', 'deleteAnchor', 'convertPoint', 'directSelect'];
   P.drawPathOverlay = (g, { showAll = false, outlineOnly = false } = {}) => {
     const sps = P.getPath();
     if (!sps.length) return;
-    if (outlineOnly) {
-      const z = P.view.zoom;
-      const [ox, oy] = P.toScreen(0, 0);
-      g.save();
-      g.translate(ox, oy);
-      g.scale(z, z);
-      g.lineWidth = 1 / z;
-      g.strokeStyle = 'rgba(61,139,255,.8)';
-      g.stroke(PT.toPath2D(sps));
-      g.restore();
-      return;
-    }
     const z = P.view.zoom;
     const [ox, oy] = P.toScreen(0, 0);
     g.save();
     g.translate(ox, oy);
     g.scale(z, z);
     g.lineWidth = 1 / z;
-    g.strokeStyle = '#3d8bff';
+    g.strokeStyle = outlineOnly ? 'rgba(61,139,255,.8)' : '#3d8bff';
     g.stroke(PT.toPath2D(sps));
     g.restore();
+    if (outlineOnly) return;
     const sel = P.pathSel;
     const box = (x, y, filled) => {
       const [sx, sy] = P.toScreen(x, y);
@@ -152,11 +155,12 @@ export function installPathTools(P) {
       g.fillRect(sx - 3.5, sy - 3.5, 7, 7);
       g.strokeRect(sx - 3.5, sy - 3.5, 7, 7);
     };
+    const drawing = P.penDraw || P.curvDraw;
     sps.forEach((sp, si) => {
       const subOn = showAll || sel.subs.has(si);
       sp.knots.forEach((k, ki) => {
         const on = sel.knots.has(`${si}:${ki}`);
-        if (on || (P.tool === 'pen' && P.penDraw?.si === si && ki === sp.knots.length - 1)) {
+        if (on || (P.tool === 'pen' && drawing?.si === si && ki === sp.knots.length - 1)) {
           for (const hnd of [k.in, k.out]) {
             if (near(hnd, k.p, 0.01)) continue;
             const [a, b] = P.toScreen(k.p[0], k.p[1]);
@@ -172,7 +176,18 @@ export function installPathTools(P) {
             g.fill();
           }
         }
-        if (subOn || on || P.tool === 'directSelect' || P.tool === 'pen' || P.tool === 'addAnchor' || P.tool === 'deleteAnchor' || P.tool === 'convertPoint') box(k.p[0], k.p[1], on || (subOn && P.tool === 'pathSelect'));
+        if (subOn || on || PEN_TOOLS.includes(P.tool)) {
+          if (P.tool === 'curvaturePen' && !k.corner) {
+            // the curvature pen shows smooth points as circles, corners as squares
+            const [sx, sy] = P.toScreen(k.p[0], k.p[1]);
+            g.fillStyle = on ? '#3d8bff' : '#ffffff';
+            g.strokeStyle = '#3d8bff';
+            g.beginPath();
+            g.arc(sx, sy, 4, 0, Math.PI * 2);
+            g.fill();
+            g.stroke();
+          } else box(k.p[0], k.p[1], on || (subOn && P.tool === 'pathSelect'));
+        }
       });
     });
   };
@@ -187,8 +202,9 @@ export function installPathTools(P) {
     }
     return null;
   };
-  const hitHandle = (sps, p) => {
-    for (const key of P.pathSel.knots) {
+  const hitHandle = (sps, p, any = false) => {
+    const keys = any ? sps.flatMap((sp, si) => sp.knots.map((_, ki) => `${si}:${ki}`)) : [...P.pathSel.knots];
+    for (const key of keys) {
       const [si, ki] = key.split(':').map(Number);
       const k = sps[si]?.knots[ki];
       if (!k) continue;
@@ -197,20 +213,27 @@ export function installPathTools(P) {
     }
     return null;
   };
+  const hitCtx = makeCanvas(1, 1).getContext('2d');
   const hitSub = (sps, p) => {
     const n = PT.nearestOnPath(sps, p.x, p.y);
     if (n && n.d <= tol()) return n.si;
     // inside a closed subpath counts too (path selection tool)
-    const g = makeCanvas(1, 1).getContext('2d');
-    for (let si = sps.length - 1; si >= 0; si--) if (sps[si].closed && g.isPointInPath(PT.toPath2D([sps[si]]), p.x, p.y)) return si;
+    for (let si = sps.length - 1; si >= 0; si--) if (sps[si].closed && hitCtx.isPointInPath(PT.toPath2D([sps[si]]), p.x, p.y)) return si;
     return -1;
+  };
+  const isEnd = (sp, ki) => !sp.closed && (ki === 0 || ki === sp.knots.length - 1);
+  /** Shift: the point at a multiple of 45° from an anchor. */
+  const constrain = (from, p) => {
+    const ang = Math.round(Math.atan2(p.y - from[1], p.x - from[0]) / (Math.PI / 4)) * (Math.PI / 4);
+    const len = Math.hypot(p.x - from[0], p.y - from[1]);
+    return { x: from[0] + Math.cos(ang) * len, y: from[1] + Math.sin(ang) * len };
   };
 
   // ---------------------------------------------------------------- tools
 
   const begin = (label) => ({ before: P.doc.capture(), label });
-  const finish = (h) => {
-    if (h) P.commit(h.label, h.before);
+  const finish = (hh) => {
+    if (hh) P.commit(hh.label, hh.before);
   };
   const ensureTargetForDrawing = (mode) => {
     const doc = P.doc;
@@ -226,20 +249,54 @@ export function installPathTools(P) {
       P.pathTarget = { kind: 'work' };
     }
   };
+  /** Shift+P cycles the pen tools (Photoshop's order). */
+  const PEN_CYCLE = ['pen', 'freePen', 'curvaturePen'];
+  const cycleKey = (id, e) => {
+    if (e.code === 'KeyP' && e.shiftKey && !e.ctrlKey && !e.metaKey) {
+      P.setTool(PEN_CYCLE[(PEN_CYCLE.indexOf(id) + 1) % PEN_CYCLE.length]);
+      return true;
+    }
+    return false;
+  };
+  /** The rubber band: where the next segment would go (dashed). */
+  const rubber = (g, from, out, p) => {
+    if (!p) return;
+    const [a, b] = P.toScreen(from[0], from[1]);
+    const [c, d] = P.toScreen(out[0], out[1]);
+    const [e, f] = P.toScreen(p.x, p.y);
+    g.save();
+    g.strokeStyle = 'rgba(61,139,255,.85)';
+    g.setLineDash([4, 3]);
+    g.beginPath();
+    g.moveTo(a, b);
+    g.bezierCurveTo(c, d, e, f, e, f);
+    g.stroke();
+    g.restore();
+  };
 
+  let directSelect = null;
   const pen = {
     id: 'pen', name: '펜', key: 'P', icon: 'pen', group: 'pen', cursor: 'crosshair',
-    options: [['mode', '모드', 'select', null, null, 'path', [['path', '패스'], ['shape', '모양 (레이어)']]], ['op', '패스 작업', 'select', null, null, 'combine', PT.PATH_OPS], ['newLayer', '모양마다 새 레이어', 'bool', null, null, true], ['autoAdd', '자동 추가/삭제', 'bool', null, null, true]],
+    options: [['mode', '모드', 'select', null, null, 'path', [['path', '패스'], ['shape', '모양 (레이어)']]], ['op', '패스 작업', 'select', null, null, 'combine', PT.PATH_OPS], ['newLayer', '모양마다 새 레이어', 'bool', null, null, true], ['autoAdd', '자동 추가/삭제', 'bool', null, null, true], ['rubber', '고무 밴드', 'bool', null, null, true]],
     activate() {
       P.autoPathTarget();
     },
     down(E, p, e) {
+      // Ctrl: the direct selection tool for as long as it is held (Photoshop)
+      if ((e.ctrlKey || e.metaKey) && directSelect) {
+        this.temp = directSelect;
+        directSelect.down(E, p, e);
+        return;
+      }
+      this.temp = null;
       const o = E.opts('pen');
       let sps = PT.clonePath(P.getPath());
-      const d = P.penDraw;
-      // continue an open subpath, or close it on its first anchor
-      if (d && sps[d.si] && !sps[d.si].closed) {
+      let d = P.penDraw;
+      if (d && (d.key !== targetKey() || !sps[d.si] || sps[d.si].closed)) d = P.penDraw = null;
+      if (d) {
         const sp = sps[d.si];
+        const last = sp.knots[sp.knots.length - 1];
+        // close on the first anchor
         if (sp.knots.length > 1 && near(sp.knots[0].p, [p.x, p.y], tol())) {
           this.h = begin('패스 닫기');
           sp.closed = true;
@@ -248,16 +305,49 @@ export function installPathTools(P) {
           P.penDraw = null;
           return;
         }
+        // on the last anchor: a corner from here on (its outgoing handle goes; drag for a new one)
+        if (near(last.p, [p.x, p.y], tol())) {
+          this.h = begin('기준점 변환');
+          last.out = [...last.p];
+          last.smooth = false;
+          P.setPath(sps);
+          this.drag = { si: d.si, ki: sp.knots.length - 1, start: p, outOnly: true };
+          return;
+        }
+        // on the end of another open subpath: join them
+        const hk = hitKnot(sps, p);
+        if (hk && hk.si !== d.si && isEnd(sps[hk.si], hk.ki)) {
+          this.h = begin('패스 연결');
+          const other = hk.ki === 0 ? sps[hk.si] : reverseSub(sps[hk.si]);
+          sp.knots.push(...other.knots);
+          sps.splice(hk.si, 1);
+          P.setPath(sps);
+          P.penDraw = null;
+          finish(this.h);
+          this.h = null;
+          return;
+        }
+        const q = e.shiftKey ? constrain(last.p, p) : p;
         this.h = begin('기준점 추가');
-        sp.knots.push(PT.knot(p.x, p.y));
+        sp.knots.push(PT.knot(q.x, q.y));
         P.setPath(sps);
-        this.drag = { si: d.si, ki: sp.knots.length - 1, start: p, alt: e.altKey };
+        this.drag = { si: d.si, ki: sp.knots.length - 1, start: q, alt: e.altKey };
         return;
       }
-      // add / delete anchors on an existing path
-      if (o.autoAdd && sps.length && !e.shiftKey) {
+      if (sps.length && !e.shiftKey) {
         const hk = hitKnot(sps, p);
-        if (hk) {
+        // an end of an open subpath: carry on drawing from it
+        if (hk && isEnd(sps[hk.si], hk.ki)) {
+          if (hk.ki === 0 && sps[hk.si].knots.length > 1) {
+            sps[hk.si] = reverseSub(sps[hk.si]);
+            P.setPath(sps);
+          }
+          P.penDraw = { si: hk.si, key: targetKey() };
+          P.redraw();
+          return;
+        }
+        // add / delete anchors on an existing path
+        if (o.autoAdd && hk) {
           this.h = begin('기준점 삭제');
           sps[hk.si].knots.splice(hk.ki, 1);
           if (sps[hk.si].knots.length < 2) sps.splice(hk.si, 1);
@@ -266,7 +356,7 @@ export function installPathTools(P) {
           this.h = null;
           return;
         }
-        const n = PT.nearestOnPath(sps, p.x, p.y);
+        const n = o.autoAdd && PT.nearestOnPath(sps, p.x, p.y);
         if (n && n.d <= tol()) {
           this.h = begin('기준점 추가');
           sps[n.si] = PT.splitSegment(sps[n.si], n.i, n.t);
@@ -284,29 +374,58 @@ export function installPathTools(P) {
       if (P.pathTarget?.fresh) sps = [];
       sps.push({ closed: false, op: sps.length ? o.op : 'combine', knots: [PT.knot(p.x, p.y)] });
       P.setPath(sps);
-      P.penDraw = { si: sps.length - 1 };
+      P.penDraw = { si: sps.length - 1, key: targetKey() };
       this.drag = { si: sps.length - 1, ki: 0, start: p };
     },
     move(E, p, e) {
+      if (this.temp) return this.temp.move(E, p, e);
       const dr = this.drag;
-      if (!dr) return;
+      if (!dr) return undefined;
       const sps = PT.clonePath(P.getPath());
       const k = sps[dr.si]?.knots[dr.ki];
-      if (!k) return;
-      if (Math.hypot(p.x - dr.start.x, p.y - dr.start.y) < 2 / P.view.zoom) return;
-      // drag: symmetric handles (Alt: only the outgoing one)
-      k.out = [p.x, p.y];
-      if (!(e.altKey || dr.alt)) k.in = [2 * k.p[0] - p.x, 2 * k.p[1] - p.y];
-      k.smooth = !(e.altKey || dr.alt);
+      if (!k) return undefined;
+      if (Math.hypot(p.x - dr.start.x, p.y - dr.start.y) < 2 / P.view.zoom) return undefined;
+      // drag: symmetric handles (Alt: only the outgoing one; Shift: 45° steps)
+      const q = e.shiftKey ? constrain(k.p, p) : p;
+      const one = e.altKey || dr.alt || dr.outOnly;
+      k.out = [q.x, q.y];
+      if (!one) k.in = [2 * k.p[0] - q.x, 2 * k.p[1] - q.y];
+      k.smooth = !one;
       if (dr.closing) [k.in, k.out] = [k.out, k.in];
       P.setPath(sps);
+      return undefined;
     },
-    up() {
+    up(E, p, e) {
+      if (this.temp) {
+        const t = this.temp;
+        this.temp = null;
+        return t.up(E, p, e);
+      }
       this.drag = null;
       if (this.h) finish(this.h);
       this.h = null;
+      return undefined;
+    },
+    hover() {
+      if (P.penDraw) P.overlay();
     },
     onKey(E, e) {
+      if (cycleKey('pen', e)) return true;
+      if ((e.key === 'Backspace' || e.key === 'Delete') && P.penDraw && P.penDraw.key === targetKey()) {
+        // while drawing: take back the last anchor
+        const sps = PT.clonePath(P.getPath());
+        const sp = sps[P.penDraw.si];
+        if (!sp) return false;
+        const hh = begin('기준점 삭제');
+        sp.knots.pop();
+        if (!sp.knots.length) {
+          sps.splice(P.penDraw.si, 1);
+          P.penDraw = null;
+        }
+        P.setPath(sps);
+        finish(hh);
+        return true;
+      }
       if ((e.key === 'Enter' || e.key === 'Escape') && P.penDraw) {
         P.penDraw = null;
         if (P.pathTarget?.fresh) delete P.pathTarget.fresh;
@@ -320,22 +439,122 @@ export function installPathTools(P) {
     },
     overlay(E, g) {
       P.drawPathOverlay(g);
+      const d = P.penDraw;
+      if (!d || !E.opts('pen').rubber || this.drag || d.key !== targetKey()) return;
+      const sp = P.getPath()[d.si];
+      const last = sp?.knots[sp.knots.length - 1];
+      if (last && !sp.closed) rubber(g, last.p, last.out, P.hoverPoint);
     },
   };
 
+  // ---- freeform pen (with 자석: snaps to edges like the magnetic lasso)
+  const addSubpath = (sp, mode, op, label, before) => {
+    ensureTargetForDrawing(mode === 'shape' ? 'shape' : 'path');
+    const sps = P.pathTarget?.fresh ? [] : PT.clonePath(P.getPath());
+    sp.op = sps.length ? op : 'combine';
+    sps.push(sp);
+    P.setPath(sps);
+    if (P.pathTarget?.fresh) delete P.pathTarget.fresh;
+    P.commit(label, before);
+  };
   const freePen = {
     id: 'freePen', name: '자유 형태 펜', key: 'P', icon: 'freePen', group: 'pen', cursor: 'crosshair',
-    options: [['mode', '모드', 'select', null, null, 'path', [['path', '패스'], ['shape', '모양 (새 레이어)']]], ['op', '패스 작업', 'select', null, null, 'combine', PT.PATH_OPS], ['fit', '곡선 맞춤 (px)', 'range', 1, 10, 2]],
+    options: [['mode', '모드', 'select', null, null, 'path', [['path', '패스'], ['shape', '모양 (새 레이어)']]], ['op', '패스 작업', 'select', null, null, 'combine', PT.PATH_OPS], ['fit', '곡선 맞춤 (px)', 'range', 1, 10, 2], ['magnetic', '자석', 'bool', null, null, false], ['width', '폭 (px)', 'range', 1, 40, 10], ['contrast', '대비 (%)', 'range', 1, 100, 10], ['frequency', '빈도', 'range', 0, 100, 57]],
+    wire() {
+      const o = P.opts('freePen');
+      const key = `${P.doc.id}:${P.doc.rev}:${o.contrast}`;
+      if (this.lw?.key !== key) {
+        const c = P.composite();
+        this.lw = new SX.LiveWire(SX.pixelsOf(c), c.width, c.height, { contrast: o.contrast });
+        this.lw.key = key;
+      }
+      return this.lw;
+    },
     down(E, p) {
+      const o = E.opts('freePen');
+      if (o.magnetic) {
+        const m = this.m;
+        if (!m) {
+          const lw = this.wire();
+          const s = lw.snap(p.x, p.y, o.width);
+          lw.setAnchor(s[0], s[1], 200);
+          this.m = { pts: [s], anchors: [0], live: null, lw, before: P.doc.capture() };
+          P.overlay();
+          return;
+        }
+        const first = m.pts[0];
+        if (m.pts.length > 2 && Math.hypot(p.x - first[0], p.y - first[1]) * P.view.zoom < 10) {
+          this.finishMagnetic(true);
+          return;
+        }
+        this.track(p);
+        this.commitLive();
+        P.overlay();
+        return;
+      }
       this.pts = [[p.x, p.y]];
-      this.h = begin('자유 형태 펜');
+      this.before = P.doc.capture();
+    },
+    track(p) {
+      const m = this.m;
+      const o = P.opts('freePen');
+      const s = m.lw.snap(p.x, p.y, o.width);
+      let path = m.lw.path(s[0], s[1]);
+      if (!path) {
+        if (m.live?.length > 1) {
+          this.commitLive();
+          path = m.lw.path(s[0], s[1]);
+        }
+        if (!path) path = [m.pts[m.pts.length - 1], s];
+      }
+      m.live = path;
+      const spacing = 12 + (100 - (o.frequency ?? 57)) * 1.4;
+      if (SX.polyLength(path) > spacing) this.commitLive();
+    },
+    commitLive() {
+      const m = this.m;
+      if (!m.live || m.live.length < 2) return;
+      for (const q of m.live.slice(1)) m.pts.push(q);
+      m.live = null;
+      m.anchors.push(m.pts.length - 1);
+      const a = m.pts[m.pts.length - 1];
+      m.lw.setAnchor(a[0], a[1], 200);
+    },
+    finishMagnetic(close) {
+      const m = this.m;
+      this.m = null;
+      if (!m) return;
+      if (m.live) for (const q of m.live.slice(1)) m.pts.push(q);
+      if (m.pts.length < 3) {
+        P.overlay();
+        return;
+      }
+      const o = P.opts('freePen');
+      const sp = PT.fitFreehand(m.pts.map(([x, y]) => [x + 0.5, y + 0.5]), o.fit, close);
+      if (!sp) return;
+      addSubpath(sp, o.mode, o.op, '자유 형태 펜 (자석)', m.before);
     },
     move(E, p) {
+      if (this.m) {
+        this.track(p);
+        P.overlay();
+        return;
+      }
       if (!this.pts) return;
       this.pts.push([p.x, p.y]);
       P.redraw();
     },
+    hover(E, p) {
+      if (this.m) {
+        this.track(p);
+        P.overlay();
+      }
+    },
+    dblclick() {
+      if (this.m) this.finishMagnetic(false);
+    },
     up(E) {
+      if (this.m) return;
       const pts = this.pts;
       this.pts = null;
       if (!pts || pts.length < 3) return;
@@ -343,26 +562,293 @@ export function installPathTools(P) {
       const closed = Math.hypot(pts[0][0] - pts.at(-1)[0], pts[0][1] - pts.at(-1)[1]) < 12 / P.view.zoom;
       const sp = PT.fitFreehand(pts, o.fit, closed);
       if (!sp) return;
-      ensureTargetForDrawing(o.mode === 'shape' ? 'shape' : 'path');
-      const sps = P.pathTarget?.fresh ? [] : PT.clonePath(P.getPath());
-      sp.op = sps.length ? o.op : 'combine';
-      sps.push(sp);
-      P.setPath(sps);
-      if (P.pathTarget?.fresh) delete P.pathTarget.fresh;
-      finish(this.h);
+      addSubpath(sp, o.mode, o.op, '자유 형태 펜', this.before);
+    },
+    onKey(E, e) {
+      if (cycleKey('freePen', e)) return true;
+      if (!this.m) return false;
+      if (e.key === 'Enter') this.finishMagnetic(false);
+      else if (e.key === 'Escape') {
+        this.m = null;
+        P.overlay();
+      } else if (e.key === 'Backspace' || e.key === 'Delete') {
+        const m = this.m;
+        m.anchors.pop();
+        if (!m.anchors.length) {
+          this.m = null;
+        } else {
+          const last = m.anchors[m.anchors.length - 1];
+          m.pts.length = last + 1;
+          m.live = null;
+          m.lw.setAnchor(m.pts[last][0], m.pts[last][1], 200);
+        }
+        P.overlay();
+      } else return false;
+      return true;
+    },
+    deactivate() {
+      this.m = null;
+      this.lw = null;
     },
     overlay(E, g) {
       P.drawPathOverlay(g);
-      if (!this.pts) return;
-      g.strokeStyle = '#3d8bff';
-      g.beginPath();
-      this.pts.forEach(([x, y], i) => {
-        const [sx, sy] = P.toScreen(x, y);
-        if (i) g.lineTo(sx, sy);
-        else g.moveTo(sx, sy);
-      });
-      g.stroke();
+      const line = (pts, color, dash = []) => {
+        if (!pts || pts.length < 2) return;
+        g.save();
+        g.strokeStyle = color;
+        g.setLineDash(dash);
+        g.beginPath();
+        pts.forEach(([x, y], i) => {
+          const [sx, sy] = P.toScreen(x, y);
+          if (i) g.lineTo(sx, sy);
+          else g.moveTo(sx, sy);
+        });
+        g.stroke();
+        g.restore();
+      };
+      if (this.m) {
+        line(this.m.pts, '#3d8bff');
+        line(this.m.live, '#3d8bff', [4, 3]);
+        for (const i of this.m.anchors) {
+          const [sx, sy] = P.toScreen(this.m.pts[i][0], this.m.pts[i][1]);
+          g.fillStyle = '#fff';
+          g.strokeStyle = '#3d8bff';
+          g.fillRect(sx - 3, sy - 3, 6, 6);
+          g.strokeRect(sx - 3, sy - 3, 6, 6);
+        }
+        return;
+      }
+      line(this.pts, '#3d8bff');
     },
+  };
+
+  // ---- curvature pen: click points, the curve bends smoothly through them
+  /** Smooth handles through the curvature pen's points (corners stay straight). */
+  const smoothCurv = (sp) => {
+    const ks = sp.knots;
+    const n = ks.length;
+    for (let i = 0; i < n; i++) {
+      const k = ks[i];
+      if (!k.curv) continue;
+      if (k.corner) {
+        k.in = [...k.p];
+        k.out = [...k.p];
+        k.smooth = false;
+        continue;
+      }
+      const prev = i > 0 ? ks[i - 1] : sp.closed ? ks[n - 1] : null;
+      const next = i < n - 1 ? ks[i + 1] : sp.closed ? ks[0] : null;
+      if (!prev || !next) {
+        // an end: the handle points along the curve towards its neighbour
+        const o = prev || next;
+        if (!o) {
+          k.in = [...k.p];
+          k.out = [...k.p];
+          continue;
+        }
+        const far = prev ? (i > 1 ? ks[i - 2] : null) : (i + 2 < n ? ks[i + 2] : null);
+        const tx = o.p[0] - k.p[0] + (far ? (o.p[0] - far.p[0]) * 0.25 : 0);
+        const ty = o.p[1] - k.p[1] + (far ? (o.p[1] - far.p[1]) * 0.25 : 0);
+        const L = Math.hypot(tx, ty) || 1;
+        const d = Math.hypot(o.p[0] - k.p[0], o.p[1] - k.p[1]) * 0.38;
+        const hnd = [k.p[0] + (tx / L) * d, k.p[1] + (ty / L) * d];
+        if (prev) {
+          k.in = hnd;
+          k.out = [...k.p];
+        } else {
+          k.out = hnd;
+          k.in = [...k.p];
+        }
+        k.smooth = false;
+        continue;
+      }
+      const dx = next.p[0] - prev.p[0];
+      const dy = next.p[1] - prev.p[1];
+      const L = Math.hypot(dx, dy) || 1;
+      const dp = Math.hypot(k.p[0] - prev.p[0], k.p[1] - prev.p[1]) * 0.38;
+      const dn = Math.hypot(next.p[0] - k.p[0], next.p[1] - k.p[1]) * 0.38;
+      k.in = [k.p[0] - (dx / L) * dp, k.p[1] - (dy / L) * dp];
+      k.out = [k.p[0] + (dx / L) * dn, k.p[1] + (dy / L) * dn];
+      k.smooth = true;
+    }
+    return sp;
+  };
+  const curvKnot = (x, y) => ({ p: [x, y], in: [x, y], out: [x, y], smooth: true, curv: true });
+  const curvaturePen = {
+    id: 'curvaturePen', name: '곡률 펜', key: 'P', icon: 'curvaturePen', group: 'pen', cursor: 'crosshair',
+    options: [['mode', '모드', 'select', null, null, 'path', [['path', '패스'], ['shape', '모양 (레이어)']]], ['op', '패스 작업', 'select', null, null, 'combine', PT.PATH_OPS]],
+    activate() {
+      P.autoPathTarget();
+    },
+    down(E, p, e) {
+      const o = E.opts('curvaturePen');
+      let sps = PT.clonePath(P.getPath());
+      let d = P.curvDraw;
+      if (d && (d.key !== targetKey() || !sps[d.si] || sps[d.si].closed)) d = P.curvDraw = null;
+      const hk = sps.length ? hitKnot(sps, p) : null;
+      if (d) {
+        const sp = sps[d.si];
+        if (sp.knots.length > 2 && hk?.si === d.si && hk.ki === 0) {
+          this.h = begin('패스 닫기');
+          sp.closed = true;
+          smoothCurv(sp);
+          P.setPath(sps);
+          finish(this.h);
+          this.h = null;
+          P.curvDraw = null;
+          return;
+        }
+        if (hk) {
+          this.drag = { si: hk.si, ki: hk.ki, start: p, h: begin('기준점 이동') };
+          P.pathSel = { subs: new Set(), knots: new Set([`${hk.si}:${hk.ki}`]) };
+          return;
+        }
+        const k = curvKnot(p.x, p.y);
+        if (e.altKey) k.corner = true;
+        const hh = begin('기준점 추가');
+        sp.knots.push(k);
+        smoothCurv(sp);
+        P.setPath(sps);
+        this.drag = { si: d.si, ki: sp.knots.length - 1, start: p, h: hh, add: true };
+        P.pathSel = { subs: new Set(), knots: new Set([`${d.si}:${sp.knots.length - 1}`]) };
+        return;
+      }
+      if (hk) {
+        // an end of an open subpath: carry on from it; any other point: drag it
+        if (isEnd(sps[hk.si], hk.ki) && sps[hk.si].knots.length > 1 && !(e.ctrlKey || e.metaKey)) {
+          if (hk.ki === 0) {
+            sps[hk.si] = reverseSub(sps[hk.si]);
+            P.setPath(sps);
+          }
+          P.curvDraw = { si: hk.si, key: targetKey() };
+          this.drag = { si: hk.si, ki: sps[hk.si].knots.length - 1, start: p, h: begin('기준점 이동') };
+          return;
+        }
+        this.drag = { si: hk.si, ki: hk.ki, start: p, h: begin('기준점 이동') };
+        P.pathSel = { subs: new Set(), knots: new Set([`${hk.si}:${hk.ki}`]) };
+        return;
+      }
+      const n = sps.length && PT.nearestOnPath(sps, p.x, p.y);
+      if (n && n.d <= tol()) {
+        // on a segment: a new point there
+        const hh = begin('기준점 추가');
+        const sp = PT.splitSegment(sps[n.si], n.i, n.t);
+        const nk = sp.knots[n.i + 1];
+        Object.assign(nk, { curv: true, corner: false });
+        sps[n.si] = smoothCurvLocal(sp, n.i + 1);
+        P.setPath(sps);
+        this.drag = { si: n.si, ki: n.i + 1, start: p, h: hh, add: true };
+        return;
+      }
+      // a new subpath
+      const hh = begin('곡률 펜');
+      if (o.mode === 'shape') ensureTargetForDrawing('shape');
+      else ensureTargetForDrawing('path');
+      sps = P.pathTarget?.fresh ? [] : PT.clonePath(P.getPath());
+      const k = curvKnot(p.x, p.y);
+      sps.push({ closed: false, op: sps.length ? o.op : 'combine', knots: [k] });
+      P.setPath(sps);
+      if (P.pathTarget?.fresh) delete P.pathTarget.fresh;
+      P.curvDraw = { si: sps.length - 1, key: targetKey() };
+      this.drag = { si: sps.length - 1, ki: 0, start: p, h: hh, add: true };
+    },
+    move(E, p) {
+      const dr = this.drag;
+      if (!dr) return;
+      if (!dr.moved && Math.hypot(p.x - dr.start.x, p.y - dr.start.y) < 2 / P.view.zoom) return;
+      dr.moved = true;
+      const sps = PT.clonePath(P.getPath());
+      const sp = sps[dr.si];
+      const k = sp?.knots[dr.ki];
+      if (!k) return;
+      const dx = p.x - k.p[0];
+      const dy = p.y - k.p[1];
+      k.p = [p.x, p.y];
+      k.in = [k.in[0] + dx, k.in[1] + dy];
+      k.out = [k.out[0] + dx, k.out[1] + dy];
+      if (!k.curv) k.curv = true;
+      sps[dr.si] = smoothCurvLocal(sp, dr.ki);
+      P.setPath(sps);
+    },
+    up() {
+      const dr = this.drag;
+      this.drag = null;
+      // a press on a point without moving it changes nothing
+      if (dr?.h && (dr.add || dr.moved)) finish(dr.h);
+    },
+    dblclick(E, p) {
+      // a double-click turns a point into a corner (or back)
+      const sps = PT.clonePath(P.getPath());
+      const hk = hitKnot(sps, p);
+      if (!hk) return;
+      const hh = begin('기준점 변환');
+      const k = sps[hk.si].knots[hk.ki];
+      k.curv = true;
+      k.corner = !k.corner;
+      sps[hk.si] = smoothCurvLocal(sps[hk.si], hk.ki);
+      P.setPath(sps);
+      finish(hh);
+    },
+    hover() {
+      if (P.curvDraw) P.overlay();
+    },
+    onKey(E, e) {
+      if (cycleKey('curvaturePen', e)) return true;
+      if ((e.key === 'Enter' || e.key === 'Escape') && P.curvDraw) {
+        P.curvDraw = null;
+        P.redraw();
+        return true;
+      }
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        const keys = [...P.pathSel.knots];
+        if (!keys.length) return false;
+        const sps = PT.clonePath(P.getPath());
+        const hh = begin('기준점 삭제');
+        const rm = new Set(keys);
+        const out = sps.map((sp, si) => smoothCurv({ ...sp, knots: sp.knots.filter((_, ki) => !rm.has(`${si}:${ki}`)) })).filter((sp) => sp.knots.length >= 1);
+        P.pathSel = { subs: new Set(), knots: new Set() };
+        P.curvDraw = null;
+        P.setPath(out);
+        finish(hh);
+        return true;
+      }
+      return false;
+    },
+    deactivate() {
+      P.curvDraw = null;
+    },
+    overlay(E, g) {
+      P.drawPathOverlay(g);
+      const d = P.curvDraw;
+      const hp = P.hoverPoint;
+      if (!d || !hp || this.drag || d.key !== targetKey()) return;
+      const sp = P.getPath()[d.si];
+      if (!sp || sp.closed) return;
+      // the curve the next click would make
+      const tmp = smoothCurv({ ...PT.clonePath([sp])[0], knots: [...PT.clonePath([sp])[0].knots, curvKnot(hp.x, hp.y)] });
+      const n = tmp.knots.length;
+      const z = P.view.zoom;
+      const [ox, oy] = P.toScreen(0, 0);
+      g.save();
+      g.translate(ox, oy);
+      g.scale(z, z);
+      g.lineWidth = 1 / z;
+      g.setLineDash([4 / z, 3 / z]);
+      g.strokeStyle = 'rgba(61,139,255,.85)';
+      g.stroke(PT.toPath2D([{ closed: false, knots: tmp.knots.slice(Math.max(0, n - 3)) }]));
+      g.restore();
+    },
+  };
+  /** Re-smooth the points around one that changed (only curvature-pen points move their handles). */
+  const smoothCurvLocal = (sp, ki) => {
+    const n = sp.knots.length;
+    const mark = new Set([ki - 1, ki, ki + 1].map((i) => (sp.closed ? (i + n) % n : i)).filter((i) => i >= 0 && i < n));
+    const saved = sp.knots.map((k, i) => (mark.has(i) ? null : { in: k.in, out: k.out, smooth: k.smooth }));
+    smoothCurv(sp);
+    sp.knots.forEach((k, i) => {
+      if (saved[i] && !mark.has(i)) Object.assign(k, saved[i]);
+    });
+    return sp;
   };
 
   const anchorTool = (id, name, icon, fn) => ({
@@ -373,11 +859,11 @@ export function installPathTools(P) {
     down(E, p, e) {
       const sps = PT.clonePath(P.getPath());
       if (!sps.length) return;
-      const h = begin(name);
+      const hh = begin(name);
       if (fn(sps, p, e, this) !== false) {
         P.setPath(sps);
-        if (!this.drag) finish(h);
-        else this.h = h;
+        if (!this.drag) finish(hh);
+        else this.h = hh;
       }
     },
     move(E, p, e) {
@@ -385,9 +871,16 @@ export function installPathTools(P) {
       const sps = PT.clonePath(P.getPath());
       const k = sps[this.drag.si]?.knots[this.drag.ki];
       if (!k) return;
-      k.out = [p.x, p.y];
-      if (!e.altKey) k.in = [2 * k.p[0] - p.x, 2 * k.p[1] - p.y];
-      k.smooth = !e.altKey;
+      if (this.drag.which) {
+        // one handle on its own (the point becomes a corner)
+        k[this.drag.which] = [p.x, p.y];
+        k.smooth = false;
+      } else {
+        k.out = [p.x, p.y];
+        if (!e.altKey) k.in = [2 * k.p[0] - p.x, 2 * k.p[1] - p.y];
+        k.smooth = !e.altKey;
+      }
+      k.curv = false;
       P.setPath(sps);
     },
     up() {
@@ -399,10 +892,13 @@ export function installPathTools(P) {
       P.drawPathOverlay(g, { showAll: true });
     },
   });
-  const addAnchor = anchorTool('addAnchor', '기준점 추가', 'addAnchor', (sps, p) => {
+  const addAnchor = anchorTool('addAnchor', '기준점 추가', 'addAnchor', (sps, p, e, self) => {
     const n = PT.nearestOnPath(sps, p.x, p.y);
     if (!n || n.d > tol()) return false;
     sps[n.si] = PT.splitSegment(sps[n.si], n.i, n.t);
+    // Photoshop: drag right away to shape the new point's handles
+    self.drag = { si: n.si, ki: n.i + 1 };
+    P.pathSel = { subs: new Set(), knots: new Set([`${n.si}:${n.i + 1}`]) };
     return true;
   });
   const deleteAnchor = anchorTool('deleteAnchor', '기준점 삭제', 'deleteAnchor', (sps, p) => {
@@ -413,14 +909,22 @@ export function installPathTools(P) {
     return true;
   });
   const convertPoint = anchorTool('convertPoint', '기준점 변환', 'convertPoint', (sps, p, e, self) => {
+    // a handle: drag it on its own (breaks a smooth point)
+    const hh = hitHandle(sps, p, true);
+    if (hh) {
+      self.drag = { si: hh.si, ki: hh.ki, which: hh.which };
+      return true;
+    }
     const hk = hitKnot(sps, p);
     if (!hk) return false;
     const k = sps[hk.si].knots[hk.ki];
+    P.pathSel = { subs: new Set(), knots: new Set([`${hk.si}:${hk.ki}`]) };
     if (!near(k.in, k.p, 0.01) || !near(k.out, k.p, 0.01)) {
       // smooth → corner
       k.in = [...k.p];
       k.out = [...k.p];
       k.smooth = false;
+      k.curv = false;
       return true;
     }
     // corner → smooth: drag out handles
@@ -428,6 +932,7 @@ export function installPathTools(P) {
     return true;
   });
 
+  const nudgeKeys = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
   const selectTool = (id, name, icon, direct) => ({
     id, name, key: 'A', icon, group: 'pathSelect', cursor: 'default',
     options: direct ? [] : [['op', '패스 작업 (고른 패스)', 'select', null, null, 'combine', PT.PATH_OPS]],
@@ -438,7 +943,7 @@ export function installPathTools(P) {
     down(E, p, e) {
       let sps = P.getPath();
       // clicking a path shape layer on the canvas targets it
-      if (!sps.length || (hitSub(sps, p) < 0 && !hitKnot(sps, p))) {
+      if (!sps.length || (hitSub(sps, p) < 0 && !hitKnot(sps, p) && !(direct && hitHandle(sps, p)))) {
         const hit = P.layerAt(p, (l) => l.kind === 'shape');
         if (hit) {
           P.selectLayer(hit.id);
@@ -446,8 +951,11 @@ export function installPathTools(P) {
           sps = P.getPath();
         }
       }
-      if (!sps.length) return;
       const sel = P.pathSel;
+      if (!sps.length) {
+        this.d = { kind: 'marquee', a: p, b: p, add: e.shiftKey };
+        return;
+      }
       this.h = begin(direct ? '기준점 이동' : '패스 이동');
       if (direct) {
         const hh = hitHandle(sps, p);
@@ -475,15 +983,18 @@ export function installPathTools(P) {
           P.redraw();
           return;
         }
-        sel.knots = new Set();
+        // empty canvas: drag a box round the anchors to select
         this.h = null;
+        if (!e.shiftKey) sel.knots = new Set();
+        this.d = { kind: 'marquee', a: p, b: p, add: e.shiftKey };
         P.redraw();
         return;
       }
       const si = hitSub(sps, p);
       if (si < 0) {
-        sel.subs = new Set();
         this.h = null;
+        if (!e.shiftKey) sel.subs = new Set();
+        this.d = { kind: 'marquee', a: p, b: p, add: e.shiftKey };
         P.redraw();
         return;
       }
@@ -499,18 +1010,24 @@ export function installPathTools(P) {
         P.setPath(sps);
         this.h.label = '패스 복제';
       }
-      this.d = { kind: 'subs', a: p, orig: PT.clonePath(sps) };
+      this.d = { kind: 'subs', a: p, orig: PT.clonePath(sps), moved: !!e.altKey };
       P.redraw();
     },
     move(E, p, e) {
       const d = this.d;
       if (!d) return;
+      if (d.kind === 'marquee') {
+        d.b = p;
+        P.overlay();
+        return;
+      }
       let dx = p.x - d.a.x;
       let dy = p.y - d.a.y;
       if (e.shiftKey && d.kind !== 'handle') {
         if (Math.abs(dx) > Math.abs(dy)) dy = 0;
         else dx = 0;
       }
+      d.moved = d.moved || Math.hypot(dx, dy) > 0;
       const sps = PT.clonePath(d.orig);
       const sel = P.pathSel;
       if (d.kind === 'subs') {
@@ -527,6 +1044,7 @@ export function installPathTools(P) {
       } else {
         const k = sps[d.si].knots[d.ki];
         k[d.which] = [p.x, p.y];
+        k.curv = false;
         if (k.smooth && !d.alt && !e.altKey) {
           // keep the opposite handle in line (its length stays)
           const other = d.which === 'out' ? 'in' : 'out';
@@ -540,16 +1058,59 @@ export function installPathTools(P) {
       P.setPath(sps);
     },
     up() {
-      if (this.d && this.h) finish(this.h);
+      const d = this.d;
+      if (d?.kind === 'marquee') {
+        const x0 = Math.min(d.a.x, d.b.x);
+        const y0 = Math.min(d.a.y, d.b.y);
+        const x1 = Math.max(d.a.x, d.b.x);
+        const y1 = Math.max(d.a.y, d.b.y);
+        const sps = P.getPath();
+        const inside = ([x, y]) => x >= x0 && x <= x1 && y >= y0 && y <= y1;
+        if (direct) {
+          const keys = d.add ? new Set(P.pathSel.knots) : new Set();
+          sps.forEach((sp, si) => sp.knots.forEach((k, ki) => {
+            if (inside(k.p)) keys.add(`${si}:${ki}`);
+          }));
+          P.pathSel.knots = keys;
+        } else {
+          const subs = d.add ? new Set(P.pathSel.subs) : new Set();
+          sps.forEach((sp, si) => {
+            if (sp.knots.some((k) => inside(k.p))) subs.add(si);
+          });
+          P.pathSel.subs = subs;
+        }
+        this.d = null;
+        P.redraw();
+        return;
+      }
+      if (d && this.h && d.moved) finish(this.h);
       this.d = null;
       this.h = null;
     },
     onKey(E, e) {
-      if (e.key !== 'Delete' && e.key !== 'Backspace') return false;
       const sps = PT.clonePath(P.getPath());
       const sel = P.pathSel;
+      const has = direct ? sel.knots.size : sel.subs.size;
+      if (nudgeKeys[e.key] && sps.length && has) {
+        // arrow keys nudge the selected anchors / paths (Shift: 10 px)
+        const [ux, uy] = nudgeKeys[e.key];
+        const s = e.shiftKey ? 10 : 1;
+        const hh = begin(direct ? '기준점 이동' : '패스 이동');
+        if (direct) {
+          for (const key of sel.knots) {
+            const [si, ki] = key.split(':').map(Number);
+            const k = sps[si]?.knots[ki];
+            if (!k) continue;
+            for (const f of ['p', 'in', 'out']) k[f] = [k[f][0] + ux * s, k[f][1] + uy * s];
+          }
+        } else for (const si of sel.subs) if (sps[si]) sps[si] = PT.translatePath([sps[si]], ux * s, uy * s)[0];
+        P.setPath(sps);
+        finish(hh);
+        return true;
+      }
+      if (e.key !== 'Delete' && e.key !== 'Backspace') return false;
       if (!sps.length || (!sel.subs.size && !sel.knots.size)) return false;
-      const h = begin('패스 삭제');
+      const hh = begin('패스 삭제');
       let out = sps;
       if (direct && sel.knots.size) {
         const rm = new Set(sel.knots);
@@ -557,22 +1118,41 @@ export function installPathTools(P) {
       } else out = sps.filter((_, si) => !sel.subs.has(si));
       P.pathSel = { subs: new Set(), knots: new Set() };
       P.setPath(out);
-      finish(h);
+      finish(hh);
       return true;
     },
     overlay(E, g) {
       P.drawPathOverlay(g);
+      const d = this.d;
+      if (d?.kind === 'marquee') {
+        const [x1, y1] = P.toScreen(d.a.x, d.a.y);
+        const [x2, y2] = P.toScreen(d.b.x, d.b.y);
+        g.save();
+        g.strokeStyle = '#3d8bff';
+        g.fillStyle = 'rgba(61,139,255,.12)';
+        g.setLineDash([3, 3]);
+        g.fillRect(Math.min(x1, x2), Math.min(y1, y2), Math.abs(x2 - x1), Math.abs(y2 - y1));
+        g.strokeRect(Math.min(x1, x2) + 0.5, Math.min(y1, y2) + 0.5, Math.abs(x2 - x1), Math.abs(y2 - y1));
+        g.restore();
+      }
     },
   });
   const pathSelect = selectTool('pathSelect', '패스 선택', 'pathSelect', false);
-  const directSelect = selectTool('directSelect', '직접 선택', 'directSelect', true);
+  directSelect = selectTool('directSelect', '직접 선택', 'directSelect', true);
 
-  for (const t of [pen, freePen, addAnchor, deleteAnchor, convertPoint, pathSelect, directSelect]) {
+  const pathButtons = (PP) => [h('span.ph-opt', '만들기:'),
+    h('button.small', { onclick: () => PP.cmd.pathToSelection() }, '선택 영역'),
+    h('button.small', { onclick: () => PP.cmd.addVectorMask('path') }, '마스크'),
+    h('button.small', { onclick: () => PP.cmd.pathToShape?.() }, '모양'),
+    PP.doc?.workPath ? h('button.small', { onclick: () => PP.cmd.savePath() }, '패스 저장') : null];
+  curvaturePen.optionButtons = pathButtons;
+
+  for (const t of [pen, freePen, curvaturePen, addAnchor, deleteAnchor, convertPoint, pathSelect, directSelect]) {
     TOOLS.push(t);
     TOOL_BY_ID[t.id] = t;
   }
   const ti = TOOL_GROUPS.findIndex((g) => g.includes('text'));
-  TOOL_GROUPS.splice(ti, 0, ['pen', 'freePen', 'addAnchor', 'deleteAnchor', 'convertPoint']);
+  TOOL_GROUPS.splice(ti, 0, ['pen', 'freePen', 'curvaturePen', 'addAnchor', 'deleteAnchor', 'convertPoint']);
   TOOL_GROUPS.splice(ti + 2, 0, ['pathSelect', 'directSelect']);
 
   // ---------------------------------------------------------------- commands
@@ -580,16 +1160,26 @@ export function installPathTools(P) {
   const C = P.cmd;
   const W = () => P.doc.width;
   const H = () => P.doc.height;
-  C.pathToSelection = (mode = 'new', feather = 0) => {
+  /** Make Selection (Ctrl+Enter): mode new | add | sub | int, feather in px, anti-aliased. */
+  C.pathToSelection = (mode = 'new', feather = 0, antiAlias = true) => {
     const sps = P.getPath();
     if (!sps.length) return toast('선택 영역으로 만들 패스가 없습니다');
     P.run('패스를 선택 영역으로', () => {
-      const c = PT.rasterizePath(W(), H(), sps, { feather });
+      let c = PT.rasterizePath(W(), H(), sps, { feather });
+      if (!antiAlias && !feather) c = hardEdge(c);
       const doc = P.doc;
       if (mode === 'new' || !doc.selection) doc.selection = { canvas: c };
       else doc.selection = SEL.combine(doc, c, mode);
     });
     return undefined;
+  };
+  const hardEdge = (c) => {
+    const g = c.getContext('2d');
+    const img = g.getImageData(0, 0, c.width, c.height);
+    const d = img.data;
+    for (let i = 3; i < d.length; i += 4) d[i] = d[i] >= 128 ? 255 : 0;
+    g.putImageData(img, 0, 0);
+    return c;
   };
   C.selectionToPath = (tolerance = 2) => {
     const doc = P.doc;
@@ -601,39 +1191,143 @@ export function installPathTools(P) {
     P.emit('paths');
     return undefined;
   };
-  C.fillPath = (color = P.fg) => {
+  /**
+   * Fill Path: what fills (a colour or a pattern), blend mode, opacity, feather. The path's area
+   * on the active image layer.
+   */
+  C.fillPath = (opt = {}) => {
+    if (typeof opt === 'string') opt = { color: opt };
     const sps = P.getPath();
-    const l = P.doc.active;
+    const l = P.doc?.active;
     if (!sps.length) return toast('칠할 패스가 없습니다');
     if (l?.kind !== 'raster') return toast('이미지 레이어를 고르세요');
+    const { color = P.fg, pattern = null, mode = 'normal', opacity = 1, feather = 0, antiAlias = true, preserve = false } = opt;
     P.run('패스 칠하기', () => {
-      const m = PT.rasterizePath(W(), H(), sps);
+      let m = PT.rasterizePath(W(), H(), sps, { feather });
+      if (!antiAlias && !feather) m = hardEdge(m);
       const t = makeCanvas(W(), H());
       const tg = t.getContext('2d');
       tg.drawImage(m, 0, 0);
       tg.globalCompositeOperation = 'source-in';
-      tg.fillStyle = color;
+      tg.fillStyle = pattern ? tg.createPattern(patternCanvas(pattern), 'repeat') : color;
       tg.fillRect(0, 0, W(), H());
+      if (P.doc.selection) {
+        tg.globalCompositeOperation = 'destination-in';
+        tg.drawImage(P.doc.selection.canvas, 0, 0);
+      }
       const g = P.doc.editPixels(l);
-      g.drawImage(t, -l.x, -l.y);
+      if (preserve) {
+        // only where the layer has pixels
+        const lt = makeCanvas(W(), H());
+        const lg = lt.getContext('2d');
+        lg.drawImage(t, 0, 0);
+        lg.globalCompositeOperation = 'destination-in';
+        lg.drawImage(g.canvas, l.x, l.y);
+        compositeOnto(g, lt, -l.x, -l.y, mode, opacity);
+      } else compositeOnto(g, t, -l.x, -l.y, mode, opacity);
       l._styled = null;
     });
     return undefined;
   };
-  /** Stroke the path with the brush (or pencil / eraser) settings, like Photoshop's "패스 획". */
+  /** Stroke Path with a painting tool's current settings, like Photoshop's "패스 획". */
   C.strokePath = (toolId = 'brush', simulatePressure = false) => {
     const sps = P.getPath();
-    const l = P.doc.active;
+    const l = P.doc?.active;
+    const tool = TOOL_BY_ID[toolId];
     if (!sps.length) return toast('획을 그릴 패스가 없습니다');
-    if (l?.kind !== 'raster') return toast('이미지 레이어를 고르세요');
-    const o = P.opts(toolId);
-    const st = new Stroke(P, toolId === 'eraser' ? 'erase' : 'paint', brushOpts(o, P, { label: '패스 획', hard: toolId === 'pencil' }));
-    for (const sp of sps) {
-      const pts = PT.flatten(sp, 1);
-      st.last = null;
-      pts.forEach(([x, y], i) => st.to({ x, y }, simulatePressure ? Math.sin((Math.PI * i) / Math.max(1, pts.length - 1)) : 1));
+    if (!tool?.down) return toast('그 도구로는 획을 그릴 수 없습니다');
+    if (!l || (l.kind !== 'raster' && !P.editMask)) return toast('이미지 레이어를 고르세요');
+    P.lastStrokeTool = toolId;
+    P.lastStrokePressure = simulatePressure;
+    const before = P.doc.capture();
+    const origCommit = P.commit;
+    // the tool records its own steps: they become one "패스 획" step
+    P.commit = () => {};
+    const ev = (x, y, pressure) => {
+      const [cx, cy] = P.toScreen(x, y);
+      return { pointerType: simulatePressure ? 'pen' : 'mouse', pressure, button: 0, buttons: 1, shiftKey: false, altKey: false, ctrlKey: false, metaKey: false, clientX: cx, clientY: cy, preventDefault() {}, stopPropagation() {} };
+    };
+    try {
+      for (const sp of sps) {
+        const pts = PT.flatten(sp, 1);
+        if (pts.length < 2) continue;
+        const pr = (i) => (simulatePressure ? Math.max(0.05, Math.sin((Math.PI * i) / Math.max(1, pts.length - 1))) : 1);
+        tool.down(P, { x: pts[0][0], y: pts[0][1] }, ev(pts[0][0], pts[0][1], pr(0)));
+        for (let i = 1; i < pts.length; i++) tool.move?.(P, { x: pts[i][0], y: pts[i][1] }, ev(pts[i][0], pts[i][1], pr(i)));
+        tool.up?.(P, { x: pts.at(-1)[0], y: pts.at(-1)[1] }, ev(pts.at(-1)[0], pts.at(-1)[1], 0));
+      }
+    } finally {
+      P.commit = origCommit;
     }
-    st.end();
+    P.commit('패스 획', before);
+    return undefined;
+  };
+  const STROKE_TOOLS = () => ['brush', 'pencil', 'eraser', 'bgEraser', 'clone', 'patternStamp', 'historyBrush', 'artHistory', 'heal', 'mixer', 'colorReplace', 'blur', 'sharpen', 'smudge', 'dodge', 'burn', 'sponge'].filter((id) => TOOL_BY_ID[id]?.down);
+  C.strokePathDialog = () => {
+    if (!P.getPath().length) return toast('획을 그릴 패스가 없습니다');
+    const sel = h('select', STROKE_TOOLS().map((id) => h('option', { value: id }, TOOL_BY_ID[id].name)));
+    sel.value = P.lastStrokeTool && TOOL_BY_ID[P.lastStrokeTool] ? P.lastStrokeTool : 'brush';
+    const pr = h('input', { type: 'checkbox', checked: !!P.lastStrokePressure });
+    openModal({
+      title: '패스 획', width: '320px',
+      body: [h('label.ph-prow', h('span', '도구'), sel), h('label.ph-prow', pr, h('span', '압력 시뮬레이트')), h('div.note', '고른 도구의 지금 설정(크기·색·경도)으로 패스를 따라 그립니다.')],
+      buttons: [{ label: '취소' }, { label: '확인', primary: true, action: () => C.strokePath(sel.value, pr.checked) }],
+    });
+    return undefined;
+  };
+  C.fillPathDialog = () => {
+    if (!P.getPath().length) return toast('칠할 패스가 없습니다');
+    const what = h('select', [['fg', '전경색'], ['bg', '배경색'], ['color', '색상…'], ['pattern', '패턴'], ['black', '검정'], ['gray', '50% 회색'], ['white', '흰색']].map(([v, n]) => h('option', { value: v }, n)));
+    const col = h('input', { type: 'color', value: P.fg, hidden: true });
+    const pat = h('select', { hidden: true }, listPatterns().map((p) => h('option', { value: p.id }, p.name)));
+    what.addEventListener('change', () => {
+      col.hidden = what.value !== 'color';
+      pat.hidden = what.value !== 'pattern';
+    });
+    const mode = h('select', BLEND_MODES.map(([v, n]) => h('option', { value: v }, n)));
+    mode.value = 'normal';
+    const op = h('input.ph-num', { type: 'number', value: 100, min: 0, max: 100 });
+    const fe = h('input.ph-num', { type: 'number', value: 0, min: 0, max: 250, step: 0.5 });
+    const aa = h('input', { type: 'checkbox', checked: true });
+    const keep = h('input', { type: 'checkbox' });
+    openModal({
+      title: '패스 칠', width: '360px',
+      body: [h('label.ph-prow', h('span', '내용'), what, col, pat), h('label.ph-prow', h('span', '모드'), mode), h('label.ph-prow', h('span', '불투명도'), op, h('small', '%')), h('label.ph-prow', keep, h('span', '투명도 유지')), h('label.ph-prow', h('span', '페더 반경'), fe, h('small', 'px')), h('label.ph-prow', aa, h('span', '앤티 앨리어스'))],
+      buttons: [{ label: '취소' }, { label: '확인', primary: true, action: () => {
+        const v = what.value;
+        const color = v === 'fg' ? P.fg : v === 'bg' ? P.bg : v === 'black' ? '#000000' : v === 'white' ? '#ffffff' : v === 'gray' ? '#808080' : col.value;
+        C.fillPath({ color, pattern: v === 'pattern' ? pat.value : null, mode: mode.value, opacity: clamp(+op.value, 0, 100) / 100, feather: clamp(+fe.value, 0, 250), antiAlias: aa.checked, preserve: keep.checked });
+      } }],
+    });
+    return undefined;
+  };
+  C.makeSelectionDialog = () => {
+    if (!P.getPath().length) return toast('선택 영역으로 만들 패스가 없습니다');
+    const fe = h('input.ph-num', { type: 'number', value: 0, min: 0, max: 250, step: 0.5 });
+    const aa = h('input', { type: 'checkbox', checked: true });
+    const has = !!P.doc.selection;
+    const ops = [['new', '새 선택 영역'], ['add', '선택 영역에 추가'], ['sub', '선택 영역에서 빼기'], ['int', '선택 영역과 교차']];
+    let mode = 'new';
+    const radios = ops.map(([v, n]) => {
+      const r = h('input', { type: 'radio', name: 'mksel', value: v, checked: v === 'new', disabled: !has && v !== 'new' });
+      r.addEventListener('change', () => { mode = v; });
+      return h('label.ph-prow', r, h('span', n));
+    });
+    openModal({
+      title: '선택 영역 만들기', width: '320px',
+      body: [h('div.ph-sub', '렌더링'), h('label.ph-prow', h('span', '페더 반경'), fe, h('small', 'px')), h('label.ph-prow', aa, h('span', '앤티 앨리어스')), h('div.ph-sub', '작업'), ...radios],
+      buttons: [{ label: '취소' }, { label: '확인', primary: true, action: () => C.pathToSelection(mode, clamp(+fe.value, 0, 250), aa.checked) }],
+    });
+    return undefined;
+  };
+  C.makeWorkPathDialog = () => {
+    if (!P.doc?.selection) return toast('먼저 선택 영역을 만드세요');
+    const t = h('input.ph-num', { type: 'number', value: 2, min: 0.5, max: 10, step: 0.5 });
+    openModal({
+      title: '작업 패스 만들기', width: '300px',
+      body: [h('label.ph-prow', h('span', '허용치'), t, h('small', 'px')), h('div.note', '값이 작을수록 선택 영역의 윤곽을 더 촘촘히 따라갑니다 (기준점이 많아짐).')],
+      buttons: [{ label: '취소' }, { label: '확인', primary: true, action: () => C.selectionToPath(clamp(+t.value, 0.5, 10)) }],
+    });
     return undefined;
   };
   C.savePath = async (name) => {
@@ -659,6 +1353,19 @@ export function installPathTools(P) {
     });
     P.emit('paths');
   };
+  C.duplicatePath = () => {
+    const doc = P.doc;
+    const t = P.resolvePathTarget();
+    if (!t) return;
+    const sps = PT.clonePath(P.getPath());
+    const src = t.kind === 'saved' ? doc.paths.find((p) => p.id === t.id)?.name : '작업 패스';
+    P.run('패스 복제', () => {
+      const id = `path${Date.now().toString(36)}`;
+      doc.paths = [...doc.paths, { id, name: `${src || '패스'} 복사`, subpaths: sps }];
+      P.pathTarget = { kind: 'saved', id };
+    });
+    P.emit('paths');
+  };
   C.deletePath = () => {
     const doc = P.doc;
     const t = P.resolvePathTarget();
@@ -673,6 +1380,8 @@ export function installPathTools(P) {
       }
       P.pathTarget = null;
     });
+    P.penDraw = null;
+    P.curvDraw = null;
     P.emit('paths');
   };
   C.renamePath = async (id) => {
@@ -718,7 +1427,7 @@ export function installPathTools(P) {
   };
   P.customShapeList = () => PT.CUSTOM_SHAPES.map(([id, name]) => [id, name]);
   P.customShapeName = (id) => PT.CUSTOM_SHAPES.find((c) => c[0] === id)?.[1] || '모양';
-  P.shapeSubpaths = (shape, x, y) => PT.translatePath(PT.shapeToSubpaths(shape), x, y).map((sp) => ({ ...sp, closed: shape.type === 'line' ? false : sp.closed }));
+  P.shapeSubpaths = (shape, x, y) => PT.translatePath(PT.shapeToSubpaths(shape), x, y);
   P.addToWorkPath = (sps, label, before) => {
     const doc = P.doc;
     const op = P.opts('pen').op || 'combine';
@@ -783,4 +1492,7 @@ export function installPathTools(P) {
       { label: '삭제', disabled: !l?.vmask, action: () => P.run('벡터 마스크 삭제', () => { l.vmask = null; P.doc.touch(l); }) },
     ];
   };
+
+  // Photoshop's shape tools (rectangle … custom shape) and the shape layer renderer
+  installShapes2(P);
 }

@@ -56,7 +56,7 @@ export function invertH(H) {
  * Draw `src` onto a deformed grid. pts: (rows+1)×(cols+1) points [x, y] (row-major) in output space,
  * the image of the regular source grid. Returns { canvas, x, y } (output canvas placed in doc coords).
  */
-export function meshWarp(src, pts, rows, cols, { pad = 1, sx = 0, sy = 0, sw = src.width, sh = src.height } = {}) {
+export function meshWarp(src, pts, rows, cols, { pad = 1, sx = 0, sy = 0, sw = src.width, sh = src.height, interp = 'bicubic' } = {}) {
   const xs = pts.map((p) => p[0]);
   const ys = pts.map((p) => p[1]);
   const x0 = Math.floor(Math.min(...xs)) - pad;
@@ -66,18 +66,36 @@ export function meshWarp(src, pts, rows, cols, { pad = 1, sx = 0, sy = 0, sw = s
   if (W * H > 120e6) throw new Error('결과가 너무 큽니다');
   const out = makeCanvas(W, H);
   const g = out.getContext('2d');
-  g.imageSmoothingQuality = 'high';
+  smoothing(g, interp);
   const P = (r, c) => pts[r * (cols + 1) + c];
   const S = (r, c) => [sx + (c / cols) * sw, sy + (r / rows) * sh];
+  // Neighbouring triangles share their edges exactly and their edge coverages add up: drawn
+  // additively they meet without the see-through seams (or the doubled ones over semi-transparent
+  // pixels) that overlapping triangles leave. Where a mesh folds over itself, the turned-over
+  // triangles would add up with the ones below: they are drawn afterwards on top instead.
+  const area = (a, b, c) => (b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1]);
+  let pos = 0;
+  let neg = 0;
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      for (const v of [area(P(r, c), P(r, c + 1), P(r + 1, c)), area(P(r, c + 1), P(r + 1, c + 1), P(r + 1, c))]) {
+        if (v > 1e-6) pos++;
+        else if (v < -1e-6) neg++;
+      }
+    }
+  }
+  const major = pos >= neg ? 1 : -1;
+  let growBy = 0;
   const tri = (s0, s1, s2, d0, d1, d2) => {
-    // expand the destination triangle a little to hide seams between neighbours
+    const sa = Math.sign(area(d0, d1, d2));
+    if (sa && sa !== (growBy ? -major : major)) return;
     const cx = (d0[0] + d1[0] + d2[0]) / 3;
     const cy = (d0[1] + d1[1] + d2[1]) / 3;
     const grow = (p) => {
       const dx = p[0] - cx;
       const dy = p[1] - cy;
       const l = Math.hypot(dx, dy) || 1;
-      return [p[0] + (dx / l) * 0.6 - x0, p[1] + (dy / l) * 0.6 - y0];
+      return [p[0] + (dx / l) * growBy - x0, p[1] + (dy / l) * growBy - y0];
     };
     const [e0, e1, e2] = [grow(d0), grow(d1), grow(d2)];
     // affine: source → destination
@@ -106,11 +124,20 @@ export function meshWarp(src, pts, rows, cols, { pad = 1, sx = 0, sy = 0, sw = s
     g.drawImage(src, 0, 0);
     g.restore();
   };
-  for (let r = 0; r < rows; r++) {
-    for (let c = 0; c < cols; c++) {
-      tri(S(r, c), S(r, c + 1), S(r + 1, c), P(r, c), P(r, c + 1), P(r + 1, c));
-      tri(S(r, c + 1), S(r + 1, c + 1), S(r + 1, c), P(r, c + 1), P(r + 1, c + 1), P(r + 1, c));
+  const pass = () => {
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        tri(S(r, c), S(r, c + 1), S(r + 1, c), P(r, c), P(r, c + 1), P(r + 1, c));
+        tri(S(r, c + 1), S(r + 1, c + 1), S(r + 1, c), P(r, c + 1), P(r + 1, c + 1), P(r + 1, c));
+      }
     }
+  };
+  g.globalCompositeOperation = 'lighter';
+  pass();
+  if (pos && neg) {
+    g.globalCompositeOperation = 'source-over';
+    growBy = 0.6;
+    pass();
   }
   return { canvas: out, x: x0, y: y0 };
 }
@@ -259,25 +286,63 @@ export function warpGrid(warp, w, h, ox = 0, oy = 0, n = 16) {
   return pts;
 }
 
-/** Custom warp: a 4×4 Bézier patch (16 control points, doc coords) evaluated on a grid. */
-export function patchGrid(ctrl, n = 16) {
-  const B = (t) => [(1 - t) ** 3, 3 * t * (1 - t) ** 2, 3 * t * t * (1 - t), t ** 3];
-  const pts = [];
-  for (let r = 0; r <= n; r++) {
-    const bv = B(r / n);
-    for (let c = 0; c <= n; c++) {
-      const bu = B(c / n);
-      let x = 0;
-      let y = 0;
-      for (let i = 0; i < 4; i++) for (let j = 0; j < 4; j++) {
-        const w = bv[i] * bu[j];
-        x += ctrl[i * 4 + j][0] * w;
-        y += ctrl[i * 4 + j][1] * w;
-      }
-      pts.push([x, y]);
+// ---------------------------------------------------------------- custom warp grids
+
+/** Interpolation (Photoshop's 보간): nearest neighbour, bilinear or bicubic. */
+export function smoothing(g, interp = 'bicubic') {
+  g.imageSmoothingEnabled = interp !== 'nearest';
+  g.imageSmoothingQuality = interp === 'bilinear' ? 'low' : 'high';
+}
+
+const bern = (t) => [(1 - t) ** 3, 3 * t * (1 - t) ** 2, 3 * t * t * (1 - t), t ** 3];
+const evenSplits = (n) => Array.from({ length: n + 1 }, (_, i) => i / n);
+
+/**
+ * A custom warp is a grid of rows × cols cubic Bézier patches sharing their edges: (3·rows+1) ×
+ * (3·cols+1) control points (doc coords, row-major). Every 3rd point is an anchor on a grid line
+ * crossing, the ones between are handles. us / vs: where the grid lines sit in the source (0..1).
+ */
+export function warpDims(w) {
+  const R = w.rows || 1;
+  const C = w.cols || 1;
+  return { R, C, N: 3 * C + 1, us: w.us || evenSplits(C), vs: w.vs || evenSplits(R) };
+}
+
+/** The warped position of source point (u, v) ∈ [0,1]². */
+export function evalWarp(w, u, v) {
+  const { R, C, N, us, vs } = warpDims(w);
+  let j = 0;
+  while (j < C - 1 && u > us[j + 1]) j++;
+  let i = 0;
+  while (i < R - 1 && v > vs[i + 1]) i++;
+  const bu = bern((u - us[j]) / (us[j + 1] - us[j] || 1));
+  const bv = bern((v - vs[i]) / (vs[i + 1] - vs[i] || 1));
+  let X = 0;
+  let Y = 0;
+  for (let a = 0; a < 4; a++) {
+    for (let b = 0; b < 4; b++) {
+      const p = w.ctrl[(3 * i + a) * N + 3 * j + b];
+      const k = bv[a] * bu[b];
+      X += p[0] * k;
+      Y += p[1] * k;
     }
   }
+  return [X, Y];
+}
+
+/** Mesh resolution for a warp grid. */
+export const warpRes = (w) => Math.min(48, Math.max(16, 6 * Math.max(w?.rows || 1, w?.cols || 1)));
+
+/** The warp evaluated on an (n+1)×(n+1) grid (doc coords). */
+export function warpMesh(w, n = warpRes(w)) {
+  const pts = [];
+  for (let r = 0; r <= n; r++) for (let c = 0; c <= n; c++) pts.push(evalWarp(w, c / n, r / n));
   return pts;
+}
+
+/** Custom warp: a 4×4 Bézier patch (16 control points, doc coords) evaluated on a grid. */
+export function patchGrid(ctrl, n = 16) {
+  return warpMesh({ ctrl }, n);
 }
 
 /** The 16 control points of an undeformed w×h box at (x, y). */
@@ -287,9 +352,63 @@ export function flatPatch(x, y, w, h) {
   return out;
 }
 
+/** The same grid with rows and columns swapped (so splitting rows can reuse splitting columns). */
+function transposeWarp(w) {
+  const { R, C, N, us, vs } = warpDims(w);
+  const M = 3 * R + 1;
+  const ctrl = [];
+  for (let c = 0; c < N; c++) for (let r = 0; r < M; r++) ctrl.push(w.ctrl[r * N + c]);
+  return { ...w, ctrl, rows: C, cols: R, us: vs, vs: us };
+}
+
+/** Split the grid with a vertical line at source u (exact: the picture doesn't change). */
+function splitCols(w, U) {
+  const { R, C, N, us } = warpDims(w);
+  let j = 0;
+  while (j < C - 1 && U > us[j + 1]) j++;
+  const span = us[j + 1] - us[j];
+  const s = (U - us[j]) / (span || 1);
+  // too close to a line that is already there
+  if (s * span < 0.02 || (1 - s) * span < 0.02) return w;
+  const L = (a, b) => [a[0] + (b[0] - a[0]) * s, a[1] + (b[1] - a[1]) * s];
+  const ctrl = [];
+  for (let r = 0; r < 3 * R + 1; r++) {
+    const row = w.ctrl.slice(r * N, (r + 1) * N);
+    const [p0, p1, p2, p3] = row.slice(3 * j, 3 * j + 4);
+    const p01 = L(p0, p1);
+    const p12 = L(p1, p2);
+    const p23 = L(p2, p3);
+    const p012 = L(p01, p12);
+    const p123 = L(p12, p23);
+    ctrl.push(...row.slice(0, 3 * j + 1), p01, p012, L(p012, p123), p123, p23, ...row.slice(3 * j + 3));
+  }
+  return { ...w, ctrl, cols: C + 1, us: [...us.slice(0, j + 1), U, ...us.slice(j + 1)], vs: warpDims(w).vs };
+}
+
+/** Split a custom warp: 'v' adds a vertical line at u, 'h' a horizontal one at v, 'cross' both. */
+export function splitWarp(w, how, u, v) {
+  let out = { ...w, us: warpDims(w).us, vs: warpDims(w).vs };
+  if (how === 'v' || how === 'cross') out = splitCols(out, u);
+  if (how === 'h' || how === 'cross') out = transposeWarp(splitCols(transposeWarp(out), v));
+  return out;
+}
+
+/** An n×n grid made from the current one (Photoshop's 격자 3 x 3, 4 x 4, 5 x 5): exact splits. */
+export function gridWarp(w, n) {
+  let out = { ...w, us: warpDims(w).us, vs: warpDims(w).vs };
+  for (let k = 1; k < n; k++) {
+    if (!out.us.some((x) => Math.abs(x - k / n) < 1e-6)) out = splitCols(out, k / n);
+    if (!out.vs.some((x) => Math.abs(x - k / n) < 1e-6)) out = transposeWarp(splitCols(transposeWarp(out), k / n));
+  }
+  return out;
+}
+
 // smart objects with distort/perspective corners or a warp
 setWarpRenderer((src, s) => {
-  if (s.warp?.ctrl) return meshWarp(src, patchGrid(s.warp.ctrl), 16, 16);
+  if (s.warp?.ctrl) {
+    const n = warpRes(s.warp);
+    return meshWarp(src, warpMesh(s.warp, n), n, n);
+  }
   if (s.warp?.style && s.warp.style !== 'none') {
     // preset warp inside the transformed box (affine, or perspective corners)
     const H = s.corners ? homography([[0, 0], [s.w, 0], [s.w, s.h], [0, s.h]], s.corners) : null;
@@ -326,15 +445,19 @@ const applyM = (m, [x, y]) => [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y +
 
 export const TRANSFORM_MODES = [['free', '자유 변형'], ['skew', '기울이기'], ['distort', '왜곡'], ['perspective', '원근'], ['warp', '뒤틀기']];
 
+const near = (a, b, eps = 1e-6) => Math.abs(a[0] - b[0]) < eps && Math.abs(a[1] - b[1]) < eps;
+
 /**
  * Transform the active layer (pixels, smart object, shape path, text, group), its mask, or the
- * selection. State: the 4 corners of the source box, a pivot, and an optional warp
- * (a preset {style, bend, h, v} or a custom 4×4 control grid in doc coords).
+ * selection. State: the 4 corners of the source box, a pivot (the reference point), and an optional
+ * warp (a preset {style, bend, h, v} or a custom grid of Bézier patches in doc coords).
+ * opts.copy: transform a copy of the selected pixels (the originals stay, Ctrl+Alt+T).
  */
 export class Transformer {
-  constructor(E, { mode = 'free', target = 'auto' } = {}) {
+  constructor(E, { mode = 'free', target = 'auto', copy = false } = {}) {
     this.E = E;
     this.mode = mode;
+    this.copy = !!copy;
     const doc = E.doc;
     const l = doc.active;
     this.layer = l;
@@ -381,6 +504,7 @@ export class Transformer {
     this.h = box.h;
     this.q = this.q0.map((p) => [...p]);
     this.pivot = this.center();
+    this.warp0 = this.warp ? JSON.stringify(this.warp) : null;
     if (this.warp?.ctrl) this.warp.ctrl = this.warp.ctrl.map((p) => [...p]);
     if (this.kind === 'text' && mode !== 'free' && mode !== 'skew') {
       E.toast(mode === 'warp' ? '글자는 문자 ▸ 텍스트 뒤틀기로 휘게 합니다' : '글자 레이어는 왜곡·원근을 할 수 없습니다 (래스터화하거나 고급 개체로 바꾼 뒤 변형하세요)');
@@ -388,6 +512,11 @@ export class Transformer {
     }
     if (mode === 'warp') this.startWarp();
     this.update();
+  }
+
+  /** Photoshop's interpolation choice for this transform (bicubic unless set). */
+  get interp() {
+    return this.E.transformInterp || 'bicubic';
   }
 
   /** Cut the pixels being transformed out of their layer (or mask / selection). */
@@ -406,6 +535,18 @@ export class Transformer {
       fg.drawImage(l.mask.canvas, l.mask.x, l.mask.y);
     } else {
       if (l.kind !== 'raster' || !l.canvas) throw new Error('이 레이어는 변형할 수 없습니다');
+      // a layer reaching past the canvas: all of it (the parts outside would be lost otherwise)
+      if (!doc.selection && (l.x < 0 || l.y < 0 || l.x + l.canvas.width > W || l.y + l.canvas.height > H)) {
+        const b = alphaBoxLocal(l.canvas);
+        if (!b) throw new Error('레이어가 비어 있습니다');
+        const c = makeCanvas(b.w, b.h);
+        c.getContext('2d').drawImage(l.canvas, -b.x, -b.y);
+        if (!this.copy) {
+          const g = doc.editPixels(l);
+          g.clearRect(0, 0, g.canvas.width, g.canvas.height);
+        }
+        return { canvas: c, x: l.x + b.x, y: l.y + b.y };
+      }
       fg.drawImage(l.canvas, l.x, l.y);
       if (doc.selection) {
         fg.globalCompositeOperation = 'destination-in';
@@ -417,8 +558,8 @@ export class Transformer {
     if (!b) throw new Error(this.kind === 'selection' ? '선택 영역이 비어 있습니다' : '레이어가 비어 있습니다');
     const c = makeCanvas(b.w, b.h);
     c.getContext('2d').drawImage(full, -b.x, -b.y);
-    // take them out of the source
-    if (this.kind === 'pixels') {
+    // take them out of the source (a copy leaves them)
+    if (this.kind === 'pixels' && !this.copy) {
       const g = doc.editPixels(l);
       g.save();
       if (doc.selection) {
@@ -438,18 +579,21 @@ export class Transformer {
     return [(q[0][0] + q[1][0] + q[2][0] + q[3][0]) / 4, (q[0][1] + q[1][1] + q[2][1] + q[3][1]) / 4];
   }
 
+  /** A flat custom warp grid (1 patch) lying on the current box. */
+  flatWarp() {
+    const H = homography([[0, 0], [this.w, 0], [this.w, this.h], [0, this.h]], this.q);
+    return { style: 'custom', rows: 1, cols: 1, ctrl: flatPatch(0, 0, this.w, this.h).map(([x, y]) => applyH(H, x, y)) };
+  }
+
   startWarp() {
     this.mode = 'warp';
     if (!this.warp) this.warp = { style: 'custom' };
-    if (this.warp.style === 'custom' && !this.warp.ctrl) {
-      const H = homography([[0, 0], [this.w, 0], [this.w, this.h], [0, this.h]], this.q);
-      this.warp.ctrl = flatPatch(0, 0, this.w, this.h).map(([x, y]) => applyH(H, x, y));
-    }
+    if (this.warp.style === 'custom' && !this.warp.ctrl) this.warp = this.flatWarp();
   }
 
   /** The output mesh for pixel-type sources. */
   grid(n = 16) {
-    if (this.warp?.ctrl) return patchGrid(this.warp.ctrl, n);
+    if (this.warp?.ctrl) return warpMesh(this.warp, n);
     const H = homography([[0, 0], [this.w, 0], [this.w, this.h], [0, this.h]], this.q);
     if (this.warp?.style && this.warp.style !== 'none' && this.warp.style !== 'custom') {
       return warpGrid(this.warp, this.w, this.h, 0, 0, n).map(([x, y]) => applyH(H, x, y));
@@ -461,27 +605,52 @@ export class Transformer {
 
   /** Map one point of the source box (local coords) to the document. */
   mapPoint(x, y) {
-    if (this.warp?.ctrl) {
-      // evaluate the patch at (u, v)
-      const u = x / this.w;
-      const v = y / this.h;
-      const B = (t) => [(1 - t) ** 3, 3 * t * (1 - t) ** 2, 3 * t * t * (1 - t), t ** 3];
-      const bu = B(u);
-      const bv = B(v);
-      let X = 0;
-      let Y = 0;
-      for (let i = 0; i < 4; i++) for (let j = 0; j < 4; j++) {
-        X += this.warp.ctrl[i * 4 + j][0] * bv[i] * bu[j];
-        Y += this.warp.ctrl[i * 4 + j][1] * bv[i] * bu[j];
-      }
-      return [X, Y];
-    }
+    if (this.warp?.ctrl) return evalWarp(this.warp, x / this.w, y / this.h);
     const H = homography([[0, 0], [this.w, 0], [this.w, this.h], [0, this.h]], this.q);
     if (this.warp?.style && this.warp.style !== 'none' && this.warp.style !== 'custom') {
       const [wx, wy] = warpPoint(this.warp.style, x / this.w, y / this.h, this.w, this.h, (this.warp.bend ?? 50) / 100, (this.warp.h ?? 0) / 100, (this.warp.v ?? 0) / 100, !!this.warp.vertical);
       return applyH(H, wx, wy);
     }
     return applyH(H, x, y);
+  }
+
+  /** The source point (u, v ∈ [0,1]) of a custom warp that lands nearest to p, or null outside it. */
+  warpUV(p) {
+    if (!this.warp?.ctrl) return null;
+    const n = 24;
+    const mesh = warpMesh(this.warp, n);
+    let best = -1;
+    let bd = Infinity;
+    for (let i = 0; i < mesh.length; i++) {
+      const d = (mesh[i][0] - p[0]) ** 2 + (mesh[i][1] - p[1]) ** 2;
+      if (d < bd) {
+        bd = d;
+        best = i;
+      }
+    }
+    let u = (best % (n + 1)) / n;
+    let v = Math.floor(best / (n + 1)) / n;
+    // refine with a few Gauss-Newton steps on the surface
+    for (let it = 0; it < 8; it++) {
+      const e = 1e-3;
+      const f = evalWarp(this.warp, u, v);
+      const fu = evalWarp(this.warp, Math.min(1, u + e), v);
+      const fv = evalWarp(this.warp, u, Math.min(1, v + e));
+      const a = (fu[0] - f[0]) / e;
+      const b = (fv[0] - f[0]) / e;
+      const c = (fu[1] - f[1]) / e;
+      const d = (fv[1] - f[1]) / e;
+      const det = a * d - b * c;
+      if (Math.abs(det) < 1e-9) break;
+      const rx = p[0] - f[0];
+      const ry = p[1] - f[1];
+      u = Math.max(0, Math.min(1, u + (d * rx - b * ry) / det));
+      v = Math.max(0, Math.min(1, v + (-c * rx + a * ry) / det));
+    }
+    const f = evalWarp(this.warp, u, v);
+    const tol = 6 / this.E.view.zoom;
+    if (Math.hypot(f[0] - p[0], f[1] - p[1]) > tol) return null;
+    return [u, v];
   }
 
   affine() {
@@ -498,15 +667,24 @@ export class Transformer {
       const y0 = Math.floor(Math.min(...ys));
       const c = makeCanvas(Math.ceil(Math.max(...xs)) - x0 + 1, Math.ceil(Math.max(...ys)) - y0 + 1);
       const g = c.getContext('2d');
-      g.imageSmoothingQuality = 'high';
+      smoothing(g, this.interp);
       g.setTransform(m[0] * (this.w / src.width), m[1] * (this.w / src.width), m[2] * (this.h / src.height), m[3] * (this.h / src.height), m[4] - x0, m[5] - y0);
       g.drawImage(src, 0, 0);
       return { canvas: c, x: x0, y: y0 };
     }
-    const n = fine ? 24 : 12;
+    const n = this.warp?.ctrl ? (fine ? warpRes(this.warp) : Math.max(12, warpRes(this.warp) >> 1)) : fine ? 24 : 12;
     // the mesh is in source-pixel space: scale the box grid to the source size
     const pts = this.grid(n);
-    return meshWarp(src, pts, n, n, { sw: src.width, sh: src.height });
+    return meshWarp(src, pts, n, n, { sw: src.width, sh: src.height, interp: this.interp });
+  }
+
+  /** The live preview; a shape too big to draw keeps the last one shown. */
+  tryRender(src, fine) {
+    try {
+      return this.renderSource(src, fine);
+    } catch {
+      return null;
+    }
   }
 
   /** Show the transform live. */
@@ -533,12 +711,13 @@ export class Transformer {
         l.visible = false;
         doc.touch(l);
       }
-      const r = this.renderSource(this.groupSrc, fine);
-      E.float = { ...r, layerId: null, above: true };
+      const r = this.tryRender(this.groupSrc, fine);
+      if (r) E.float = { ...r, layerId: null, above: true };
     } else {
-      const r = this.renderSource(this.src, fine);
-      E.float = { ...r, layerId: this.kind === 'pixels' ? l.id : null, above: this.kind !== 'pixels', tint: this.kind === 'selection' ? 'selection' : this.kind === 'mask' ? 'mask' : null };
+      const r = this.tryRender(this.src, fine);
+      if (r) E.float = { ...r, layerId: this.kind === 'pixels' ? l.id : null, above: this.kind !== 'pixels', tint: this.kind === 'selection' ? 'selection' : this.kind === 'mask' ? 'mask' : null };
     }
+    E.transformChanged?.(this);
     E.redraw();
   }
 
@@ -580,12 +759,36 @@ export class Transformer {
     return { c0: q[0], c1: q[1], c2: q[2], c3: q[3], e0: mid(q[0], q[1]), e1: mid(q[1], q[2]), e2: mid(q[2], q[3]), e3: mid(q[3], q[0]), pivot: this.pivot };
   }
 
+  /** Indices of the warp control points shown (and dragged): all 16 on one patch, else anchors and handles. */
+  warpPoints() {
+    const { R, C, N } = warpDims(this.warp);
+    const out = [];
+    for (let r = 0; r <= 3 * R; r++) {
+      for (let c = 0; c <= 3 * C; c++) {
+        if (R * C > 1 && r % 3 && c % 3) continue;
+        out.push(r * N + c);
+      }
+    }
+    return out;
+  }
+
   hit(p) {
     const tol = 9 / this.E.view.zoom;
     const pt = [p.x, p.y];
+    this.hoverPt = pt;
     if (this.mode === 'warp' && this.warp?.ctrl) {
-      for (let i = 0; i < 16; i++) if (len(sub(this.warp.ctrl[i], pt)) < tol) return `w${i}`;
-      return pointInQuad(pt, this.q) ? 'move' : 'none';
+      if (this.splitMode) return this.warpUV(pt) ? 'split' : 'none';
+      let best = null;
+      let bd = tol;
+      for (const i of this.warpPoints()) {
+        const d = len(sub(this.warp.ctrl[i], pt));
+        if (d < bd) {
+          bd = d;
+          best = `w${i}`;
+        }
+      }
+      if (best) return best;
+      return this.warpUV(pt) ? 'mesh' : 'none';
     }
     const hs = this.handles();
     if (len(sub(hs.pivot, pt)) < tol && this.mode === 'free') return 'pivot';
@@ -595,7 +798,20 @@ export class Transformer {
   }
 
   down(p, e = {}) {
-    this.d = { h: this.hit(p), a: [p.x, p.y], q: this.q.map((x) => [...x]), pivot: [...this.pivot], ctrl: this.warp?.ctrl?.map((x) => [...x]), e };
+    const h = this.hit(p);
+    // Split Warp: a click on the grid adds the line(s) there
+    if (h === 'split') {
+      const uv = this.warpUV([p.x, p.y]);
+      if (uv) {
+        this.warp = splitWarp(this.warp, this.splitMode, uv[0], uv[1]);
+        this.splitMode = null;
+        this.update(true);
+        this.E.emit?.('transform');
+      }
+      this.d = null;
+      return;
+    }
+    this.d = { h, a: [p.x, p.y], q: this.q.map((x) => [...x]), pivot: [...this.pivot], ctrl: this.warp?.ctrl?.map((x) => [...x]), uv: h === 'mesh' ? this.warpUV([p.x, p.y]) : null, e };
   }
 
   move(p, e = {}) {
@@ -606,15 +822,24 @@ export class Transformer {
     const q = d.q.map((x) => [...x]);
     const h = d.h;
     let mode = this.mode;
-    // Ctrl: distort a corner / skew an edge; Ctrl+Alt+Shift: perspective (like Photoshop)
-    if (mode === 'free' && (e.ctrlKey || e.metaKey)) mode = e.altKey && e.shiftKey ? 'perspective' : h[0] === 'c' ? 'distort' : 'skew';
+    let sym = false;
+    // Photoshop's modifiers in free transform: Ctrl distorts (Ctrl+Alt: about the centre),
+    // Ctrl+Shift on a side skews, Ctrl+Alt+Shift on a corner sets perspective
+    if (mode === 'free' && (e.ctrlKey || e.metaKey) && (h[0] === 'c' || h[0] === 'e') && h.length === 2) {
+      if (e.altKey && e.shiftKey && h[0] === 'c') mode = 'perspective';
+      else if (e.shiftKey && h[0] === 'e') mode = 'skew';
+      else {
+        mode = 'distort';
+        sym = !!e.altKey;
+      }
+    }
     if (h.startsWith('w')) {
-      const i = +h.slice(1);
-      this.warp.ctrl = d.ctrl.map((x) => [...x]);
-      this.warp.ctrl[i] = add(d.ctrl[i], delta);
-      // dragging a corner point carries its two handles along
-      const corner = { 0: [1, 4], 3: [2, 7], 12: [8, 13], 15: [11, 14] }[i];
-      if (corner) for (const j of corner) this.warp.ctrl[j] = add(d.ctrl[j], delta);
+      this.dragWarpPoint(+h.slice(1), delta);
+      this.update();
+      return;
+    }
+    if (h === 'mesh') {
+      this.dragMesh(d.uv, delta);
       this.update();
       return;
     }
@@ -624,17 +849,27 @@ export class Transformer {
       if (this.warp?.ctrl) this.warp.ctrl = d.ctrl.map((x) => add(x, delta));
     } else if (h === 'pivot') {
       this.pivot = add(d.pivot, delta);
+      this.E.transformChanged?.(this);
       return this.E.redraw();
     } else if (h === 'rotate') {
       let ang = Math.atan2(pt[1] - d.pivot[1], pt[0] - d.pivot[0]) - Math.atan2(d.a[1] - d.pivot[1], d.a[0] - d.pivot[0]);
       if (e.shiftKey) ang = Math.round(ang / (Math.PI / 12)) * (Math.PI / 12);
       this.q = q.map((x) => rotAbout(x, d.pivot, ang));
     } else if (mode === 'distort') {
-      if (h[0] === 'c') q[+h[1]] = add(q[+h[1]], delta);
-      else {
-        const i = +h[1];
-        q[i] = add(q[i], delta);
-        q[(i + 1) % 4] = add(q[(i + 1) % 4], delta);
+      const i = +h[1];
+      const move = (j, v) => {
+        q[j % 4] = add(q[j % 4], v);
+      };
+      if (h[0] === 'c') {
+        move(i, delta);
+        if (sym) move(i + 2, mul(delta, -1));
+      } else {
+        move(i, delta);
+        move(i + 1, delta);
+        if (sym) {
+          move(i + 2, mul(delta, -1));
+          move(i + 3, mul(delta, -1));
+        }
       }
       this.q = q;
     } else if (mode === 'skew') {
@@ -676,7 +911,7 @@ export class Transformer {
         this.q = q;
       } else this.q = q.map((x, j) => (j === +h[1] || j === (+h[1] + 1) % 4 ? add(x, delta) : x));
     } else {
-      // free: scale in the box's own axes, about the opposite side (Alt: about the pivot)
+      // free: scale in the box's own axes, about the opposite side (Alt: about the reference point)
       const ux = unit(sub(q[1], q[0]));
       const uy = unit(sub(q[3], q[0]));
       const fromCenter = !!e.altKey;
@@ -697,8 +932,9 @@ export class Transformer {
       let kx = Math.abs(a0) > 1e-6 ? a1 / a0 : 1;
       let ky = Math.abs(b0) > 1e-6 ? b1 / b0 : 1;
       if (!corner) {
-        if (i === 0 || i === 2) kx = 1;
-        else ky = 1;
+        // a side stretches one way; Shift keeps the proportions
+        if (i === 0 || i === 2) kx = e.shiftKey ? Math.abs(ky) : 1;
+        else ky = e.shiftKey ? Math.abs(kx) : 1;
       } else if (!e.shiftKey) {
         // corners keep the proportions (Shift: free), like recent Photoshop
         const k = Math.abs(kx) > Math.abs(ky) ? kx : ky;
@@ -714,12 +950,91 @@ export class Transformer {
         this.pivot = add(anchor, add(mul(ux, pa * kx), mul(uy, pb * ky)));
       }
     }
+    // the reference point rides on the box (at the same spot in it)
+    if (h !== 'move' && h !== 'pivot' && h !== 'rotate') this.pivot = this.carryPoint(d.q, this.q, d.pivot);
     if (this.warp?.ctrl && h !== 'move') {
       // keep the warp grid riding on the box
       const H0 = homography(d.q, this.q);
       this.warp.ctrl = d.ctrl.map(([x, y]) => applyH(H0, x, y));
     }
     this.update();
+  }
+
+  /** Where point p (at the same spot of quad a) is in quad b. */
+  carryPoint(a, b, p) {
+    if (a.every((x, i) => near(x, b[i]))) return p;
+    const H = homography(a, b);
+    const r = applyH(H, p[0], p[1]);
+    return Number.isFinite(r[0]) && Number.isFinite(r[1]) ? r : p;
+  }
+
+  /** Drag one warp control point; an anchor takes its handles along. */
+  dragWarpPoint(i, delta) {
+    const d = this.d;
+    const { R, C, N } = warpDims(this.warp);
+    const ctrl = d.ctrl.map((x) => [...x]);
+    const r = Math.floor(i / N);
+    const c = i % N;
+    ctrl[i] = add(d.ctrl[i], delta);
+    if (r % 3 === 0 && c % 3 === 0) {
+      for (const [dr, dc] of [[0, 1], [0, -1], [1, 0], [-1, 0]]) {
+        const rr = r + dr;
+        const cc = c + dc;
+        if (rr < 0 || cc < 0 || rr > 3 * R || cc > 3 * C) continue;
+        ctrl[rr * N + cc] = add(d.ctrl[rr * N + cc], delta);
+      }
+    }
+    this.warp.ctrl = ctrl;
+    if (R * C > 1) this.untwist(r, c);
+  }
+
+  /**
+   * Inner control points of the patches around control point (r, c) from their edges (no twist):
+   * on a grid of several patches only anchors and handles are shown.
+   */
+  untwist(r, c) {
+    const { R, C, N } = warpDims(this.warp);
+    const P = this.warp.ctrl;
+    const at = (rr, cc) => P[rr * N + cc];
+    for (let i = Math.max(0, Math.floor((r - 1) / 3)); i <= Math.min(R - 1, Math.floor(r / 3)); i++) {
+      for (let j = Math.max(0, Math.floor((c - 1) / 3)); j <= Math.min(C - 1, Math.floor(c / 3)); j++) {
+        const r0 = 3 * i;
+        const c0 = 3 * j;
+        for (const [a, b] of [[1, 1], [1, 2], [2, 1], [2, 2]]) {
+          // corner it leans on, and the two edge handles next to it
+          const ca = a === 1 ? 0 : 3;
+          const cb = b === 1 ? 0 : 3;
+          const k = at(r0 + ca, c0 + cb);
+          const e1 = at(r0 + ca, c0 + b);
+          const e2 = at(r0 + a, c0 + cb);
+          P[(r0 + a) * N + c0 + b] = [e1[0] + e2[0] - k[0], e1[1] + e2[1] - k[1]];
+        }
+      }
+    }
+  }
+
+  /** Drag inside the warp grid: the spot under the pointer follows it (the patch bends around it). */
+  dragMesh(uv, delta) {
+    const d = this.d;
+    if (!uv) return;
+    const { R, C, N, us, vs } = warpDims(this.warp);
+    let j = 0;
+    while (j < C - 1 && uv[0] > us[j + 1]) j++;
+    let i = 0;
+    while (i < R - 1 && uv[1] > vs[i + 1]) i++;
+    const bu = bern((uv[0] - us[j]) / (us[j + 1] - us[j] || 1));
+    const bv = bern((uv[1] - vs[i]) / (vs[i + 1] - vs[i] || 1));
+    let s2 = 0;
+    for (let a = 0; a < 4; a++) for (let b = 0; b < 4; b++) s2 += (bv[a] * bu[b]) ** 2;
+    const ctrl = d.ctrl.map((x) => [...x]);
+    for (let a = 0; a < 4; a++) {
+      for (let b = 0; b < 4; b++) {
+        const k = (bv[a] * bu[b]) / (s2 || 1);
+        const idx = (3 * i + a) * N + 3 * j + b;
+        ctrl[idx] = add(d.ctrl[idx], mul(delta, k));
+      }
+    }
+    this.warp.ctrl = ctrl;
   }
 
   up() {
@@ -739,52 +1054,152 @@ export class Transformer {
         this.E.toast('글자 레이어는 왜곡·원근을 할 수 없습니다 (래스터화하거나 고급 개체로 바꾼 뒤 변형하세요)');
         return;
       }
+      this.splitMode = null;
       this.mode = mode;
     }
     this.update();
   }
 
-  setWarpPreset(style, bend = 50, hh = 0, vv = 0) {
-    this.warp = style === 'none' ? null : style === 'custom' ? { style: 'custom' } : { style, bend, h: hh, v: vv };
+  setWarpPreset(style, bend = 50, hh = 0, vv = 0, vertical = !!this.warp?.vertical) {
+    this.warp = style === 'none' ? null : style === 'custom' ? null : { style, bend, h: hh, v: vv, vertical };
     if (style === 'custom') this.startWarp();
     this.mode = style === 'none' ? 'free' : 'warp';
-    this.update();
+    this.splitMode = null;
+    this.update(true);
   }
 
-  /** Numbers for the options bar: centre, size %, angle, skew. */
+  /** Grid: 1 (the default patch) or an n×n grid made from the current warp. */
+  setWarpGrid(n) {
+    if (this.kind === 'text') return;
+    if (!this.warp?.ctrl) {
+      this.warp = null;
+      this.startWarp();
+    }
+    const { R, C } = warpDims(this.warp);
+    if (n <= 1) {
+      // back to the default: a fresh grid on the box
+      if (R * C > 1) this.warp = this.flatWarp();
+    } else this.warp = gridWarp(this.warp, n);
+    this.mode = 'warp';
+    this.update(true);
+  }
+
+  /** Reset the custom warp to a flat grid of the same size. */
+  resetWarp() {
+    if (!this.warp?.ctrl) return;
+    const { R, C } = warpDims(this.warp);
+    this.warp = this.flatWarp();
+    if (R === C && R > 1) this.warp = gridWarp(this.warp, R);
+    this.update(true);
+  }
+
+  /** Arrow keys: move the whole box by (dx, dy). */
+  nudge(dx, dy) {
+    const v = [dx, dy];
+    this.q = this.q.map((x) => add(x, v));
+    this.pivot = add(this.pivot, v);
+    if (this.warp?.ctrl) this.warp.ctrl = this.warp.ctrl.map((x) => add(x, v));
+    this.update(true);
+  }
+
+  /** Move every corner (and the warp grid) by fn(point, pivot). */
+  remapBox(fn) {
+    const piv = [...this.pivot];
+    this.q = this.q.map((p) => fn(p, piv));
+    if (this.warp?.ctrl) this.warp.ctrl = this.warp.ctrl.map((p) => fn(p, piv));
+    this.update(true);
+  }
+
+  /** Flip horizontally ('h') or vertically ('v') about the reference point, in the box's own axes. */
+  flip(axis) {
+    if (this.kind === 'text') return void this.E.toast('글자 레이어는 뒤집을 수 없습니다 (래스터화하거나 고급 개체로 바꾼 뒤 뒤집으세요)');
+    const ux = unit(sub(this.q[1], this.q[0]));
+    const uy = unit(sub(this.q[3], this.q[0]));
+    const det = ux[0] * uy[1] - ux[1] * uy[0] || 1e-9;
+    this.remapBox((p, piv) => {
+      const v = sub(p, piv);
+      const a = (v[0] * uy[1] - v[1] * uy[0]) / det;
+      const b = (ux[0] * v[1] - ux[1] * v[0]) / det;
+      return add(piv, add(mul(ux, axis === 'h' ? -a : a), mul(uy, axis === 'v' ? -b : b)));
+    });
+  }
+
+  /** Turn by `deg` degrees (clockwise) about the reference point. */
+  rotateBy(deg) {
+    const ang = (deg * Math.PI) / 180;
+    this.remapBox((p, piv) => rotAbout(p, piv, ang));
+  }
+
+  /** The reference point: one of the 9 points of the box (u, v ∈ {0, 0.5, 1}). */
+  setReference(u, v) {
+    this.pivot = this.warp ? this.mapPoint(u * this.w, v * this.h) : applyH(homography([[0, 0], [1, 0], [1, 1], [0, 1]], this.q), u, v);
+    this.E.transformChanged?.(this);
+    this.E.redraw();
+  }
+
+  /** Which of the 9 reference points the pivot sits on ([u, v]), or null. */
+  reference() {
+    const H = homography(this.q, [[0, 0], [1, 0], [1, 1], [0, 1]]);
+    const [u, v] = applyH(H, this.pivot[0], this.pivot[1]);
+    const snap = (x) => [0, 0.5, 1].find((k) => Math.abs(x - k) < 0.01);
+    const su = snap(u);
+    const sv = snap(v);
+    return su != null && sv != null ? [su, sv] : null;
+  }
+
+  /** Numbers for the options bar: reference point position, size %, angle and skews. */
   numbers() {
     const q = this.q;
+    const key = JSON.stringify([q, this.pivot]);
+    if (this.typed?.key === key) return { ...this.typed.v };
     const top = sub(q[1], q[0]);
     const left = sub(q[3], q[0]);
     const ang = Math.atan2(top[1], top[0]);
     const nrm = [-Math.sin(ang), Math.cos(ang)];
+    const r1 = (x) => Math.round(x * 10) / 10;
     return {
-      x: Math.round(this.pivot[0]), y: Math.round(this.pivot[1]),
+      x: r1(this.pivot[0]), y: r1(this.pivot[1]),
       w: Math.round((len(top) / this.w) * 1000) / 10, h: Math.round((Math.abs(dot(left, nrm)) / this.h) * 1000) / 10,
-      angle: Math.round((ang * 180) / Math.PI * 10) / 10,
-      skew: Math.round((Math.atan2(dot(left, unit(top)), dot(left, nrm)) * 180) / Math.PI * 10) / 10,
+      angle: r1((ang * 180) / Math.PI),
+      skew: r1((Math.atan2(dot(left, unit(top)), dot(left, nrm)) * 180) / Math.PI),
+      skewV: 0,
     };
   }
 
-  /** Rebuild a parallelogram from typed numbers (about the pivot). */
+  /** Rebuild a parallelogram from typed numbers (about the reference point). */
   setNumbers(n) {
     const cur = this.numbers();
     const v = { ...cur, ...n };
     const piv = [v.x, v.y];
     const ang = (v.angle * Math.PI) / 180;
-    const sk = (v.skew * Math.PI) / 180;
+    const tx = Math.tan((Math.max(-89, Math.min(89, v.skew)) * Math.PI) / 180);
+    const ty = Math.tan((Math.max(-89, Math.min(89, v.skewV || 0)) * Math.PI) / 180);
     const ux = [Math.cos(ang), Math.sin(ang)];
     const uy = [-Math.sin(ang), Math.cos(ang)];
     const W = (this.w * v.w) / 100;
     const H = (this.h * v.h) / 100;
-    // keep the pivot at the same relative spot in the box
+    // keep the reference point at the same relative spot in the box
     const H0 = homography(this.q, [[0, 0], [1, 0], [1, 1], [0, 1]]);
     const [pu, pv] = applyH(H0, this.pivot[0], this.pivot[1]);
-    const corner = (u, vv) => add(piv, add(mul(ux, (u - pu) * W + (vv - pv) * H * Math.tan(sk)), mul(uy, (vv - pv) * H)));
+    const corner = (u, vv) => {
+      const lx = (u - pu) * W + (vv - pv) * H * tx;
+      const ly = (u - pu) * W * ty + (vv - pv) * H;
+      return add(piv, add(mul(ux, lx), mul(uy, ly)));
+    };
+    const q0 = this.q.map((x) => [...x]);
     this.q = [corner(0, 0), corner(1, 0), corner(1, 1), corner(0, 1)];
     this.pivot = piv;
-    this.warp = this.warp?.ctrl ? null : this.warp;
+    if (this.warp?.ctrl) {
+      const Hq = homography(q0, this.q);
+      this.warp.ctrl = this.warp.ctrl.map(([x, y]) => applyH(Hq, x, y));
+    }
+    this.typed = { key: JSON.stringify([this.q, this.pivot]), v: { ...v, skewV: v.skewV || 0 } };
     this.update(true);
+  }
+
+  /** Nothing changed since the transform started (Enter then changes nothing). */
+  unchanged() {
+    return this.q.every((p, i) => near(p, this.q0[i], 1e-6)) && (this.warp ? JSON.stringify(this.warp) : null) === this.warp0 && !this.keep;
   }
 
   // ---------------------------------------------------------------- finish
@@ -793,12 +1208,29 @@ export class Transformer {
     const E = this.E;
     const doc = E.doc;
     const l = this.layer;
+    // committing an untouched transform records nothing
+    if (this.unchanged()) {
+      this.cancel();
+      E.afterHistory?.();
+      return;
+    }
     E.float = null;
+    let r = null;
+    if (this.kind === 'pixels' || this.kind === 'mask' || this.kind === 'selection') {
+      try {
+        r = this.renderSource(this.src, true);
+      } catch (err) {
+        // too big to make (a perspective running off to infinity): everything goes back as it was
+        this.cancel();
+        E.afterHistory?.();
+        E.toast(`변형을 적용하지 못했습니다: ${err.message || err}`);
+        return;
+      }
+    }
     if (this.kind === 'group') {
       l.visible = this.groupHidden;
       this.applyToGroup();
-    } else if (this.kind === 'pixels' || this.kind === 'mask' || this.kind === 'selection') {
-      const r = this.renderSource(this.src, true);
+    } else if (r) {
       if (this.kind === 'pixels') {
         const g = doc.editPixels(l, { x: r.x, y: r.y, w: r.canvas.width, h: r.canvas.height });
         g.drawImage(r.canvas, r.x - l.x, r.y - l.y);
@@ -821,7 +1253,8 @@ export class Transformer {
       const m0 = quadAffine(this.q0, this.w, this.h);
       E.lastTransform = composeM(m, invertM(m0));
     }
-    E.commit(this.kind === 'selection' ? '선택 영역 변형' : { free: '자유 변형', skew: '기울이기', distort: '왜곡', perspective: '원근', warp: '뒤틀기' }[this.mode] || '변형', this.before);
+    const name = this.kind === 'selection' ? '선택 영역 변형' : { free: '자유 변형', skew: '기울이기', distort: '왜곡', perspective: '원근', warp: '뒤틀기' }[this.mode] || '변형';
+    E.commit(this.label || name, this.before);
   }
 
   /** A doc-size alpha canvas pushed through the same mapping. */
@@ -898,37 +1331,75 @@ export class Transformer {
     g.beginPath();
     q.forEach(([x, y], i) => (i ? g.lineTo(x, y) : g.moveTo(x, y)));
     g.closePath();
-    g.stroke();
+    if (!(this.mode === 'warp' && this.warp?.ctrl)) g.stroke();
     if (this.mode === 'warp' && this.warp?.ctrl) {
-      const c = this.warp.ctrl.map(S);
-      // the warp mesh
-      g.strokeStyle = 'rgba(74,163,255,.7)';
-      const mesh = patchGrid(this.warp.ctrl, 12).map(S);
-      for (let r = 0; r <= 12; r += 4) {
+      const w = this.warp;
+      const { R, C, N, us, vs } = warpDims(w);
+      const c = w.ctrl.map(S);
+      // the warp mesh: thirds on the default patch, the grid lines on a bigger grid
+      g.strokeStyle = 'rgba(74,163,255,.75)';
+      const lineU = (u) => {
         g.beginPath();
-        for (let k = 0; k <= 12; k++) (k ? g.lineTo : g.moveTo).call(g, ...mesh[r * 13 + k]);
+        for (let k = 0; k <= 40; k++) {
+          const [x, y] = S(evalWarp(w, u, k / 40));
+          if (k) g.lineTo(x, y);
+          else g.moveTo(x, y);
+        }
         g.stroke();
-      }
-      for (let k = 0; k <= 12; k += 4) {
+      };
+      const lineV = (v) => {
         g.beginPath();
-        for (let r = 0; r <= 12; r++) (r ? g.lineTo : g.moveTo).call(g, ...mesh[r * 13 + k]);
+        for (let k = 0; k <= 40; k++) {
+          const [x, y] = S(evalWarp(w, k / 40, v));
+          if (k) g.lineTo(x, y);
+          else g.moveTo(x, y);
+        }
         g.stroke();
-      }
+      };
+      const ul = R * C === 1 ? [0, 1 / 3, 2 / 3, 1] : us;
+      const vl = R * C === 1 ? [0, 1 / 3, 2 / 3, 1] : vs;
+      ul.forEach(lineU);
+      vl.forEach(lineV);
+      // handles: lines from each anchor to its handles
       g.strokeStyle = '#1d6fd1';
-      for (const [a, b] of [[0, 1], [3, 2], [12, 13], [15, 14], [0, 4], [3, 7], [12, 8], [15, 11]]) {
-        g.beginPath();
-        g.moveTo(...c[a]);
-        g.lineTo(...c[b]);
-        g.stroke();
+      const shown = new Set(this.warpPoints());
+      for (let r = 0; r <= 3 * R; r += 3) {
+        for (let cc = 0; cc <= 3 * C; cc += 3) {
+          for (const [dr, dc] of [[0, 1], [0, -1], [1, 0], [-1, 0]]) {
+            const rr = r + dr;
+            const c2 = cc + dc;
+            if (rr < 0 || c2 < 0 || rr > 3 * R || c2 > 3 * C) continue;
+            g.beginPath();
+            g.moveTo(...c[r * N + cc]);
+            g.lineTo(...c[rr * N + c2]);
+            g.stroke();
+          }
+        }
       }
-      c.forEach(([x, y], i) => {
-        const corner = [0, 3, 12, 15].includes(i);
-        g.fillStyle = corner ? '#fff' : '#4aa3ff';
+      for (const i of shown) {
+        const [x, y] = c[i];
+        const r = Math.floor(i / N);
+        const col = i % N;
+        const anchor = r % 3 === 0 && col % 3 === 0;
+        g.fillStyle = anchor ? '#fff' : '#4aa3ff';
         g.beginPath();
-        g.arc(x, y, corner ? 5 : 3.5, 0, Math.PI * 2);
+        g.arc(x, y, anchor ? 5 : 3.5, 0, Math.PI * 2);
         g.fill();
         g.stroke();
-      });
+      }
+      // Split Warp: where the line(s) would go
+      if (this.splitMode && this.hoverPt && !this.d) {
+        const uv = this.warpUV(this.hoverPt);
+        if (uv) {
+          g.save();
+          g.setLineDash([5, 4]);
+          g.strokeStyle = '#ffcc00';
+          g.lineWidth = 1.5;
+          if (this.splitMode !== 'h') lineU(uv[0]);
+          if (this.splitMode !== 'v') lineV(uv[1]);
+          g.restore();
+        }
+      }
     } else {
       g.fillStyle = '#fff';
       g.strokeStyle = '#1d6fd1';
@@ -938,6 +1409,7 @@ export class Transformer {
         g.fillRect(x - 4, y - 4, 8, 8);
         g.strokeRect(x - 4.5, y - 4.5, 9, 9);
       }
+      // the reference point
       const [px, py] = S(this.pivot);
       g.beginPath();
       g.arc(px, py, 5, 0, Math.PI * 2);
@@ -952,7 +1424,7 @@ export class Transformer {
     g.fillStyle = '#fff';
     g.strokeStyle = 'rgba(0,0,0,.6)';
     g.lineWidth = 3;
-    const label = `${TRANSFORM_MODES.find((m) => m[0] === this.mode)?.[1]} · 폭 ${n.w}% 높이 ${n.h}% · ${n.angle}° · Enter 적용 · Esc 취소`;
+    const label = this.splitMode ? '뒤틀기 분할: 나눌 곳을 누르세요 · Esc 취소' : `${TRANSFORM_MODES.find((m) => m[0] === this.mode)?.[1]} · 폭 ${n.w}% 높이 ${n.h}% · ${n.angle}° · Enter 적용 · Esc 취소`;
     const lx = Math.min(...q.map((p) => p[0]));
     const ly = Math.min(...q.map((p) => p[1])) - 10;
     g.strokeText(label, lx, ly);

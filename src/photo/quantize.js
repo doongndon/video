@@ -66,7 +66,16 @@ export function quantize(img, { colors = 256, palette = 'adaptive', dither = 'di
     for (let c = 0; c < 3; c++) d[i * 3 + c] = src[i * 4 + c] * a + matte[c] * (1 - a);
   }
   const reserve = transparency && anyClear ? 1 : 0;
-  let pal = paletteFor(img, palette, Math.max(2, Math.min(256, colors) - reserve));
+  // the palette comes from the colours as they will show: flattened on the matte, and every pixel
+  // that won't be see-through (with transparency off, the matte-coloured ones too)
+  const flat = new Uint8ClampedArray(n * 4);
+  for (let i = 0; i < n; i++) {
+    flat[i * 4] = d[i * 3];
+    flat[i * 4 + 1] = d[i * 3 + 1];
+    flat[i * 4 + 2] = d[i * 3 + 2];
+    flat[i * 4 + 3] = reserve && src[i * 4 + 3] < 128 ? 0 : 255;
+  }
+  let pal = paletteFor({ width: w, height: h, data: flat }, palette, Math.max(2, Math.min(256, colors) - reserve));
   if (pal.length > 256 - reserve) pal = pal.slice(0, 256 - reserve);
   const cache = new Int16Array(32768).fill(-1);
   const nearest = (r, g, b) => {
@@ -178,6 +187,10 @@ function crc32(bytes) {
   let c = 0xffffffff;
   for (let i = 0; i < bytes.length; i++) c = CRC[(c ^ bytes[i]) & 255] ^ (c >>> 8);
   return (c ^ 0xffffffff) >>> 0;
+}
+/** A PNG chunk (length, type, data, CRC). */
+export function pngChunk(type, data) {
+  return chunk(type, data);
 }
 function chunk(type, data) {
   const out = new Uint8Array(12 + data.length);

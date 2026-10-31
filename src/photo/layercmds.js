@@ -2,10 +2,12 @@
 // align/distribute, linking, locks and layer colours. Installed onto P.cmd by the editor.
 
 import { newLayer, makeCanvas, cloneCanvas, lid, alphaBox, PhotoDoc, LAYER_COLORS } from './doc.js';
-import { compositeOnto } from './blend.js';
+import { compositeOnto, BLEND_MODES, blendName } from './blend.js';
+import { TOOL_BY_ID } from './tools.js';
 import { ADJUSTMENTS, defaultParams } from './adjust.js';
-import { toast, promptDialog } from '../ui/common.js';
-import { FX_DEFAULTS } from './styles.js';
+import { toast, promptDialog, menusOpen } from '../ui/common.js';
+import { FX_DEFAULTS, scaleFx } from './styles.js';
+import { layerStyleDialog, globalLightDialog } from './layerstyle.js';
 
 /** A copy of a layer with a new id (pixels shared; they are never changed in place). */
 export function cloneLayer(l, props = {}) {
@@ -23,6 +25,45 @@ export function cloneDoc(doc, name = doc.name) {
   d.name = name;
   d.saved = true;
   return d;
+}
+
+// The editor whose layers the blend-mode / fill keys act on. The listener is added when this module
+// loads, so it runs before the editor's own key handler (which would take Shift+Alt+letter as a tool
+// key and Shift+number as opacity).
+let keysFor = null;
+const BLEND_KEYS = { KeyN: 'normal', KeyI: 'dissolve', KeyK: 'darken', KeyM: 'multiply', KeyB: 'color burn', KeyA: 'linear burn', KeyG: 'lighten', KeyS: 'screen', KeyD: 'color dodge', KeyW: 'linear dodge', KeyO: 'overlay', KeyF: 'soft light', KeyH: 'hard light', KeyV: 'vivid light', KeyJ: 'linear light', KeyZ: 'pin light', KeyL: 'hard mix', KeyE: 'difference', KeyX: 'exclusion', KeyU: 'hue', KeyT: 'saturation', KeyC: 'color', KeyY: 'luminosity' };
+if (typeof window !== 'undefined') {
+  window.addEventListener('keydown', (e) => {
+    const P = keysFor;
+    if (!P?.doc || !document.body.classList.contains('photo-mode') || menusOpen() || document.querySelector('.modal-backdrop')) return;
+    const tag = e.target?.tagName;
+    if (tag === 'TEXTAREA' || tag === 'SELECT' || e.target?.isContentEditable || (tag === 'INPUT' && !['checkbox', 'radio', 'range', 'button', 'color'].includes(e.target.type))) return;
+    if (e.ctrlKey || e.metaKey || !e.shiftKey || P.transform || e.repeat) return;
+    // painting tools keep these keys for their own options
+    if (TOOL_BY_ID[P.tool]?.options?.some((o) => o[0] === 'opacity')) return;
+    const C = P.cmd;
+    let handled = false;
+    if (e.altKey && BLEND_KEYS[e.code]) {
+      C.setLayerBlend(BLEND_KEYS[e.code]);
+      handled = true;
+    } else if (!e.altKey && (e.code === 'Equal' || e.code === 'NumpadAdd' || e.code === 'Minus' || e.code === 'NumpadSubtract')) {
+      C.cycleLayerBlend(e.code === 'Minus' || e.code === 'NumpadSubtract' ? -1 : 1);
+      handled = true;
+    } else if (!e.altKey && /^Digit[0-9]$/.test(e.code)) {
+      const v = e.code === 'Digit0' ? 100 : +e.code.slice(5) * 10;
+      const d = P.doc;
+      const ls = d.selectedLayers.filter((l) => !l.locked && l.kind !== 'group' && l.kind !== 'adjust');
+      if (ls.length) {
+        P.run(`칠 ${v}%`, () => { for (const l of ls) { l.fillOpacity = v / 100; l._styled = null; d.touch(l); } });
+        toast(`레이어 칠 ${v}%`);
+        handled = true;
+      }
+    }
+    if (handled) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+    }
+  }, true);
 }
 
 export function installLayerCommands(P) {
@@ -43,6 +84,28 @@ export function installLayerCommands(P) {
     return sel.filter((l) => !d.ancestors(l).some((a) => ids.has(a.id)));
   };
   const pixels = (l, withOpacity = true) => doc().rasterizeLayer(l, { withOpacity });
+
+  // Layer ▸ Layer Style: the Photoshop-style dialog (blending options, all effects) and Global Light
+  C.layerStyle = (section = 'blending') => need() && layerStyleDialog(P, section);
+  C.globalLight = () => need() && globalLightDialog(P);
+  /** Layer ▸ Layer Style ▸ Scale Effects… (효과 비율 조정) */
+  C.scaleEffects = async (pct) => {
+    if (!need()) return;
+    const items = topSelected().filter((l) => l.fx && Object.keys(l.fx).length);
+    if (!items.length) return toast('레이어 스타일이 있는 레이어를 고르세요');
+    if (pct == null) {
+      const v = await promptDialog('효과 비율 조정', '비율 (%) — 효과의 크기와 거리를 함께 키우거나 줄입니다', '100');
+      pct = parseFloat(v);
+    }
+    if (!(pct > 0) || pct === 100) return;
+    P.run('효과 비율 조정', () => {
+      for (const l of items) {
+        l.fx = scaleFx(l.fx, Math.min(1000, pct) / 100);
+        l._styled = null;
+        doc().touch(l);
+      }
+    });
+  };
 
   // ---------------------------------------------------------------- create
 
@@ -111,12 +174,12 @@ export function installLayerCommands(P) {
     out.push(c);
     return out;
   };
-  C.duplicateLayer = () => {
+  C.duplicateLayer = ({ noSelection = false } = {}) => {
     if (!need()) return;
     const d = doc();
     const items = topSelected();
     if (!items.length) return;
-    if (d.selection && items.length === 1 && items[0].kind === 'raster') return C.layerVia(false);
+    if (!noSelection && d.selection && items.length === 1 && items[0].kind === 'raster') return C.layerVia(false);
     P.run('레이어 복제', () => {
       const newIds = [];
       for (const it of items) {
@@ -178,6 +241,39 @@ export function installLayerCommands(P) {
     if (!d.layer(id)) return;
     P.run('레이어 순서', () => d.moveBlock(id, index, parent));
   };
+  /**
+   * Layers panel: several selected layers dragged next to `anchorId` ('above' / 'below' it, or 'into'
+   * a group), keeping their order.
+   */
+  C.moveLayersTo = (ids, anchorId, zone) => {
+    const d = doc();
+    const anchor = d.layer(anchorId);
+    if (!anchor) return;
+    const items = ids.map((id) => d.layer(id)).filter(Boolean).filter((l, _, all) => !d.ancestors(l).some((a) => all.includes(a)));
+    if (!items.length || items.includes(anchor) || d.ancestors(anchor).some((a) => items.includes(a))) return;
+    P.run('레이어 순서', () => {
+      items.sort((a, b) => d.index(a.id) - d.index(b.id));
+      const blocks = [];
+      for (const it of items) blocks.push(d.removeBlock(it.id));
+      const parent = zone === 'into' ? anchor.id : anchor.parent || null;
+      const at = zone === 'into' ? d.index(anchor.id) : zone === 'above' ? d.index(anchor.id) + 1 : d.block(anchor.id)[0];
+      for (const it of items) it.parent = parent;
+      d.layers.splice(at, 0, ...blocks.flat());
+      d.rev++;
+    });
+  };
+  /** Ctrl+click on a mask thumbnail: the mask as a selection (Shift: add, Alt: subtract, both: intersect). */
+  C.selectFromMask = async (l = doc()?.active, mode = 'new') => {
+    if (!l?.mask) return;
+    const SEL = await import('./selection.js');
+    P.run('마스크를 선택 영역으로', () => {
+      const d = doc();
+      const c = makeCanvas(d.width, d.height);
+      c.getContext('2d').drawImage(l.mask.canvas, l.mask.x, l.mask.y);
+      d.selection = mode === 'new' ? { canvas: c } : SEL.combine(d, c, mode);
+    });
+  };
+
   /** Ctrl+[ / ]: one step among siblings, or to the top / bottom of the group. */
   C.arrange = (dir) => {
     if (!need()) return;
@@ -380,15 +476,187 @@ export function installLayerCommands(P) {
     d.selectedIds = [d.activeId];
     P.emit('layers');
   };
-  /** Alt+click on an eye: show only this layer (again: show all). */
+  /**
+   * Alt+click on an eye: show only this layer (every other layer hidden, its groups kept visible);
+   * Alt+click on it again brings back what was visible before.
+   */
   C.soloLayer = (l) => {
     const d = doc();
-    const others = d.layers.filter((x) => x !== l && !d.ancestors(l).includes(x) && !x.parent);
-    const allHidden = others.every((x) => !x.visible);
-    P.run('다른 레이어 숨기기/보이기', () => {
-      for (const x of others) { x.visible = allHidden; d.touch(x); }
-      l.visible = true;
-      for (const a of d.ancestors(l)) a.visible = true;
+    if (!d || !l) return;
+    const keep = new Set([l.id, ...d.ancestors(l).map((a) => a.id), ...d.descendants(l.id).map((x) => x.id)]);
+    const prev = d._solo;
+    const restoring = prev && prev.id === l.id && d.layers.every((x) => keep.has(x.id) || !x.visible);
+    P.run(restoring ? '다른 레이어 다시 보이기' : '이 레이어만 보기', () => {
+      if (restoring) {
+        for (const x of d.layers) {
+          if (prev.vis.has(x.id) && x.visible !== prev.vis.get(x.id)) {
+            x.visible = prev.vis.get(x.id);
+            d.touch(x);
+          }
+        }
+        d._solo = null;
+        return;
+      }
+      d._solo = { id: l.id, vis: new Map(d.layers.map((x) => [x.id, x.visible])) };
+      for (const x of d.layers) {
+        const want = keep.has(x.id) ? (x === l || d.ancestors(l).includes(x) ? true : x.visible) : false;
+        if (x.visible !== want) {
+          x.visible = want;
+          d.touch(x);
+        }
+      }
+    });
+  };
+
+  /** Run fn on another open document as one undoable step there. */
+  const runOn = (target, label, fn) => {
+    if (target === doc()) return P.run(label, fn);
+    const before = target.capture();
+    const r = fn();
+    target.rev++;
+    target.history?.push(label, before);
+    target.saved = false;
+    P.afterHistory();
+    return r;
+  };
+
+  /**
+   * Copies of layer blocks (groups with their contents) for another document: pixels are shared
+   * (never changed in place), settings copied.
+   */
+  const copyBlocks = (items, parent = null) => {
+    const out = [];
+    for (const it of items) {
+      const blk = cloneBlock(it, parent);
+      out.push(...blk);
+    }
+    return out;
+  };
+
+  /**
+   * Layer ▸ Duplicate Layer… (레이어 복제): a name and a destination — this document, another open
+   * document or a new one (the usual first step of compositing tutorials).
+   */
+  C.duplicateLayerDialog = async () => {
+    if (!need()) return;
+    const d = doc();
+    const items = topSelected();
+    if (!items.length) return;
+    const { openModal } = await import('../ui/common.js');
+    const { h } = await import('../util.js');
+    const one = items.length === 1 ? items[0] : null;
+    const name = h('input', { type: 'text', value: one ? `${one.name} 복사` : '', style: { width: '100%' }, disabled: !one });
+    const docs = P.docs.filter((x) => x !== d);
+    const dest = h('select', { style: { width: '100%' } },
+      h('option', { value: 'self' }, `${d.name} (지금 문서)`),
+      ...docs.map((x, i) => h('option', { value: String(i) }, x.name)),
+      h('option', { value: 'new' }, '새로 만들기'));
+    const newName = h('input', { type: 'text', value: one ? one.name : '레이어', style: { width: '100%' } });
+    const newRow = h('div.form-row', { hidden: true }, h('label', '새 문서 이름'), newName);
+    dest.addEventListener('change', () => { newRow.hidden = dest.value !== 'new'; });
+    openModal({
+      title: '레이어 복제',
+      width: '440px',
+      body: [
+        h('div.form-row', h('label', '복제'), h('div', one ? one.name : `레이어 ${items.length}개`)),
+        h('div.form-row', h('label', '다른 이름으로'), name),
+        h('div.form-row', h('label', '대상 문서'), dest),
+        newRow,
+      ],
+      buttons: [{ label: '취소' }, {
+        label: '확인', primary: true, action: () => {
+          const target = dest.value === 'self' ? d : dest.value === 'new' ? null : docs[+dest.value];
+          const nm = name.value.trim();
+          if (target === d) {
+            C.duplicateLayer({ noSelection: true });
+            if (one && nm) P.run('이름 바꾸기', () => { const l = d.active; l.name = nm; d.touch(l); });
+            return;
+          }
+          const blocks = copyBlocks(items);
+          if (one && nm) blocks[blocks.length - 1].name = nm;
+          if (!target) {
+            // a new document the size of this one, holding only the copies
+            const nd = new PhotoDoc({ name: newName.value.trim() || (one ? one.name : '레이어'), width: d.width, height: d.height, background: null });
+            nd.resolution = d.resolution;
+            nd.layers.push(...blocks);
+            nd.activeId = blocks[blocks.length - 1].id;
+            nd.selectedIds = [nd.activeId];
+            P.openDoc(nd);
+            nd.saved = false;
+            P.renderTabs?.();
+            return;
+          }
+          runOn(target, '레이어 복제', () => {
+            target.layers.push(...blocks);
+            const tops = blocks.filter((b) => !b.parent);
+            target.activeId = tops[tops.length - 1].id;
+            target.selectedIds = tops.map((b) => b.id);
+          });
+          toast(`"${target.name}"에 레이어를 복제했습니다`);
+        },
+      }],
+    });
+  };
+
+  /** Layers panel: Alt+drag a layer — a copy dropped at flat index `index` with `parent`. */
+  C.duplicateTo = (ids, index, parent = null) => {
+    const d = doc();
+    const items = ids.map((id) => d.layer(id)).filter(Boolean).filter((l, _, all) => !d.ancestors(l).some((a) => all.includes(a)));
+    if (!items.length) return;
+    if (parent && items.some((it) => it.id === parent || d.ancestors(d.layer(parent)).includes(it))) return;
+    P.run('레이어 복제', () => {
+      // the copies keep their own nesting; the top entries take the drop parent
+      const blocks = copyBlocks(items, parent || null);
+      const ids2 = new Set(blocks.map((b) => b.id));
+      const tops = blocks.filter((b) => !ids2.has(b.parent));
+      for (const b of tops) b.name = `${b.name} 복사`;
+      d.layers.splice(Math.max(0, Math.min(d.layers.length, index)), 0, ...blocks);
+      d.activeId = tops[tops.length - 1].id;
+      d.selectedIds = tops.map((b) => b.id);
+      d.rev++;
+    });
+  };
+
+  /** Layers panel: a mask thumbnail dragged onto another layer moves the mask there (Alt: copies it). */
+  C.moveMaskTo = (fromId, toId, copy = false) => {
+    const d = doc();
+    const from = d?.layer(fromId);
+    const to = d?.layer(toId);
+    if (!from?.mask || !to || from === to) return;
+    P.run(copy ? '마스크 복사' : '마스크 옮기기', () => {
+      to.mask = { ...from.mask };
+      to._styled = null;
+      d.touch(to);
+      if (!copy) {
+        from.mask = null;
+        from._styled = null;
+        d.touch(from);
+      }
+      d.activeId = to.id;
+      d.selectedIds = [to.id];
+    });
+    P.editMask = true;
+  };
+
+  /** Layer ▸ Layer Properties… (레이어 속성): name and colour label. */
+  C.layerProperties = async (l = doc()?.active) => {
+    if (!l) return;
+    const { openModal } = await import('../ui/common.js');
+    const { h } = await import('../util.js');
+    const name = h('input', { type: 'text', value: l.name, style: { width: '100%' } });
+    const color = h('select', LAYER_COLORS.map(([id, nm]) => h('option', { value: id }, nm)));
+    color.value = l.color || 'none';
+    openModal({
+      title: '레이어 속성',
+      width: '380px',
+      body: [h('div.form-row', h('label', '이름'), name), h('div.form-row', h('label', '색상'), color)],
+      buttons: [{ label: '취소' }, {
+        label: '확인', primary: true, action: () => {
+          const nm = name.value.trim() || l.name;
+          if (nm === l.name && color.value === (l.color || 'none')) return;
+          P.run('레이어 속성', () => { l.name = nm; l.color = color.value; doc().touch(l); });
+        },
+      }],
     });
   };
 
@@ -455,18 +723,27 @@ export function installLayerCommands(P) {
 
   // ---------------------------------------------------------------- layer styles copy / paste
 
+  // Copy / Paste Layer Style carries the effects and the blending options, like Photoshop's
+  const STYLE_BLEND = ['blend', 'opacity', 'fillOpacity', 'blendIf', 'blendChannels', 'knockout', 'blendInterior', 'blendClipped', 'transparencyShapes', 'maskHidesFx', 'vmaskHidesFx'];
   let styleClip = null;
   C.copyStyle = () => {
     const l = doc()?.active;
     if (!l) return;
-    styleClip = { fx: structuredClone(l.fx || {}), blend: l.blend, fillOpacity: l.fillOpacity };
+    styleClip = { fx: structuredClone(l.fx || {}), kind: l.kind, ...Object.fromEntries(STYLE_BLEND.map((k) => [k, l[k] && typeof l[k] === 'object' ? structuredClone(l[k]) : l[k]])) };
     toast('레이어 스타일을 복사했습니다');
   };
   C.pasteStyle = () => {
     if (!styleClip) return toast('복사한 스타일이 없습니다');
     P.run('레이어 스타일 붙여넣기', () => {
       for (const l of topSelected()) {
-        l.fx = structuredClone(styleClip.fx);
+        if (l.kind !== 'adjust') l.fx = structuredClone(styleClip.fx);
+        for (const k of STYLE_BLEND) {
+          let v = styleClip[k];
+          // a group's "pass through" means nothing to other layers
+          if (k === 'blend' && v === 'pass through' && l.kind !== 'group') v = 'normal';
+          if (v === undefined) delete l[k];
+          else l[k] = v && typeof v === 'object' ? structuredClone(v) : v;
+        }
         l._styled = null;
         doc().touch(l);
       }
@@ -501,7 +778,10 @@ export function installLayerCommands(P) {
     // the contents' bounds
     const flatAll = makeCanvas(d.width, d.height);
     const fg = flatAll.getContext('2d');
-    for (const l of items) if (l.visible) compositeOnto(fg, pixels(one ? { ...l, opacity: 1, fx: {}, mask: null } : l), 0, 0, l.blend, 1);
+    // a single layer's opacity, fill, styles, mask and blending options stay on the smart object layer
+    const BLEND_OPTS = ['blendIf', 'blendChannels', 'knockout', 'blendInterior', 'blendClipped', 'transparencyShapes', 'maskHidesFx', 'vmaskHidesFx'];
+    const plainCopy = (l) => ({ ...l, opacity: 1, fillOpacity: 1, fx: {}, mask: null, ...Object.fromEntries(BLEND_OPTS.map((k) => [k, undefined])) });
+    for (const l of items) if (l.visible) compositeOnto(fg, pixels(one ? plainCopy(l) : l), 0, 0, one ? 'normal' : l.blend, 1);
     const b = alphaBox(flatAll);
     if (!b) return toast('빈 레이어는 고급 개체로 바꿀 수 없습니다');
     P.run('고급 개체로 변환', () => {
@@ -510,7 +790,7 @@ export function installLayerCommands(P) {
       for (const it of items) {
         const blk = cloneBlock(it, null);
         // a single layer's opacity, styles and mask stay on the smart object layer itself
-        const inner = blk.map((x, i) => (one && i === blk.length - 1 ? { ...x, opacity: 1, blend: x.kind === 'group' ? 'pass through' : 'normal', fx: {}, mask: null, clip: false, linkId: null } : { ...x, linkId: null }));
+        const inner = blk.map((x, i) => (one && i === blk.length - 1 ? { ...plainCopy(x), blend: x.kind === 'group' ? 'pass through' : 'normal', clip: false, linkId: null } : { ...x, linkId: null }));
         sub.layers.push(...inner);
         sub.translateLayers(inner.filter((x) => !x.parent), -b.x, -b.y);
       }
@@ -522,7 +802,10 @@ export function installLayerCommands(P) {
         name: one ? one.name : '고급 개체', parent: top.parent || null,
         smart: { w: b.w, h: b.h, m: [1, 0, 0, 1, b.x, b.y], filters: [] },
         smartSrc: src, smartDoc: sub,
-        ...(one ? { opacity: one.opacity, blend: one.blend === 'pass through' ? 'normal' : one.blend, fx: structuredClone(one.fx || {}), mask: one.mask && { ...one.mask }, fillOpacity: one.fillOpacity ?? 1, clip: one.clip, visible: one.visible } : {}),
+        ...(one ? {
+          opacity: one.opacity, blend: one.blend === 'pass through' ? 'normal' : one.blend, fx: structuredClone(one.fx || {}), mask: one.mask && { ...one.mask }, fillOpacity: one.fillOpacity ?? 1, clip: one.clip, visible: one.visible,
+          ...Object.fromEntries(BLEND_OPTS.filter((k) => one[k] != null).map((k) => [k, structuredClone(one[k])])),
+        } : {}),
       });
       d.layers.splice(d.index(top.id) + 1, 0, sl);
       for (const it of items) d.removeBlock(it.id);
@@ -627,8 +910,186 @@ export function installLayerCommands(P) {
     l.smart = { ...l.smart, filters: l.smart.filters.filter((_, j) => j !== i) };
     doc().touch(l);
   });
+  C.smartFiltersToggleAll = (l = doc()?.active) => {
+    if (!l?.smart?.filters?.length) return;
+    const on = l.smart.filters.every((f) => f.enabled === false);
+    P.run(on ? '고급 필터 사용' : '고급 필터 사용 안 함', () => {
+      l.smart = { ...l.smart, filters: l.smart.filters.map((f) => ({ ...f, enabled: on })) };
+      doc().touch(l);
+    });
+  };
+  C.smartFiltersClear = (l = doc()?.active) => {
+    if (!l?.smart?.filters?.length) return;
+    P.run('고급 필터 지우기', () => {
+      l.smart = { ...l.smart, filters: [] };
+      l.filterMask = null;
+      doc().touch(l);
+    });
+  };
+  /** Layers panel: a smart filter's blending options (mode and opacity), like Photoshop's ≡ icon. */
+  C.smartFilterBlending = async (l, i) => {
+    const d = doc();
+    const f = l?.smart?.filters?.[i];
+    if (!f) return;
+    const { openModal } = await import('../ui/common.js');
+    const { h } = await import('../util.js');
+    const { blendSelect } = await import('./panels.js');
+    const before = d.capture();
+    const mode = blendSelect(false);
+    mode.value = f.blend || 'normal';
+    const op = h('input', { type: 'range', min: 0, max: 100, value: Math.round((f.opacity ?? 1) * 100), style: { width: '100%' } });
+    const opN = h('input.ph-num', { type: 'number', min: 0, max: 100, value: op.value });
+    const apply = () => {
+      const fl = l.smart.filters.map((x, j) => (j === i ? { ...x, blend: mode.value, opacity: +op.value / 100 } : x));
+      l.smart = { ...l.smart, filters: fl };
+      d.touch(l);
+      P.redraw();
+    };
+    mode.addEventListener('change', apply);
+    op.addEventListener('input', () => { opN.value = op.value; apply(); });
+    opN.addEventListener('change', () => { op.value = Math.max(0, Math.min(100, +opN.value)); apply(); });
+    let ok = false;
+    openModal({
+      title: `혼합 옵션 (${P.filterName?.(f.id) || f.id})`,
+      width: '380px',
+      body: [h('div.form-row', h('label', '모드'), mode), h('div.form-row', h('label', '불투명도 (%)'), h('div.inline', op, opN))],
+      buttons: [{ label: '취소' }, { label: '확인', primary: true, action: () => { apply(); ok = true; P.commit('고급 필터 혼합 옵션', before); } }],
+      onClose: () => {
+        if (!ok) {
+          d.restore(before);
+          P.afterHistory();
+        }
+      },
+    });
+  };
+  /** The Smart Filters mask: 'select' (from the selection), 'reveal' (all white), 'invert', 'toggle', 'delete', 'toSelection'. */
+  C.smartFilterMask = (l = doc()?.active, what = 'select') => {
+    const d = doc();
+    if (l?.kind !== 'smart') return toast('고급 개체 레이어를 고르세요');
+    if (what === 'toSelection') {
+      if (!l.filterMask) return undefined;
+      return P.run('필터 마스크를 선택 영역으로', () => {
+        const c = makeCanvas(d.width, d.height);
+        const g = c.getContext('2d');
+        if (l.filterMask.invert) {
+          g.fillRect(0, 0, c.width, c.height);
+          g.globalCompositeOperation = 'destination-out';
+        }
+        g.drawImage(l.filterMask.canvas, l.filterMask.x, l.filterMask.y);
+        d.selection = { canvas: c };
+      });
+    }
+    const labels = { select: '필터 마스크 (선택 영역에서)', reveal: '필터 마스크 추가', invert: '필터 마스크 반전', toggle: '필터 마스크 켜기/끄기', delete: '필터 마스크 삭제' };
+    if (what === 'select' && !d.selection) return toast('먼저 선택 영역을 만드세요');
+    return P.run(labels[what] || '필터 마스크', () => {
+      if (what === 'select' || what === 'reveal') {
+        const c = makeCanvas(d.width, d.height);
+        const g = c.getContext('2d');
+        if (what === 'select') g.drawImage(d.selection.canvas, 0, 0);
+        else g.fillRect(0, 0, c.width, c.height);
+        l.filterMask = { canvas: c, x: 0, y: 0, enabled: true, invert: false };
+      } else if (what === 'invert' && l.filterMask) l.filterMask = { ...l.filterMask, invert: !l.filterMask.invert };
+      else if (what === 'toggle' && l.filterMask) l.filterMask = { ...l.filterMask, enabled: l.filterMask.enabled === false };
+      else if (what === 'delete') l.filterMask = null;
+      d.touch(l);
+    });
+  };
+
+  // closing the document of a smart object's contents asks whether to update the smart object
+  const origClose = P.closeDoc;
+  P.closeDoc = async (i = P.index) => {
+    const sub = P.docs[i];
+    if (sub?.smartParent && !sub.saved) {
+      const { openModal } = await import('../ui/common.js');
+      const { h } = await import('../util.js');
+      const choice = await new Promise((resolve) => {
+        let v = 'cancel';
+        openModal({
+          title: '고급 개체 내용 닫기',
+          width: '420px',
+          body: h('div', `"${sub.name}"에서 고친 내용을 원래 문서의 고급 개체에 반영할까요?`),
+          buttons: [{ label: '취소' }, { label: '반영 안 함', action: () => { v = 'discard'; } }, { label: '반영하고 닫기', primary: true, action: () => { v = 'apply'; } }],
+          onClose: () => resolve(v),
+        });
+      });
+      if (choice === 'cancel') return undefined;
+      if (choice === 'apply') C.commitSmart(sub);
+      sub.saved = true;
+    }
+    return origClose(i);
+  };
+
+  // ---------------------------------------------------------------- layer masks (Layer ▸ Layer Mask)
+
+  /**
+   * Add a layer mask: 'revealAll', 'hideAll', 'revealSel' (the selection shows), 'hideSel' (the
+   * selection is hidden). The layers panel's mask button: reveal the selection (or all); Alt: hide it.
+   */
+  C.addMaskMode = (mode) => {
+    if (!need()) return;
+    const d = doc();
+    const l = d.active;
+    if (!l) return;
+    if (l.mask) return toast('이미 레이어 마스크가 있습니다');
+    if ((mode === 'revealSel' || mode === 'hideSel') && !d.selection) mode = mode === 'revealSel' ? 'revealAll' : 'hideAll';
+    const labels = { revealAll: '레이어 마스크: 모두 나타내기', hideAll: '레이어 마스크: 모두 숨기기', revealSel: '레이어 마스크: 선택 영역 나타내기', hideSel: '레이어 마스크: 선택 영역 숨기기' };
+    P.run(labels[mode] || '레이어 마스크', () => {
+      const c = makeCanvas(d.width, d.height);
+      const g = c.getContext('2d');
+      if (mode === 'revealAll' || mode === 'hideSel') g.fillRect(0, 0, c.width, c.height);
+      if (mode === 'revealSel') g.drawImage(d.selection.canvas, 0, 0);
+      if (mode === 'hideSel') {
+        g.globalCompositeOperation = 'destination-out';
+        g.drawImage(d.selection.canvas, 0, 0);
+      }
+      l.mask = { canvas: c, x: 0, y: 0, enabled: true, linked: true };
+      if (mode === 'revealSel' || mode === 'hideSel') d.selection = null;
+      l._styled = null;
+      d.touch(l);
+    });
+    P.editMask = true;
+    P.emit('layers');
+  };
 
   // ---------------------------------------------------------------- masks from transparency
+
+  P.layerContextMenu = (l) => layerContextItems(P, l);
+
+  // ---------------------------------------------------------------- blend mode and fill keys
+  // Photoshop, with a tool that doesn't paint (the move tool…): Shift+Alt+letter sets the selected
+  // layers' blend mode, Shift+'+' / Shift+'-' steps through the modes, Shift+number sets the fill.
+  C.setLayerBlend = (mode) => {
+    const d = doc();
+    const ls = d?.selectedLayers.filter((l) => !l.locked && (mode !== 'pass through' || l.kind === 'group')) || [];
+    if (!ls.length) return;
+    P.run(`혼합 모드: ${blendName(mode)}`, () => { for (const l of ls) { l.blend = mode; d.touch(l); } });
+    toast(`혼합 모드: ${blendName(mode)}`);
+  };
+  C.cycleLayerBlend = (dir) => {
+    const l = doc()?.active;
+    if (!l) return;
+    const list = [...(l.kind === 'group' ? ['pass through'] : []), ...BLEND_MODES.map((b) => b[0])];
+    const i = list.indexOf(l.blend);
+    C.setLayerBlend(list[(Math.max(0, i) + dir + list.length) % list.length]);
+  };
+  keysFor = P;
+
+  /** A PSD text layer opened as pixels (older files) → an editable text layer showing the same picture. */
+  C.psdTextToEditable = async (l = doc()?.active) => {
+    if (!l?.psdText || l.kind !== 'raster') return;
+    const { newText } = await import('./type.js');
+    const { psFont } = await import('./io.js');
+    const { psdTextKey } = await import('./doc.js');
+    const pt = l.psdText;
+    const f = psFont(pt.font);
+    P.run('고칠 수 있는 글자로', () => {
+      const t = newText({ font: f.font, size: Math.max(1, Math.round(pt.size || 24)), bold: f.bold, italic: f.italic }, pt.color || '#000000', { content: String(pt.text || '').replace(/\r\n?/g, '\n') });
+      const nl = { ...l, kind: 'text', text: t, canvas: null, psdText: null, rotation: 0, _text: null, _styled: null };
+      if (l.canvas) nl.psdPicture = { canvas: l.canvas, dx: 0, dy: 0, key: psdTextKey(nl) };
+      doc().layers[doc().index(l.id)] = nl;
+      doc().touch(nl);
+    });
+  };
 
   C.maskFromTransparency = () => {
     const d = doc();
@@ -642,6 +1103,53 @@ export function installLayerCommands(P) {
       d.touch(l);
     });
   };
+}
+
+/** The layers panel's right-click menu, with Photoshop's items for the layer under the pointer. */
+export function layerContextItems(P, l) {
+  const C = P.cmd;
+  const d = P.doc;
+  if (!d || !l) return [];
+  const kind = l.kind;
+  const multi = d.selectedLayers.length > 1;
+  return [
+    { label: '레이어 속성…', action: () => C.layerProperties(l) },
+    { label: '혼합 옵션…', action: () => C.layerStyle('blending') },
+    kind === 'adjust' || kind === 'fill' ? { label: '내용 편집…', action: () => P.showPanel('props') } : null,
+    '-',
+    { label: '레이어 복제…', action: () => C.duplicateLayerDialog() },
+    { label: '레이어 삭제', action: () => C.deleteLayer() },
+    kind === 'group' ? { label: '그룹 삭제', action: () => C.deleteLayer() } : null,
+    '-',
+    { label: '레이어에서 그룹…', action: () => C.groupLayers() },
+    kind === 'group' ? { label: '레이어 그룹 해제', action: () => C.ungroup() } : null,
+    '-',
+    { label: '고급 개체로 변환', action: () => C.convertToSmart() },
+    kind === 'smart' ? { label: '내용 편집', action: () => C.editSmartContents(l) } : null,
+    kind === 'smart' ? { label: '내용 바꾸기…', action: () => C.replaceSmartContents() } : null,
+    kind === 'smart' ? { label: '내용 내보내기…', action: () => C.exportSmartContents() } : null,
+    ['text', 'shape', 'fill', 'smart'].includes(kind) ? { label: '레이어 래스터화', action: () => C.rasterize('layer') } : null,
+    kind !== 'adjust' && l.fx && Object.keys(l.fx).length ? { label: '레이어 스타일 래스터화', action: () => C.rasterize('style') } : null,
+    '-',
+    l.mask ? { label: l.mask.enabled === false ? '레이어 마스크 사용' : '레이어 마스크 사용 안 함', action: () => P.run('마스크 켜기/끄기', () => { l.mask = { ...l.mask, enabled: l.mask.enabled === false }; d.touch(l); }) } : null,
+    l.mask ? { label: '레이어 마스크 적용', disabled: kind !== 'raster', action: () => C.applyMask() } : null,
+    l.mask ? { label: '레이어 마스크 삭제', action: () => C.deleteMask() } : null,
+    l.vmask ? { label: l.vmask.enabled === false ? '벡터 마스크 사용' : '벡터 마스크 사용 안 함', action: () => P.run('벡터 마스크 켜기/끄기', () => { l.vmask = { ...l.vmask, enabled: l.vmask.enabled === false }; d.touch(l); }) } : null,
+    { label: l.clip ? '클리핑 마스크 해제' : '클리핑 마스크 만들기', action: () => C.toggleClip() },
+    '-',
+    { label: '레이어 연결', disabled: !multi, action: () => C.link() },
+    { label: '연결된 레이어 선택', disabled: !l.linkId, action: () => C.selectLinked() },
+    '-',
+    { label: '레이어 스타일 복사', disabled: kind === 'adjust', action: () => C.copyStyle() },
+    { label: '레이어 스타일 붙여넣기', action: () => C.pasteStyle() },
+    { label: '레이어 스타일 지우기', action: () => C.clearStyle() },
+    '-',
+    ...LAYER_COLORS.map(([id, name, c]) => ({ label: id === 'none' ? '색상 없음' : name, swatch: c || 'transparent', checked: (l.color || 'none') === id, action: () => C.layerColor(id) })),
+    '-',
+    { label: multi ? '레이어 병합' : kind === 'group' ? '그룹 병합' : '아래로 병합', action: () => C.mergeDown() },
+    { label: '보이는 레이어 병합', action: () => C.mergeVisible() },
+    { label: '이미지 병합', action: () => C.flatten() },
+  ].filter((x) => x !== null).filter((x, i, a) => !(x === '-' && (i === 0 || a[i - 1] === '-')));
 }
 
 /** The Layer menu (also the layers panel's context menu). */
@@ -661,18 +1169,22 @@ export function layerMenuItems(P, mod) {
       { label: '복사한 레이어', key: `${mod}J`, action: () => C.layerVia(false) },
       { label: '잘라낸 레이어', key: `${mod}Shift+J`, disabled: !d?.selection, action: () => C.layerVia(true) },
     ] },
-    { label: multi ? '레이어 복제 (고른 레이어 모두)' : '레이어 복제', disabled: no, action: () => C.duplicateLayer() },
+    { label: multi ? '레이어 복제… (고른 레이어 모두)' : '레이어 복제…', disabled: no, action: () => C.duplicateLayerDialog() },
     { label: '삭제', disabled: no, action: () => C.deleteLayer() },
     { label: '이름 바꾸기…', disabled: no, action: () => C.renameLayer() },
+    { label: '레이어 속성…', disabled: no, action: () => C.layerProperties() },
     '-',
-    { label: '레이어 스타일', disabled: no || kind === 'adjust', submenu: [
+    { label: '레이어 스타일', disabled: no, submenu: [
       { label: '혼합 옵션…', action: () => C.layerStyle('blending') },
       '-',
-      ...['bevel', 'stroke', 'innerShadow', 'innerGlow', 'satin', 'colorOverlay', 'gradientOverlay', 'patternOverlay', 'outerGlow', 'dropShadow'].map((k) => ({ label: `${P.fxNames[k]}…`, action: () => C.layerStyle(k) })),
+      ...['bevel', 'stroke', 'innerShadow', 'innerGlow', 'satin', 'colorOverlay', 'gradientOverlay', 'patternOverlay', 'outerGlow', 'dropShadow'].map((k) => ({ label: `${P.fxNames[k]}…`, disabled: kind === 'adjust', action: () => C.layerStyle(k) })),
       '-',
-      { label: '레이어 스타일 복사', action: () => C.copyStyle() },
+      { label: '레이어 스타일 복사', disabled: kind === 'adjust', action: () => C.copyStyle() },
       { label: '레이어 스타일 붙여넣기', action: () => C.pasteStyle() },
       { label: '레이어 스타일 지우기', action: () => C.clearStyle() },
+      '-',
+      { label: '전체 조명…', action: () => C.globalLight() },
+      { label: '효과 비율 조정…', disabled: kind === 'adjust', action: () => C.scaleEffects() },
     ] },
     { label: '새 칠 레이어', disabled: no, submenu: [
       { label: '단색…', action: () => P.dialogs.fillLayerDialog(P, 'solid') },
@@ -682,15 +1194,20 @@ export function layerMenuItems(P, mod) {
     { label: '새 조정 레이어', disabled: no, submenu: () => Object.entries(ADJUSTMENTS).filter(([k]) => k !== 'desaturate').map(([k, a]) => ({ label: `${a.name}…`, action: () => C.newAdjustLayer(k) })) },
     '-',
     { label: '레이어 마스크', disabled: no, submenu: [
-      { label: '모두 나타내기 (선택 영역이 있으면 선택 영역만)', disabled: !!l?.mask, action: () => C.addMask(false) },
-      { label: '모두 숨기기', disabled: !!l?.mask, action: () => C.addMask(true) },
+      { label: '모두 나타내기', disabled: !!l?.mask, action: () => C.addMaskMode('revealAll') },
+      { label: '모두 숨기기', disabled: !!l?.mask, action: () => C.addMaskMode('hideAll') },
+      { label: '선택 영역 나타내기', disabled: !!l?.mask || !d?.selection, action: () => C.addMaskMode('revealSel') },
+      { label: '선택 영역 숨기기', disabled: !!l?.mask || !d?.selection, action: () => C.addMaskMode('hideSel') },
       { label: '투명도에서', disabled: !!l?.mask, action: () => C.maskFromTransparency() },
+      '-',
+      { label: '삭제', disabled: !l?.mask, action: () => C.deleteMask() },
+      { label: '적용', disabled: !l?.mask || kind !== 'raster', action: () => C.applyMask() },
+      '-',
+      { label: l?.mask?.enabled === false ? '사용' : '사용 안 함', disabled: !l?.mask, action: () => P.run('마스크 켜기/끄기', () => { l.mask = { ...l.mask, enabled: l.mask.enabled === false }; d.touch(l); }) },
+      { label: l?.mask?.linked === false ? '연결' : '연결 해제', disabled: !l?.mask, action: () => P.run('마스크 연결', () => { l.mask = { ...l.mask, linked: l.mask.linked === false }; d.touch(l); }) },
       '-',
       { label: '마스크 반전', disabled: !l?.mask, action: () => C.invertMask() },
       { label: '마스크를 선택 영역으로', disabled: !l?.mask, action: () => C.maskToSelection() },
-      { label: l?.mask?.enabled === false ? '마스크 켜기' : '마스크 끄기', disabled: !l?.mask, action: () => P.run('마스크 켜기/끄기', () => { l.mask = { ...l.mask, enabled: l.mask.enabled === false }; d.touch(l); }) },
-      { label: '마스크 적용', disabled: !l?.mask || kind !== 'raster', action: () => C.applyMask() },
-      { label: '마스크 삭제', disabled: !l?.mask, action: () => C.deleteMask() },
     ] },
     { label: '벡터 마스크', disabled: no, submenu: () => P.vectorMaskMenu?.() || [{ label: '(패스 기능에서 제공)', disabled: true }] },
     { label: l?.clip ? '클리핑 마스크 해제' : '클리핑 마스크 만들기', key: `${mod}Alt+G`, disabled: no, action: () => C.toggleClip() },
@@ -703,6 +1220,14 @@ export function layerMenuItems(P, mod) {
       { label: '내용 바꾸기…', disabled: kind !== 'smart', action: () => C.replaceSmartContents() },
       { label: '내용 내보내기…', disabled: kind !== 'smart', action: () => C.exportSmartContents() },
       { label: '래스터화', disabled: kind !== 'smart', action: () => C.rasterize() },
+    ] },
+    { label: '고급 필터', disabled: kind !== 'smart', submenu: [
+      { label: l?.smart?.filters?.every((f) => f.enabled === false) ? '고급 필터 사용' : '고급 필터 사용 안 함', disabled: !l?.smart?.filters?.length, action: () => C.smartFiltersToggleAll() },
+      { label: '필터 마스크 추가', disabled: !!l?.filterMask || !l?.smart?.filters?.length, action: () => C.smartFilterMask(l, 'reveal') },
+      { label: '선택 영역에서 필터 마스크', disabled: !d?.selection || !l?.smart?.filters?.length, action: () => C.smartFilterMask(l, 'select') },
+      { label: l?.filterMask?.enabled === false ? '필터 마스크 사용' : '필터 마스크 사용 안 함', disabled: !l?.filterMask, action: () => C.smartFilterMask(l, 'toggle') },
+      { label: '필터 마스크 삭제', disabled: !l?.filterMask, action: () => C.smartFilterMask(l, 'delete') },
+      { label: '고급 필터 지우기', disabled: !l?.smart?.filters?.length, action: () => C.smartFiltersClear() },
     ] },
     { label: '래스터화', disabled: no, submenu: [
       { label: '레이어 (글자·모양·칠·고급 개체 → 픽셀)', disabled: !['text', 'shape', 'fill', 'smart'].includes(kind), action: () => C.rasterize('layer') },

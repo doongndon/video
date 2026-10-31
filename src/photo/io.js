@@ -2,10 +2,11 @@
 // autosave open documents to IndexedDB, and hand images over to the video editor.
 
 import { readPsd, writePsd } from '../../vendor/ag-psd/ag-psd.min.mjs';
-import { PhotoDoc, newLayer, makeCanvas, alphaBox } from './doc.js';
+import { PhotoDoc, newLayer, makeCanvas, alphaBox, psdTextKey, textBox } from './doc.js';
 import { isBlend } from './blend.js';
 import { defaultParams } from './adjust.js';
-import { FX_DEFAULTS, normalizeFx } from './styles.js';
+import { FX_DEFAULTS, normalizeFx, instanceKeys } from './styles.js';
+import { newText } from './type.js';
 import { userPatterns, rgbHex, hexRgb } from './resources.js';
 import { pathBounds, translatePath, shapeToSubpaths, mapPath } from './paths.js';
 
@@ -86,34 +87,64 @@ function gradientToPsd(gr, fg = '#000000', bg = '#ffffff') {
   };
 }
 
-/** Photoshop layer effects → our layer styles. */
+// Photoshop's contour preset names ↔ ours (styles.js CONTOURS)
+const CONTOUR_NAMES = {
+  linear: 'Linear', cone: 'Cone', coneInv: 'Cone - Inverted', gaussian: 'Gaussian', halfRound: 'Half Round', ring: 'Ring', ringDouble: 'Ring - Double',
+  sawtooth: 'Sawtooth 1', coveDeep: 'Cove - Deep', coveShallow: 'Cove - Shallow', rollingSlope: 'Rolling Slope - Descending', roundedSteps: 'Rounded Steps', log: 'Log',
+};
+const CONTOUR_CURVES = {
+  linear: [[0, 0], [255, 255]], cone: [[0, 0], [128, 255], [255, 0]], coneInv: [[0, 255], [128, 0], [255, 255]], gaussian: [[0, 0], [64, 26], [191, 229], [255, 255]],
+  halfRound: [[0, 0], [64, 168], [128, 222], [255, 255]], ring: [[0, 0], [128, 255], [255, 0]], ringDouble: [[0, 0], [64, 255], [128, 0], [191, 255], [255, 0]],
+  sawtooth: [[0, 0], [85, 255], [86, 0], [170, 255], [171, 0], [255, 255]], coveDeep: [[0, 0], [128, 32], [255, 255]], coveShallow: [[0, 0], [128, 90], [255, 255]],
+  rollingSlope: [[0, 255], [128, 128], [255, 0]], roundedSteps: [[0, 0], [64, 64], [128, 128], [191, 191], [255, 255]], log: [[0, 0], [64, 154], [128, 211], [255, 255]],
+};
+function contourIn(c) {
+  if (!c?.name) return 'linear';
+  const n = String(c.name).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  for (const [id, name] of Object.entries(CONTOUR_NAMES)) if (name.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim() === n) return id;
+  if (n.includes('cone') && n.includes('inv')) return 'coneInv';
+  if (n.includes('cone')) return 'cone';
+  if (n.includes('gauss')) return 'gaussian';
+  if (n.includes('ring') && n.includes('double')) return 'ringDouble';
+  if (n.includes('ring')) return 'ring';
+  if (n.includes('half')) return 'halfRound';
+  return 'linear';
+}
+const contourOut = (id) => ({ name: CONTOUR_NAMES[id] || 'Linear', curve: (CONTOUR_CURVES[id] || CONTOUR_CURVES.linear).map(([x, y]) => ({ x, y })) });
+// ag-psd keeps percentages as fractions (1 = 100%)
+const pctIn = (v, def = 0) => (v == null ? def : Math.round(v * 100));
+
+/** Photoshop layer effects → our layer styles (several instances become stroke, stroke_2, …). */
 export function fxFromPsd(e) {
   if (!e) return {};
   const fx = {};
-  const first = (v) => (Array.isArray(v) ? v[0] : v);
-  const ds = first(e.dropShadow);
-  if (ds) fx.dropShadow = { ...FX_DEFAULTS.dropShadow, enabled: ds.enabled !== false, color: colorHex(ds.color), blend: blendIn(ds.blendMode), opacity: ds.opacity ?? 0.75, angle: ds.angle ?? 120, distance: px(ds.distance, 5), spread: px(ds.choke, 0), size: px(ds.size, 5), knockout: ds.layerConceals !== false };
-  const is = first(e.innerShadow);
-  if (is) fx.innerShadow = { ...FX_DEFAULTS.innerShadow, enabled: is.enabled !== false, color: colorHex(is.color), blend: blendIn(is.blendMode), opacity: is.opacity ?? 0.75, angle: is.angle ?? 120, distance: px(is.distance, 5), choke: px(is.choke, 0), size: px(is.size, 5) };
-  if (e.outerGlow) fx.outerGlow = { ...FX_DEFAULTS.outerGlow, enabled: e.outerGlow.enabled !== false, color: colorHex(e.outerGlow.color), blend: blendIn(e.outerGlow.blendMode), opacity: e.outerGlow.opacity ?? 0.75, spread: px(e.outerGlow.choke, 0), size: px(e.outerGlow.size, 5) };
-  if (e.innerGlow) fx.innerGlow = { ...FX_DEFAULTS.innerGlow, enabled: e.innerGlow.enabled !== false, color: colorHex(e.innerGlow.color), blend: blendIn(e.innerGlow.blendMode), opacity: e.innerGlow.opacity ?? 0.75, source: e.innerGlow.source || 'edge', choke: px(e.innerGlow.choke, 0), size: px(e.innerGlow.size, 5) };
-  const bv = e.bevel;
-  if (bv) {
+  const all = (v) => (Array.isArray(v) ? v : v ? [v] : []);
+  const put = (k, list) => { list.forEach((v, i) => { fx[i ? `${k}_${i + 1}` : k] = v; }); };
+  const common = (x) => ({ useGlobalLight: !!x.useGlobalLight, ...(x.contour ? { contour: contourIn(x.contour) } : {}), ...(x.antialiased ? { antialias: true } : {}), ...(x.noise ? { noise: pctIn(x.noise) } : {}) });
+  put('dropShadow', all(e.dropShadow).map((ds) => ({ ...FX_DEFAULTS.dropShadow, enabled: ds.enabled !== false, color: colorHex(ds.color), blend: blendIn(ds.blendMode), opacity: ds.opacity ?? 0.75, angle: ds.angle ?? 120, distance: px(ds.distance, 5), spread: px(ds.choke, 0), size: px(ds.size, 5), knockout: ds.layerConceals !== false, ...common(ds) })));
+  put('innerShadow', all(e.innerShadow).map((is) => ({ ...FX_DEFAULTS.innerShadow, enabled: is.enabled !== false, color: colorHex(is.color), blend: blendIn(is.blendMode), opacity: is.opacity ?? 0.75, angle: is.angle ?? 120, distance: px(is.distance, 5), choke: px(is.choke, 0), size: px(is.size, 5), ...common(is) })));
+  for (const og of all(e.outerGlow).slice(0, 1)) fx.outerGlow = { ...FX_DEFAULTS.outerGlow, enabled: og.enabled !== false, color: colorHex(og.color), blend: blendIn(og.blendMode), opacity: og.opacity ?? 0.75, spread: px(og.choke, 0), size: px(og.size, 5), technique: og.technique === 'precise' ? 'precise' : 'softer', range: pctIn(og.range, 50), ...common(og) };
+  for (const ig of all(e.innerGlow).slice(0, 1)) fx.innerGlow = { ...FX_DEFAULTS.innerGlow, enabled: ig.enabled !== false, color: colorHex(ig.color), blend: blendIn(ig.blendMode), opacity: ig.opacity ?? 0.75, source: ig.source || 'edge', choke: px(ig.choke, 0), size: px(ig.size, 5), technique: ig.technique === 'precise' ? 'precise' : 'softer', range: pctIn(ig.range, 50), ...common(ig) };
+  for (const bv of all(e.bevel).slice(0, 1)) {
+    // ag-psd gives the depth as a percentage (older files: a fraction)
+    const depth = bv.strength == null ? 100 : bv.strength <= 10 ? Math.round(bv.strength * 100) : Math.round(bv.strength);
     fx.bevel = {
-      ...FX_DEFAULTS.bevel, enabled: bv.enabled !== false, style: bv.style === 'stroke emboss' ? 'emboss' : bv.style || 'inner bevel', technique: bv.technique || 'smooth',
-      depth: Math.round((bv.strength ?? 1) * 100), direction: bv.direction || 'up', size: px(bv.size, 5), soften: px(bv.soften, 0), angle: bv.angle ?? 120, altitude: bv.altitude ?? 30,
+      ...FX_DEFAULTS.bevel, enabled: bv.enabled !== false, style: bv.style || 'inner bevel', technique: bv.technique || 'smooth',
+      depth, direction: bv.direction || 'up', size: px(bv.size, 5), soften: px(bv.soften, 0), angle: bv.angle ?? 120, altitude: bv.altitude ?? 30, useGlobalLight: !!bv.useGlobalLight,
       highlightColor: colorHex(bv.highlightColor || { r: 255, g: 255, b: 255 }), highlightBlend: blendIn(bv.highlightBlendMode || 'screen'), highlightOpacity: bv.highlightOpacity ?? 0.75,
       shadowColor: colorHex(bv.shadowColor), shadowBlend: blendIn(bv.shadowBlendMode || 'multiply'), shadowOpacity: bv.shadowOpacity ?? 0.75,
+      ...(bv.contour ? { gloss: contourIn(bv.contour) } : {}),
     };
   }
-  if (e.satin) fx.satin = { ...FX_DEFAULTS.satin, enabled: e.satin.enabled !== false, color: colorHex(e.satin.color), blend: blendIn(e.satin.blendMode), opacity: e.satin.opacity ?? 0.5, angle: e.satin.angle ?? 19, distance: px(e.satin.distance, 11), size: px(e.satin.size, 14), invert: !!e.satin.invert };
-  const sf = first(e.solidFill);
-  if (sf) fx.colorOverlay = { ...FX_DEFAULTS.colorOverlay, enabled: sf.enabled !== false, color: colorHex(sf.color), blend: blendIn(sf.blendMode), opacity: sf.opacity ?? 1 };
-  const go = first(e.gradientOverlay);
-  if (go) fx.gradientOverlay = { ...FX_DEFAULTS.gradientOverlay, enabled: go.enabled !== false, blend: blendIn(go.blendMode), opacity: go.opacity ?? 1, style: go.type || 'linear', angle: go.angle ?? 90, scale: Math.round((go.scale ?? 1) * 100), reverse: !!go.reverse, gradient: gradientFromPsd(go.gradient) };
-  if (e.patternOverlay) fx.patternOverlay = { ...FX_DEFAULTS.patternOverlay, enabled: e.patternOverlay.enabled !== false, blend: blendIn(e.patternOverlay.blendMode), opacity: e.patternOverlay.opacity ?? 1, scale: Math.round((e.patternOverlay.scale ?? 1) * 100) };
-  const st = first(e.stroke);
-  if (st) fx.stroke = { ...FX_DEFAULTS.stroke, enabled: st.enabled !== false, size: px(st.size, 3), position: st.position || 'outside', blend: blendIn(st.blendMode), opacity: st.opacity ?? 1, fillType: st.fillType === 'gradient' ? 'gradient' : 'color', color: colorHex(st.color), gradient: st.gradient ? gradientFromPsd(st.gradient) : FX_DEFAULTS.stroke.gradient };
+  for (const sa of all(e.satin).slice(0, 1)) fx.satin = { ...FX_DEFAULTS.satin, enabled: sa.enabled !== false, color: colorHex(sa.color), blend: blendIn(sa.blendMode), opacity: sa.opacity ?? 0.5, angle: sa.angle ?? 19, distance: px(sa.distance, 11), size: px(sa.size, 14), invert: !!sa.invert, contour: sa.contour ? contourIn(sa.contour) : 'gaussian' };
+  put('colorOverlay', all(e.solidFill).map((sf) => ({ ...FX_DEFAULTS.colorOverlay, enabled: sf.enabled !== false, color: colorHex(sf.color), blend: blendIn(sf.blendMode), opacity: sf.opacity ?? 1 })));
+  put('gradientOverlay', all(e.gradientOverlay).map((go) => ({ ...FX_DEFAULTS.gradientOverlay, enabled: go.enabled !== false, blend: blendIn(go.blendMode), opacity: go.opacity ?? 1, style: go.type || 'linear', angle: go.angle ?? 90, scale: Math.round((go.scale ?? 1) * (go.scale > 5 ? 1 : 100)), reverse: !!go.reverse, align: go.align !== false, dither: !!go.dither, gradient: gradientFromPsd(go.gradient) })));
+  for (const po of all(e.patternOverlay).slice(0, 1)) fx.patternOverlay = { ...FX_DEFAULTS.patternOverlay, enabled: po.enabled !== false, blend: blendIn(po.blendMode), opacity: po.opacity ?? 1, scale: Math.round((po.scale ?? 1) * (po.scale > 5 ? 1 : 100)) };
+  put('stroke', all(e.stroke).map((st) => ({
+    ...FX_DEFAULTS.stroke, enabled: st.enabled !== false, size: px(st.size, 3), position: st.position || 'outside', blend: blendIn(st.blendMode), opacity: st.opacity ?? 1,
+    fillType: st.fillType === 'gradient' ? 'gradient' : st.fillType === 'pattern' ? 'pattern' : 'color', color: colorHex(st.color),
+    gradient: st.gradient ? gradientFromPsd(st.gradient) : FX_DEFAULTS.stroke.gradient, ...(st.gradient?.angle != null || st.angle != null ? { angle: st.angle ?? st.gradient?.angle } : {}),
+  })));
   if (e.disabled) fx.disabled = true;
   return fx;
 }
@@ -122,45 +153,89 @@ export function fxFromPsd(e) {
 export function fxToPsd(fx, fg, bg) {
   fx = normalizeFx(fx);
   const e = {};
-  const on = (k) => fx[k];
-  if (on('dropShadow')) {
-    const s = fx.dropShadow;
-    e.dropShadow = [{ enabled: !!s.enabled, color: psdColor(s.color), blendMode: s.blend, opacity: s.opacity, angle: s.angle, distance: unitPx(s.distance), choke: unitPx(s.spread), size: unitPx(s.size), useGlobalLight: false, layerConceals: s.knockout !== false }];
-  }
-  if (on('innerShadow')) {
-    const s = fx.innerShadow;
-    e.innerShadow = [{ enabled: !!s.enabled, color: psdColor(s.color), blendMode: s.blend, opacity: s.opacity, angle: s.angle, distance: unitPx(s.distance), choke: unitPx(s.choke), size: unitPx(s.size), useGlobalLight: false }];
-  }
-  if (on('outerGlow')) {
+  const list = (k) => instanceKeys(fx, k).map((key) => fx[key]);
+  const common = (s) => ({ useGlobalLight: !!s.useGlobalLight, ...(s.contour && s.contour !== 'linear' ? { contour: contourOut(s.contour) } : {}), antialiased: !!s.antialias, noise: (s.noise || 0) / 100 });
+  if (list('dropShadow').length) e.dropShadow = list('dropShadow').map((s) => ({ enabled: !!s.enabled, color: psdColor(s.color), blendMode: s.blend, opacity: s.opacity, angle: s.angle, distance: unitPx(s.distance), choke: unitPx(s.spread), size: unitPx(s.size), layerConceals: s.knockout !== false, ...common(s) }));
+  if (list('innerShadow').length) e.innerShadow = list('innerShadow').map((s) => ({ enabled: !!s.enabled, color: psdColor(s.color), blendMode: s.blend, opacity: s.opacity, angle: s.angle, distance: unitPx(s.distance), choke: unitPx(s.choke), size: unitPx(s.size), ...common(s) }));
+  if (fx.outerGlow) {
     const s = fx.outerGlow;
-    e.outerGlow = { enabled: !!s.enabled, color: psdColor(s.color), blendMode: s.blend, opacity: s.opacity, choke: unitPx(s.spread), size: unitPx(s.size) };
+    e.outerGlow = { enabled: !!s.enabled, color: psdColor(s.color), blendMode: s.blend, opacity: s.opacity, choke: unitPx(s.spread), size: unitPx(s.size), range: (s.range ?? 50) / 100, technique: s.technique === 'precise' ? 'precise' : 'softer', ...common(s) };
   }
-  if (on('innerGlow')) {
+  if (fx.innerGlow) {
     const s = fx.innerGlow;
-    e.innerGlow = { enabled: !!s.enabled, color: psdColor(s.color), blendMode: s.blend, opacity: s.opacity, source: s.source, choke: unitPx(s.choke), size: unitPx(s.size) };
+    e.innerGlow = { enabled: !!s.enabled, color: psdColor(s.color), blendMode: s.blend, opacity: s.opacity, source: s.source, choke: unitPx(s.choke), size: unitPx(s.size), range: (s.range ?? 50) / 100, technique: s.technique === 'precise' ? 'precise' : 'softer', ...common(s) };
   }
-  if (on('bevel')) {
+  if (fx.bevel) {
     const s = fx.bevel;
     e.bevel = {
-      enabled: !!s.enabled, style: s.style, technique: s.technique, strength: (s.depth ?? 100) / 100, direction: s.direction, size: unitPx(s.size), soften: unitPx(s.soften), angle: s.angle, altitude: s.altitude, useGlobalLight: false,
+      enabled: !!s.enabled, style: s.style, technique: s.technique, strength: (s.depth ?? 100) / 100, direction: s.direction, size: unitPx(s.size), soften: unitPx(s.soften), angle: s.angle, altitude: s.altitude, useGlobalLight: !!s.useGlobalLight,
       highlightColor: psdColor(s.highlightColor), highlightBlendMode: s.highlightBlend, highlightOpacity: s.highlightOpacity, shadowColor: psdColor(s.shadowColor), shadowBlendMode: s.shadowBlend, shadowOpacity: s.shadowOpacity,
+      ...(s.gloss && s.gloss !== 'linear' ? { contour: contourOut(s.gloss) } : {}),
     };
   }
-  if (on('satin')) {
+  if (fx.satin) {
     const s = fx.satin;
-    e.satin = { enabled: !!s.enabled, color: psdColor(s.color), blendMode: s.blend, opacity: s.opacity, angle: s.angle, distance: unitPx(s.distance), size: unitPx(s.size), invert: !!s.invert };
+    e.satin = { enabled: !!s.enabled, color: psdColor(s.color), blendMode: s.blend, opacity: s.opacity, angle: s.angle, distance: unitPx(s.distance), size: unitPx(s.size), invert: !!s.invert, contour: contourOut(s.contour || 'gaussian') };
   }
-  if (on('colorOverlay')) e.solidFill = [{ enabled: !!fx.colorOverlay.enabled, color: psdColor(fx.colorOverlay.color), blendMode: fx.colorOverlay.blend, opacity: fx.colorOverlay.opacity }];
-  if (on('gradientOverlay')) {
-    const s = fx.gradientOverlay;
-    e.gradientOverlay = [{ enabled: !!s.enabled, blendMode: s.blend, opacity: s.opacity, type: s.style, angle: s.angle, scale: (s.scale ?? 100) / 100, reverse: !!s.reverse, align: true, gradient: gradientToPsd(s.gradient, fg, bg) }];
-  }
-  if (on('stroke')) {
-    const s = fx.stroke;
-    e.stroke = [{ enabled: !!s.enabled, size: unitPx(s.size), position: s.position, blendMode: s.blend, opacity: s.opacity, fillType: s.fillType === 'gradient' ? 'gradient' : 'color', color: psdColor(s.color), ...(s.fillType === 'gradient' ? { gradient: { ...gradientToPsd(s.gradient, fg, bg), style: 'linear', angle: s.angle ?? 90 } } : {}) }];
+  if (list('colorOverlay').length) e.solidFill = list('colorOverlay').map((s) => ({ enabled: !!s.enabled, color: psdColor(s.color), blendMode: s.blend, opacity: s.opacity }));
+  if (list('gradientOverlay').length) e.gradientOverlay = list('gradientOverlay').map((s) => ({ enabled: !!s.enabled, blendMode: s.blend, opacity: s.opacity, type: s.style, angle: s.angle, scale: (s.scale ?? 100) / 100, reverse: !!s.reverse, align: s.align !== false, dither: !!s.dither, gradient: gradientToPsd(s.gradient, fg, bg) }));
+  if (list('stroke').length) {
+    e.stroke = list('stroke').map((s) => ({
+      enabled: !!s.enabled, size: unitPx(s.size), position: s.position, blendMode: s.blend, opacity: s.opacity, fillType: s.fillType === 'gradient' ? 'gradient' : 'color', color: psdColor(s.color),
+      ...(s.fillType === 'gradient' ? { gradient: { ...gradientToPsd(s.gradient, fg, bg), style: s.style || 'linear', angle: s.angle ?? 90 } } : {}),
+    }));
   }
   if (fx.disabled) e.disabled = true;
-  return Object.keys(e).length ? e : undefined;
+  if (!Object.keys(e).length) return undefined;
+  e.scale = 1;
+  return e;
+}
+
+/** Blending Options read from a PSD layer (fill is read with the common settings). */
+function blendOptsFromPsd(c) {
+  const o = {};
+  const br = c.blendingRanges;
+  if (br?.compositeGrayBlendSource) {
+    const r4 = (v) => (Array.isArray(v) && v.length === 4 ? [v[0], v[1], v[2], v[3]] : [0, 0, 255, 255]);
+    const bi = { this: r4(br.compositeGrayBlendSource), under: r4(br.compositeGraphBlendDestinationRange) };
+    ['r', 'g', 'b'].forEach((ch, i) => {
+      const rr = br.ranges?.[i];
+      if (rr) bi[ch] = { this: r4(rr.sourceRange), under: r4(rr.destRange) };
+    });
+    o.blendIf = bi;
+  }
+  const ex = c.channelBlendingRestrictions;
+  if (Array.isArray(ex) && ex.some((i) => i >= 0 && i <= 2)) o.blendChannels = { r: !ex.includes(0), g: !ex.includes(1), b: !ex.includes(2) };
+  if (c.knockout) o.knockout = 'shallow';
+  if (c.blendClippendElements === false) o.blendClipped = false;
+  if (c.blendInteriorElements) o.blendInterior = true;
+  if (c.transparencyShapesLayer === false) o.transparencyShapes = false;
+  if (c.layerMaskAsGlobalMask) o.maskHidesFx = true;
+  if (c.vectorMaskAsGlobalMask) o.vmaskHidesFx = true;
+  return o;
+}
+function blendOptsToPsd(l) {
+  const o = {};
+  const bi = l.blendIf;
+  if (bi) {
+    const full = [0, 0, 255, 255];
+    o.blendingRanges = {
+      compositeGrayBlendSource: bi.this || full, compositeGraphBlendDestinationRange: bi.under || full,
+      ranges: ['r', 'g', 'b'].map((ch) => ({ sourceRange: bi[ch]?.this || full, destRange: bi[ch]?.under || full })),
+    };
+  }
+  const ch = l.blendChannels;
+  if (ch && (ch.r === false || ch.g === false || ch.b === false)) {
+    const ex = [ch.r === false ? 0 : -1, ch.g === false ? 1 : -1, ch.b === false ? 2 : -1].filter((i) => i >= 0);
+    // ag-psd's reader drops the last entry: repeat it (a repeated channel means the same to Photoshop)
+    o.channelBlendingRestrictions = [...ex, ex[ex.length - 1]];
+  }
+  if (l.knockout && l.knockout !== 'none') o.knockout = true;
+  if (l.blendClipped === false) o.blendClippendElements = false;
+  if (l.blendInterior) o.blendInteriorElements = true;
+  if (l.transparencyShapes === false) o.transparencyShapesLayer = false;
+  if (l.maskHidesFx) o.layerMaskAsGlobalMask = true;
+  return o;
 }
 
 function maskFromPsd(doc, m) {
@@ -223,26 +298,68 @@ function adjustFromPsd(a) {
     case 'brightness/contrast': return { type: 'brightness', params: { brightness: a.brightness ?? 0, contrast: a.contrast ?? 0 } };
     case 'vibrance': return { type: 'vibrance', params: { vibrance: a.vibrance ?? 0, saturation: a.saturation ?? 0 } };
     case 'exposure': return { type: 'exposure', params: { exposure: a.exposure ?? 0, offset: a.offset ?? 0, gamma: a.gamma ?? 1 } };
-    case 'hue/saturation': return { type: 'hueSat', params: { hue: ch(a.master).hue ?? 0, saturation: ch(a.master).saturation ?? 0, lightness: ch(a.master).lightness ?? 0, colorize: false } };
+    case 'hue/saturation': {
+      const ranges = {};
+      for (const k of ['reds', 'yellows', 'greens', 'cyans', 'blues', 'magentas']) {
+        const r = a[k];
+        if (r && (r.hue || r.saturation || r.lightness)) ranges[k] = { h: r.hue || 0, s: r.saturation || 0, l: r.lightness || 0, ...(r.a != null && (r.a || r.b || r.c || r.d) ? { r: [r.a, r.b, r.c, r.d] } : {}) };
+      }
+      return { type: 'hueSat', params: { hue: ch(a.master).hue ?? 0, saturation: ch(a.master).saturation ?? 0, lightness: ch(a.master).lightness ?? 0, colorize: !!a.colorize, ...(Object.keys(ranges).length ? { ranges } : {}) } };
+    }
+    case 'selective color': {
+      const colors = {};
+      for (const k of ['reds', 'yellows', 'greens', 'cyans', 'blues', 'magentas', 'whites', 'neutrals', 'blacks']) {
+        const v = a[k];
+        if (v && (v.c || v.m || v.y || v.k)) colors[k] = [v.c || 0, v.m || 0, v.y || 0, v.k || 0];
+      }
+      const first = Object.keys(colors)[0] || 'reds';
+      const f = colors[first] || [0, 0, 0, 0];
+      return { type: 'selectiveColor', params: { target: first, cyan: f[0], magenta: f[1], yellow: f[2], black: f[3], absolute: a.mode === 'absolute', colors } };
+    }
+    case 'channel mixer': {
+      const c3 = (v) => v || { red: 0, green: 0, blue: 0, constant: 0 };
+      const r = c3(a.red);
+      const g = c3(a.green);
+      const b = c3(a.blue);
+      const k = c3(a.gray);
+      if (a.monochrome) return { type: 'channelMixer', params: { mono: true, mr: k.red, mg: k.green, mb: k.blue, mk: k.constant || 0 } };
+      return { type: 'channelMixer', params: { rr: r.red ?? 100, rg: r.green ?? 0, rb: r.blue ?? 0, rk: r.constant || 0, gr: g.red ?? 0, gg: g.green ?? 100, gb: g.blue ?? 0, gk: g.constant || 0, br: b.red ?? 0, bg: b.green ?? 0, bb: b.blue ?? 100, bk: b.constant || 0, mono: false } };
+    }
     case 'color balance': {
       const m = a.midtones || {};
-      return { type: 'colorBalance', params: { cr: m.cyanRed ?? 0, mg: m.magentaGreen ?? 0, yb: m.yellowBlue ?? 0, preserve: a.preserveLuminosity !== false } };
+      const t = (v) => (v && (v.cyanRed || v.magentaGreen || v.yellowBlue) ? { cr: v.cyanRed || 0, mg: v.magentaGreen || 0, yb: v.yellowBlue || 0 } : null);
+      return { type: 'colorBalance', params: { cr: m.cyanRed ?? 0, mg: m.magentaGreen ?? 0, yb: m.yellowBlue ?? 0, preserve: a.preserveLuminosity !== false, ...(t(a.shadows) ? { shadows: t(a.shadows) } : {}), ...(t(a.highlights) ? { highlights: t(a.highlights) } : {}) } };
     }
     case 'black & white': return { type: 'bw', params: { reds: a.reds ?? 40, yellows: a.yellows ?? 60, greens: a.greens ?? 40, cyans: a.cyans ?? 60, blues: a.blues ?? 20, magentas: a.magentas ?? 80 } };
     case 'photo filter': return { type: 'photoFilter', params: { color: colorHex(a.color), density: a.density ?? 25, preserve: a.preserveLuminosity !== false } };
     case 'gradient map': {
       const s = a.colorStops || [];
       if (!s.length) return null;
-      return { type: 'gradientMap', params: { from: colorHex(s[0].color), to: colorHex(s[s.length - 1].color) } };
+      const gradient = { stops: s.map((x) => ({ pos: x.location, color: colorHex(x.color) })), alphas: a.opacityStops?.map((x) => ({ pos: x.location, a: x.opacity })) };
+      return { type: 'gradientMap', params: { from: colorHex(s[0].color), to: colorHex(s[s.length - 1].color), gradient, reverse: !!a.reverse, dither: !!a.dither } };
     }
     case 'levels': {
-      const c = a.rgb;
-      if (!c) return null;
-      let gamma = c.midtoneInput ?? 1;
-      if (gamma > 10) gamma /= 100;
-      return { type: 'levels', params: { inBlack: c.shadowInput ?? 0, inWhite: c.highlightInput ?? 255, gamma, outBlack: c.shadowOutput ?? 0, outWhite: c.highlightOutput ?? 255 } };
+      const lv = (c) => {
+        if (!c) return null;
+        let gamma = c.midtoneInput ?? 1;
+        if (gamma > 10) gamma /= 100;
+        return [c.shadowInput ?? 0, gamma, c.highlightInput ?? 255, c.shadowOutput ?? 0, c.highlightOutput ?? 255];
+      };
+      const m = lv(a.rgb) || [0, 1, 255, 0, 255];
+      const channels = {};
+      for (const [k, c] of [['r', a.red], ['g', a.green], ['b', a.blue]]) {
+        const v = lv(c);
+        if (v && (v[0] !== 0 || v[1] !== 1 || v[2] !== 255 || v[3] !== 0 || v[4] !== 255)) channels[k] = v;
+      }
+      if (!a.rgb && !Object.keys(channels).length) return null;
+      return { type: 'levels', params: { inBlack: m[0], gamma: m[1], inWhite: m[2], outBlack: m[3], outWhite: m[4], ...(Object.keys(channels).length ? { channels } : {}) } };
     }
-    case 'curves': return a.rgb?.length ? { type: 'curves', params: { points: a.rgb.map((p) => [p.input, p.output]) } } : null;
+    case 'curves': {
+      const pts = (v) => (Array.isArray(v) && v.length >= 2 ? v.map((p) => [p.input, p.output]) : null);
+      const out = { points: pts(a.rgb) || [[0, 0], [255, 255]] };
+      for (const [k, c] of [['r', a.red], ['g', a.green], ['b', a.blue]]) if (pts(c)) out[k] = pts(c);
+      return a.rgb?.length || out.r || out.g || out.b ? { type: 'curves', params: out } : null;
+    }
     default: return null;
   }
 }
@@ -256,15 +373,164 @@ function adjustToPsd(l) {
     case 'brightness': return { type: 'brightness/contrast', brightness: p.brightness, contrast: p.contrast };
     case 'vibrance': return { type: 'vibrance', vibrance: p.vibrance, saturation: p.saturation };
     case 'exposure': return { type: 'exposure', exposure: p.exposure, offset: p.offset, gamma: p.gamma };
-    case 'hueSat': return { type: 'hue/saturation', master: { a: 0, b: 0, c: 0, d: 0, hue: p.hue, saturation: p.saturation, lightness: p.lightness } };
-    case 'levels': return { type: 'levels', rgb: { shadowInput: p.inBlack, highlightInput: p.inWhite, shadowOutput: p.outBlack, highlightOutput: p.outWhite, midtoneInput: p.gamma } };
-    case 'curves': return { type: 'curves', rgb: p.points.map(([input, output]) => ({ input, output })) };
+    case 'hueSat': {
+      const o = { type: 'hue/saturation', master: { a: 0, b: 0, c: 0, d: 0, hue: p.hue, saturation: p.saturation, lightness: p.lightness } };
+      for (const [k, r] of Object.entries(p.ranges || {})) if (r) o[k] = { a: r.r?.[0] || 0, b: r.r?.[1] || 0, c: r.r?.[2] || 0, d: r.r?.[3] || 0, hue: r.h || 0, saturation: r.s || 0, lightness: r.l || 0 };
+      return o;
+    }
+    case 'levels': {
+      const lv = (v) => ({ shadowInput: v[0], midtoneInput: v[1], highlightInput: v[2], shadowOutput: v[3], highlightOutput: v[4] });
+      const o = { type: 'levels', rgb: lv([p.inBlack, p.gamma, p.inWhite, p.outBlack, p.outWhite]) };
+      for (const [k, name] of [['r', 'red'], ['g', 'green'], ['b', 'blue']]) if (Array.isArray(p.channels?.[k])) o[name] = lv(p.channels[k]);
+      return o;
+    }
+    case 'curves': {
+      const o = { type: 'curves', rgb: p.points.map(([input, output]) => ({ input, output })) };
+      for (const [k, name] of [['r', 'red'], ['g', 'green'], ['b', 'blue']]) if (Array.isArray(p[k]) && p[k].length >= 2) o[name] = p[k].map(([input, output]) => ({ input, output }));
+      return o;
+    }
+    case 'selectiveColor': {
+      const o = { type: 'selective color', mode: p.absolute ? 'absolute' : 'relative' };
+      const colors = p.colors && typeof p.colors === 'object' ? p.colors : { [p.target || 'reds']: [p.cyan, p.magenta, p.yellow, p.black] };
+      for (const k of ['reds', 'yellows', 'greens', 'cyans', 'blues', 'magentas', 'whites', 'neutrals', 'blacks']) {
+        const v = colors[k] || [0, 0, 0, 0];
+        o[k] = { c: v[0] || 0, m: v[1] || 0, y: v[2] || 0, k: v[3] || 0 };
+      }
+      return o;
+    }
+    case 'channelMixer': {
+      const row = (r, g, b, k) => ({ red: r || 0, green: g || 0, blue: b || 0, constant: k || 0 });
+      return { type: 'channel mixer', monochrome: !!p.mono, red: row(p.rr, p.rg, p.rb, p.rk), green: row(p.gr, p.gg, p.gb, p.gk), blue: row(p.br, p.bg, p.bb, p.bk), gray: row(p.mr, p.mg, p.mb, p.mk) };
+    }
     case 'colorBalance': return { type: 'color balance', midtones: { cyanRed: p.cr, magentaGreen: p.mg, yellowBlue: p.yb }, shadows: { cyanRed: 0, magentaGreen: 0, yellowBlue: 0 }, highlights: { cyanRed: 0, magentaGreen: 0, yellowBlue: 0 }, preserveLuminosity: !!p.preserve };
     case 'bw': return { type: 'black & white', reds: p.reds, yellows: p.yellows, greens: p.greens, cyans: p.cyans, blues: p.blues, magentas: p.magentas, useTint: false };
     case 'photoFilter': return { type: 'photo filter', color: psdColor(p.color), density: p.density, preserveLuminosity: !!p.preserve };
-    case 'gradientMap': return { type: 'gradient map', gradientType: 'solid', colorStops: [{ color: psdColor(p.from), location: 0, midpoint: 0.5 }, { color: psdColor(p.to), location: 1, midpoint: 0.5 }], opacityStops: [{ opacity: 1, location: 0, midpoint: 0.5 }, { opacity: 1, location: 1, midpoint: 0.5 }] };
+    case 'gradientMap': {
+      const g = p.gradient?.stops?.length ? gradientToPsd(p.gradient, p._fg, p._bg) : null;
+      return {
+        type: 'gradient map', gradientType: 'solid', reverse: !!p.reverse, dither: !!p.dither,
+        colorStops: g ? g.colorStops : [{ color: psdColor(p.from), location: 0, midpoint: 0.5 }, { color: psdColor(p.to), location: 1, midpoint: 0.5 }],
+        opacityStops: g ? g.opacityStops : [{ opacity: 1, location: 0, midpoint: 0.5 }, { opacity: 1, location: 1, midpoint: 0.5 }],
+      };
+    }
     default: return null;
   }
+}
+
+// ---------------------------------------------------------------- PSD text layers
+
+// PostScript names Photoshop stores → families we have (or the closest look)
+const FONT_ALIASES = {
+  'source han sans k': 'Noto Sans KR', 'source han sans kr': 'Noto Sans KR', 'noto sans cjk kr': 'Noto Sans KR', 'adobe gothic': 'Noto Sans KR', 'malgun gothic': 'Malgun Gothic',
+  'source han serif k': 'Noto Serif KR', 'source han serif kr': 'Noto Serif KR', 'adobe myungjo': 'Noto Serif KR', 'nanum gothic': 'Nanum Gothic', 'nanum myeongjo': 'Nanum Myeongjo',
+  'nanum barun gothic': 'Nanum Gothic', 'nanum square': 'Nanum Gothic', 'spoqa han sans': 'Noto Sans KR', 'pretendard': 'Noto Sans KR',
+};
+/** A PostScript font name → { font (family), bold, italic }. */
+export function psFont(name) {
+  const n = String(name || 'NotoSansKR-Regular');
+  const [base0, ...rest] = n.split('-');
+  const style = rest.join('-');
+  const all = `${base0} ${style}`;
+  const bold = /(Bold|Black|Heavy|Semibold|SemiBold|Demi|ExtraBold|Ultra)/.test(all);
+  const italic = /(Italic|Oblique)/.test(all);
+  let fam = base0.replace(/(PSMT|PS|MT|Std|Pro|LT|OTF)$/, '').replace(/(Bold|Italic|Regular|Light|Medium|Black|Heavy)+$/, '');
+  fam = fam.replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2').replace(/\s+/g, ' ').trim() || 'Noto Sans KR';
+  return { font: FONT_ALIASES[fam.toLowerCase()] || fam, bold, italic };
+}
+const ALIGN_IN = { left: 'left', center: 'center', right: 'right', 'justify-left': 'justify', 'justify-center': 'justifyCenter', 'justify-right': 'justifyRight', 'justify-all': 'justifyAll' };
+
+/**
+ * A Photoshop text layer → our editable text layer. Until its text is changed it keeps showing the
+ * picture Photoshop saved (fonts may differ here), placed exactly where the PSD had it.
+ */
+function textLayerFromPsd(c, common) {
+  const T = c.text;
+  const [xx, xy, yx, yy, tx, ty] = T.transform || [1, 0, 0, 1, c.left || 0, c.top || 0];
+  const sx = Math.hypot(xx, xy) || 1;
+  const sy = Math.hypot(yx, yy) || 1;
+  const rotation = Math.round(((Math.atan2(xy, xx) * 180) / Math.PI) * 100) / 100;
+  const runs0 = T.styleRuns?.length ? T.styleRuns : [{ length: (T.text || '').length, style: {} }];
+  const eff = (r) => ({ ...(T.style || {}), ...(r?.style || {}) });
+  const st = eff(runs0[0]);
+  const ps = { ...(T.paragraphStyle || {}), ...(T.paragraphStyleRuns?.[0]?.style || {}) };
+  const f = psFont(st.font?.name);
+  const size = Math.max(1, Math.round((st.fontSize || 12) * sy * 10) / 10);
+  const lead = st.autoLeading === false && st.leading ? (st.leading * sy) / size : ps.autoLeading || 1.2;
+  const content = String(T.text || '').replace(/\r\n?/g, '\n').replace(/\n$/, '');
+  const color = colorHex(st.fillColor || { r: 0, g: 0, b: 0 });
+  const t = newText({ font: f.font, size, bold: f.bold || !!st.fauxBold, italic: f.italic || !!st.fauxItalic, align: ALIGN_IN[ps.justification] || 'left' }, color, {
+    content,
+    lineHeight: Math.round(lead * 1000) / 1000,
+    letterSpacing: ((st.tracking || 0) / 1000) * size,
+    hScale: Math.round((st.horizontalScale ?? 1) * 100),
+    vScale: Math.round((st.verticalScale ?? 1) * 100),
+    baseline: (st.baselineShift || 0) * sy,
+    underline: !!st.underline,
+    strike: !!st.strikethrough,
+    caps: st.fontCaps === 2 ? 'all' : st.fontCaps === 1 ? 'small' : 'none',
+    vertical: T.orientation === 'vertical',
+    ...(T.antiAlias ? { aa: { none: 'none', sharp: 'sharp', crisp: 'crisp', strong: 'strong', smooth: 'smooth' }[T.antiAlias] || 'sharp' } : {}),
+  });
+  if (ps.firstLineIndent || ps.startIndent || ps.endIndent) t.indent = { left: (ps.startIndent || 0) * sx, right: (ps.endIndent || 0) * sx, first: (ps.firstLineIndent || 0) * sx };
+  if (ps.spaceBefore) t.spaceBefore = ps.spaceBefore * sy;
+  if (ps.spaceAfter) t.spaceAfter = ps.spaceAfter * sy;
+  // parts of the text in another font, size or colour
+  if (runs0.length > 1) {
+    const runs = [];
+    let any = false;
+    for (const r of runs0) {
+      const e = eff(r);
+      const o = { n: r.length };
+      const rf = psFont(e.font?.name);
+      if (rf.font !== f.font) o.font = rf.font;
+      if ((rf.bold || !!e.fauxBold) !== t.bold) o.bold = rf.bold || !!e.fauxBold;
+      if ((rf.italic || !!e.fauxItalic) !== t.italic) o.italic = rf.italic || !!e.fauxItalic;
+      const rs = (e.fontSize || 12) * sy;
+      if (Math.abs(rs - size) > 0.05) o.sizeK = Math.round((rs / size) * 1000) / 1000;
+      const rc = colorHex(e.fillColor || { r: 0, g: 0, b: 0 });
+      if (rc !== color) o.color = rc;
+      if ((e.tracking || 0) !== (st.tracking || 0)) o.tracking = e.tracking || 0;
+      if (!!e.underline !== t.underline) o.underline = !!e.underline;
+      if (!!e.strikethrough !== t.strike) o.strike = !!e.strikethrough;
+      if ((e.baselineShift || 0) !== (st.baselineShift || 0)) o.baseline = (e.baselineShift || 0) * sy;
+      if (Object.keys(o).length > 1) any = true;
+      runs.push(o);
+    }
+    if (any) t.runs = runs;
+  }
+  if (T.warp?.style && T.warp.style !== 'none') t.warp = { style: T.warp.style, bend: Math.round(T.warp.value ?? 0), h: Math.round(T.warp.perspective ?? 0), v: Math.round(T.warp.perspectiveOther ?? 0), vertical: T.warp.rotate === 'vertical' };
+  // where the box sits: (tx, ty) is the first baseline's start for point text, the box origin for paragraph text
+  let bx;
+  let by;
+  const probe = { kind: 'text', text: t, rotation: 0, x: 0, y: 0 };
+  if (T.shapeType === 'box' && Array.isArray(T.boxBounds)) {
+    const [l0, t0, r0, b0] = T.boxBounds;
+    t.box = { w: Math.max(1, (r0 - l0) * sx), h: Math.max(1, (b0 - t0) * sy) };
+    bx = l0 * sx;
+    by = t0 * sy;
+  } else {
+    let W = 1;
+    try {
+      W = textBox(probe).w;
+    } catch { /* measured later */ }
+    const lh = size * t.lineHeight;
+    const base0 = (lh - size) / 2 + size * 0.88;
+    const al = t.align;
+    bx = al === 'center' || al === 'justifyCenter' ? -W / 2 : al === 'right' || al === 'justifyRight' ? -W : 0;
+    by = -base0;
+  }
+  let box = { w: 1, h: 1 };
+  try {
+    box = textBox(probe);
+  } catch { /* fonts not ready: approximate */ }
+  const a = (rotation * Math.PI) / 180;
+  const cxl = bx + box.w / 2;
+  const cyl = by + box.h / 2;
+  const cx = tx + cxl * Math.cos(a) - cyl * Math.sin(a);
+  const cy = ty + cxl * Math.sin(a) + cyl * Math.cos(a);
+  const l = newLayer('text', { ...common, name: c.name || content.slice(0, 30) || '텍스트', text: t, rotation, x: Math.round((cx - box.w / 2) * 100) / 100, y: Math.round((cy - box.h / 2) * 100) / 100 });
+  if (c.canvas) l.psdPicture = { canvas: c.canvas, dx: (c.left || 0) - l.x, dy: (c.top || 0) - l.y, key: psdTextKey(l) };
+  return l;
 }
 
 // ---------------------------------------------------------------- PSD read
@@ -297,7 +563,7 @@ export function docFromPsd(buffer, name) {
       const common = {
         name: c.name || '레이어', visible: !c.hidden, opacity: c.opacity ?? 1, fillOpacity: c.fillOpacity ?? 1, blend: blendIn(c.blendMode), parent,
         clip: !!c.clipping, lockAlpha: !!(c.protected?.transparency || c.transparencyProtected), lockPixels: !!c.protected?.composite, lockPos: !!c.protected?.position,
-        color: c.layerColor || 'none', fx: fxFromPsd(c.effects),
+        color: c.layerColor || 'none', fx: fxFromPsd(c.effects), ...blendOptsFromPsd(c),
       };
       let l;
       if (c.children) {
@@ -308,6 +574,7 @@ export function docFromPsd(buffer, name) {
         doc.layers.splice(doc.index(l.id), 1);
         doc.layers.push(l);
         l.mask = maskFromPsd(doc, c.mask);
+        if (c.vectorMask?.paths?.length) l.vmask = { subpaths: pathsFromPsd(c.vectorMask.paths), enabled: !c.vectorMask.disable, invert: !!c.vectorMask.invert, linked: true };
         continue;
       }
       if (c.adjustment) {
@@ -339,15 +606,20 @@ export function docFromPsd(buffer, name) {
         l = newLayer('raster', { ...common, canvas: c.canvas, x: c.left || 0, y: c.top || 0 });
         // turned into a smart object once its embedded file is decoded (async, see finishPsd)
         doc._pendingSmart.push({ id: l.id, placed: c.placedLayer, data: linked.get(c.placedLayer.id).data });
-      } else {
-        if (!c.canvas) continue;
-        if (c.placedLayer?.filter?.list?.length) notes.smartFilters++;
-        l = newLayer('raster', { ...common, canvas: c.canvas, x: c.left || 0, y: c.top || 0 });
-        if (c.text) {
+      } else if (c.text) {
+        try {
+          l = textLayerFromPsd(c, common);
           notes.text++;
-          l.name = c.name || c.text.text?.slice(0, 30) || '텍스트';
+        } catch (err) {
+          console.warn('PSD text layer', err);
+          if (!c.canvas) continue;
+          l = newLayer('raster', { ...common, canvas: c.canvas, x: c.left || 0, y: c.top || 0 });
           l.psdText = { text: c.text.text, font: c.text.style?.font?.name, size: c.text.style?.fontSize, color: c.text.style?.fillColor ? colorHex(c.text.style.fillColor) : null };
         }
+      } else {
+        if (c.placedLayer?.filter?.list?.length) notes.smartFilters++;
+        // an empty layer (nothing painted yet) stays an empty layer
+        l = newLayer('raster', { ...common, canvas: c.canvas || null, x: c.canvas ? c.left || 0 : 0, y: c.canvas ? c.top || 0 : 0 });
       }
       l.mask = maskFromPsd(doc, c.mask);
       if (c.vectorMask?.paths?.length) l.vmask = { subpaths: pathsFromPsd(c.vectorMask.paths), enabled: !c.vectorMask.disable, invert: !!c.vectorMask.invert, linked: true };
@@ -360,13 +632,18 @@ export function docFromPsd(buffer, name) {
   doc.selectedIds = doc.activeId ? [doc.activeId] : [];
   const msg = [];
   if (notes.adjust) msg.push(`지원하지 않는 조정 레이어 ${notes.adjust}개는 빠졌습니다`);
-  if (notes.text) msg.push(`글자 레이어 ${notes.text}개는 이미지로 열었습니다 (글꼴 차이 때문에 모양을 그대로 두려고)`);
+  if (notes.text) msg.push(`글자 레이어 ${notes.text}개는 고칠 수 있는 글자로 열었습니다 (고치기 전까지는 포토샵에서 보던 모양 그대로 보입니다)`);
   if (notes.smartFilters) msg.push(`고급 필터가 있는 고급 개체 ${notes.smartFilters}개는 필터가 적용된 이미지로 열었습니다`);
   doc.importNote = msg.join(' · ');
   if (psd.imageResources?.gridAndGuidesInformation?.guides) {
     doc.guides = psd.imageResources.gridAndGuidesInformation.guides.map((g) => ({ axis: g.direction === 'horizontal' ? 'y' : 'x', pos: g.location }));
   }
   if (psd.imageResources?.resolutionInfo) doc.resolution = Math.round(psd.imageResources.resolutionInfo.horizontalResolution || 72);
+  if (psd.imageResources?.globalAngle != null) doc.globalAngle = psd.imageResources.globalAngle;
+  if (psd.imageResources?.globalAltitude != null) doc.globalAltitude = psd.imageResources.globalAltitude;
+  // Photoshop's Background layer (English files) is the 배경 here
+  const bottom = doc.layers[0];
+  if (bottom && !bottom.parent && bottom.kind === 'raster' && /^background$/i.test(bottom.name)) bottom.name = '배경';
   return doc;
 }
 
@@ -399,7 +676,7 @@ export function docToPsd(doc, { editableText = false, fg = '#000000', bg = '#fff
     const base = {
       name: l.name, opacity: l.opacity, fillOpacity: l.fillOpacity ?? 1, hidden: !l.visible, blendMode: l.blend, clipping: !!l.clip,
       transparencyProtected: !!l.lockAlpha, protected: { transparency: !!l.lockAlpha, composite: !!l.lockPixels, position: !!l.lockPos },
-      layerColor: l.color && l.color !== 'none' ? l.color : undefined, effects: l.kind === 'adjust' ? undefined : fxToPsd(l.fx, fg, bg),
+      layerColor: l.color && l.color !== 'none' ? l.color : undefined, effects: l.kind === 'adjust' ? undefined : fxToPsd(l.fx, fg, bg), ...blendOptsToPsd(l),
       mask: maskToPsd(doc, l.mask),
       vectorMask: l.vmask?.subpaths?.length ? { paths: pathsToPsd(l.vmask.subpaths.map((sp) => ({ ...sp, knots: sp.knots.map((k) => ({ ...k, in: [k.in[0] + (l.vmask.dx || 0), k.in[1] + (l.vmask.dy || 0)], p: [k.p[0] + (l.vmask.dx || 0), k.p[1] + (l.vmask.dy || 0)], out: [k.out[0] + (l.vmask.dx || 0), k.out[1] + (l.vmask.dy || 0)] })) }))), invert: !!l.vmask.invert, disable: l.vmask.enabled === false } : undefined,
     };
@@ -413,7 +690,8 @@ export function docToPsd(doc, { editableText = false, fg = '#000000', bg = '#fff
       return { ...base, adjustment: a };
     }
     const c = doc.content(l);
-    if (!c) return null;
+    // an empty layer is kept as an empty layer
+    if (!c) return l.kind === 'raster' ? base : null;
     if (l.kind === 'fill') flat.fill++;
     if (l.kind === 'smart') flat.smart++;
     if (l.kind === 'shape') flat.shape++;
@@ -446,6 +724,7 @@ export function docToPsd(doc, { editableText = false, fg = '#000000', bg = '#fff
     width: doc.width, height: doc.height, canvas: doc.flatten({ fg, bg }), children,
     imageResources: {
       resolutionInfo: { horizontalResolution: doc.resolution || 72, horizontalResolutionUnit: 'PPI', widthUnit: 'Inches', verticalResolution: doc.resolution || 72, verticalResolutionUnit: 'PPI', heightUnit: 'Inches' },
+      globalAngle: Math.round(doc.globalAngle ?? 120), globalAltitude: Math.round(doc.globalAltitude ?? 30),
       ...(doc.guides?.length ? { gridAndGuidesInformation: { grid: { horizontal: 18 * 32, vertical: 18 * 32 }, guides: doc.guides.map((g) => ({ location: g.pos, direction: g.axis === 'y' ? 'horizontal' : 'vertical' })) } } : {}),
     },
   };
@@ -455,7 +734,7 @@ export function docToPsd(doc, { editableText = false, fg = '#000000', bg = '#fff
 
 // ---------------------------------------------------------------- documents ↔ plain data (projects, autosave)
 
-const PLAIN_SKIP = new Set(['canvas', 'mask', 'smartSrc', 'smartDoc']);
+const PLAIN_SKIP = new Set(['canvas', 'mask', 'smartSrc', 'smartDoc', 'psdPicture', 'filterMask']);
 
 /** A JSON-able copy of a document; `enc(canvas)` turns canvases into data URLs or blobs. */
 export async function serializeDoc(doc, enc) {
@@ -467,28 +746,38 @@ export async function serializeDoc(doc, enc) {
     o.mask = l.mask ? { ...l.mask, canvas: await enc(l.mask.canvas) } : null;
     o.smartSrc = await enc(l.smartSrc);
     o.smartDoc = l.smartDoc ? await serializeDoc(l.smartDoc, enc) : null;
+    // a PSD text layer's own picture, while its text is unchanged
+    if (l.psdPicture?.canvas && l.kind === 'text') o.psdPicture = { ...l.psdPicture, canvas: await enc(l.psdPicture.canvas) };
+    if (l.filterMask?.canvas) o.filterMask = { ...l.filterMask, canvas: await enc(l.filterMask.canvas) };
     layers.push(o);
   }
   const channels = [];
   for (const ch of doc.channels || []) channels.push({ ...ch, canvas: await enc(ch.canvas) });
   return {
+    id: doc.id, globalAngle: doc.globalAngle ?? 120, globalAltitude: doc.globalAltitude ?? 30,
     name: doc.name, width: doc.width, height: doc.height, activeId: doc.activeId, selectedIds: doc.selectedIds, sourceMediaId: doc.sourceMediaId,
-    guides: doc.guides, paths: doc.paths, workPath: doc.workPath, notes: doc.notes, counts: doc.counts, samplers: doc.samplers, comps: doc.comps, frames: doc.frames || [], frameLoop: doc.frameLoop || 0, mode: doc.mode, resolution: doc.resolution, info: doc.info || null, hideFx: !!doc.hideFx,
+    guides: doc.guides, paths: doc.paths, workPath: doc.workPath, charStyles: doc.charStyles || [], paraStyles: doc.paraStyles || [], notes: doc.notes, counts: doc.counts, samplers: doc.samplers, comps: doc.comps, frames: doc.frames || [], frameLoop: doc.frameLoop || 0, mode: doc.mode, resolution: doc.resolution, info: doc.info || null, hideFx: !!doc.hideFx,
     channels, layers,
   };
 }
 
-export async function deserializeDoc(o, dec) {
+export async function deserializeDoc(o, dec, { keepId = false } = {}) {
   const doc = new PhotoDoc({ name: o.name, width: o.width, height: o.height, background: null });
   for (const l of o.layers) {
     doc.layers.push({
       ...newLayer(l.kind), ...l, fx: normalizeFx(l.fx), canvas: await dec(l.canvas), mask: l.mask ? { ...l.mask, canvas: await dec(l.mask.canvas) } : null,
       smartSrc: await dec(l.smartSrc), smartDoc: l.smartDoc ? await deserializeDoc(l.smartDoc, dec) : null, rev: 0,
+      psdPicture: l.psdPicture?.canvas ? { ...l.psdPicture, canvas: await dec(l.psdPicture.canvas) } : null,
+      filterMask: l.filterMask?.canvas ? { ...l.filterMask, canvas: await dec(l.filterMask.canvas) } : null,
     });
   }
+  // autosave keeps the document's id, so a smart object opened for editing still finds its parent
+  if (keepId && o.id) doc.id = o.id;
+  doc.globalAngle = o.globalAngle ?? 120;
+  doc.globalAltitude = o.globalAltitude ?? 30;
   doc.activeId = o.activeId || doc.layers[doc.layers.length - 1]?.id || null;
   doc.selectedIds = o.selectedIds?.length ? o.selectedIds : doc.activeId ? [doc.activeId] : [];
-  for (const k of ['guides', 'paths', 'notes', 'counts', 'samplers', 'comps', 'frames']) doc[k] = o[k] || [];
+  for (const k of ['guides', 'paths', 'notes', 'counts', 'samplers', 'comps', 'frames', 'charStyles', 'paraStyles']) doc[k] = o[k] || [];
   doc.frameLoop = o.frameLoop || 0;
   doc.workPath = o.workPath || null;
   doc.mode = o.mode || 'rgb';
@@ -623,8 +912,10 @@ export async function loadSession() {
   if (!s?.docs?.length) return null;
   await patternsIn(s.patterns, blobCanvas);
   const docs = [];
+  const ids = new Set();
   for (const d of s.docs) {
-    const doc = await deserializeDoc(d, blobCanvas);
+    const doc = await deserializeDoc(d, blobCanvas, { keepId: !ids.has(d.id) });
+    ids.add(doc.id);
     doc.smartParent = d.smartParent || null;
     doc.saved = true;
     docs.push(doc);

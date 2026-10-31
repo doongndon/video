@@ -65,13 +65,45 @@ export function invert(doc) {
   return hasPixels(c) ? { canvas: c } : null;
 }
 
-export function feather(doc, r) {
+/**
+ * Feather by radius r. Like Photoshop (unless `atBounds`), the canvas edges stay put: the selection
+ * is taken to go on beyond them, so a selection touching an edge does not fade there.
+ */
+export function feather(doc, r, atBounds = false) {
   if (!doc.selection) return null;
+  const src = doc.selection.canvas;
+  const W = doc.width;
+  const H = doc.height;
   const c = blank(doc);
   const g = c.getContext('2d');
+  if (atBounds) {
+    g.filter = `blur(${r / 2}px)`;
+    g.drawImage(src, 0, 0);
+    return hasPixels(c) ? { canvas: c } : null;
+  }
+  // repeat the edge rows and columns outwards before blurring
+  const p = Math.ceil(r * 1.5) + 2;
+  const big = makeCanvas(W + 2 * p, H + 2 * p);
+  const bg = big.getContext('2d');
+  bg.imageSmoothingEnabled = false;
+  bg.drawImage(src, p, p);
+  bg.drawImage(src, 0, 0, 1, H, 0, p, p, H);
+  bg.drawImage(src, W - 1, 0, 1, H, W + p, p, p, H);
+  bg.drawImage(big, 0, p, W + 2 * p, 1, 0, 0, W + 2 * p, p);
+  bg.drawImage(big, 0, H + p - 1, W + 2 * p, 1, 0, H + p, W + 2 * p, p);
   g.filter = `blur(${r / 2}px)`;
-  g.drawImage(doc.selection.canvas, 0, 0);
-  return { canvas: c };
+  g.drawImage(big, -p, -p);
+  return hasPixels(c) ? { canvas: c } : null;
+}
+
+/** A selection canvas with its partly selected pixels made all or nothing (no anti-aliasing). */
+export function hardEdge(c) {
+  const g = c.getContext('2d');
+  const img = g.getImageData(0, 0, c.width, c.height);
+  const d = img.data;
+  for (let i = 3; i < d.length; i += 4) d[i] = d[i] >= 128 ? 255 : 0;
+  g.putImageData(img, 0, 0);
+  return c;
 }
 
 /** Grow (n > 0) or shrink (n < 0) by about n pixels. */
@@ -100,8 +132,12 @@ export function fromLayer(doc, layer) {
   return hasPixels(c) ? { canvas: c } : null;
 }
 
-/** Magic wand: pixels similar to the one at (x, y). source: doc-size canvas to sample. */
-export function magicWand(doc, source, x, y, { tolerance = 32, contiguous = true } = {}) {
+/**
+ * Magic wand: pixels similar to the one at (x, y). source: doc-size canvas to sample. sample: the
+ * size of the square averaged for the colour clicked (Photoshop's Sample Size, 1 = point); antialias
+ * softens the outline by about a pixel.
+ */
+export function magicWand(doc, source, x, y, { tolerance = 32, contiguous = true, sample = 1, antialias = false } = {}) {
   const w = doc.width;
   const h = doc.height;
   x = Math.floor(x);
@@ -109,11 +145,26 @@ export function magicWand(doc, source, x, y, { tolerance = 32, contiguous = true
   if (x < 0 || y < 0 || x >= w || y >= h) return null;
   const d = source.getContext('2d').getImageData(0, 0, w, h).data;
   const mask = new Uint8Array(w * h);
-  const o0 = (y * w + x) * 4;
-  const sr = d[o0];
-  const sg = d[o0 + 1];
-  const sb = d[o0 + 2];
-  const sa = d[o0 + 3];
+  let sr = 0;
+  let sg = 0;
+  let sb = 0;
+  let sa = 0;
+  let cnt = 0;
+  const k = Math.max(0, Math.floor((sample || 1) / 2));
+  for (let yy = Math.max(0, y - k); yy <= Math.min(h - 1, y + k); yy++) {
+    for (let xx = Math.max(0, x - k); xx <= Math.min(w - 1, x + k); xx++) {
+      const o = (yy * w + xx) * 4;
+      sr += d[o];
+      sg += d[o + 1];
+      sb += d[o + 2];
+      sa += d[o + 3];
+      cnt++;
+    }
+  }
+  sr /= cnt;
+  sg /= cnt;
+  sb /= cnt;
+  sa /= cnt;
   const near = (o) => Math.max(Math.abs(d[o] - sr), Math.abs(d[o + 1] - sg), Math.abs(d[o + 2] - sb), Math.abs(d[o + 3] - sa)) <= tolerance;
   if (contiguous) {
     const stack = [x, y];
@@ -142,7 +193,36 @@ export function magicWand(doc, source, x, y, { tolerance = 32, contiguous = true
   } else {
     for (let i = 0; i < w * h; i++) if (near(i * 4)) mask[i] = 1;
   }
-  return maskToCanvas(mask, w, h);
+  if (contiguous && !mask[y * w + x]) return null;
+  return antialias ? softMaskCanvas(mask, w, h) : maskToCanvas(mask, w, h);
+}
+
+/** A 0/1 mask as a selection canvas with a one-pixel soft edge (a 1-2-1 tent across the outline). */
+function softMaskCanvas(mask, w, h) {
+  const c = makeCanvas(w, h);
+  const g = c.getContext('2d');
+  const img = g.createImageData(w, h);
+  const out = img.data;
+  const at = (xx, yy) => mask[Math.min(h - 1, Math.max(0, yy)) * w + Math.min(w - 1, Math.max(0, xx))];
+  for (let yy = 0; yy < h; yy++) {
+    for (let xx = 0; xx < w; xx++) {
+      const i = yy * w + xx;
+      const m = mask[i];
+      // pixels away from the outline keep their value; only the outline is filtered
+      const edge = at(xx - 1, yy) !== m || at(xx + 1, yy) !== m || at(xx, yy - 1) !== m || at(xx, yy + 1) !== m;
+      if (!edge) {
+        out[i * 4 + 3] = m ? 255 : 0;
+        continue;
+      }
+      let v = 0;
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) v += at(xx + dx, yy + dy) * (dx ? 1 : 2) * (dy ? 1 : 2);
+      }
+      out[i * 4 + 3] = Math.round((v / 16) * 255);
+    }
+  }
+  g.putImageData(img, 0, 0);
+  return c;
 }
 
 export function maskToCanvas(mask, w, h) {

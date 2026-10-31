@@ -1,14 +1,14 @@
 // Photo editor panels: toolbar, tool options bar, layers, colour, properties and history.
 
 import { h, clamp } from '../util.js';
-import { showMenu, toast, promptDialog } from '../ui/common.js';
+import { showMenu, toast, promptDialog, loadPref, savePref } from '../ui/common.js';
 import { icon } from '../ui/icons.js';
 import { openFontPicker } from '../ui/font-picker.js';
 import { fontLabel } from '../fonts.js';
-import { makeCanvas, SHAPES, LAYER_COLORS, FILL_TYPES, PhotoDoc } from './doc.js';
+import { makeCanvas, SHAPES, LAYER_COLORS, FILL_TYPES, PhotoDoc, psdTextKey } from './doc.js';
 import { GRADIENTS, GRADIENT_STYLES, gradientSwatch, listPatterns } from './resources.js';
 import { BLEND_GROUPS, PASS_THROUGH, blendName } from './blend.js';
-import { hasFx, FX_NAMES } from './styles.js';
+import { hasFx, FX_NAMES, instanceKeys } from './styles.js';
 
 const FX_ORDER = ['bevel', 'stroke', 'innerShadow', 'innerGlow', 'satin', 'colorOverlay', 'gradientOverlay', 'patternOverlay', 'outerGlow', 'dropShadow'];
 import { TOOLS, TOOL_BY_ID, TOOL_GROUPS } from './tools.js';
@@ -65,10 +65,11 @@ function toolFlyout(P, onPick) {
 export function buildToolbar(P) {
   const groupPick = new Map(TOOL_GROUPS.map((g) => [g[0], g[0]]));
   const el = h('div.ph-tools', { role: 'toolbar', 'aria-label': '도구' });
-  const swFg = h('button.ph-sw.fg', { title: '전경색 (누르면 색 패널)', 'aria-label': '전경색', onclick: () => P.showPanel('color', 'fg') });
-  const swBg = h('button.ph-sw.bg', { title: '배경색', 'aria-label': '배경색', onclick: () => P.showPanel('color', 'bg') });
-  const swap = h('button.ph-swap', { title: '전경/배경색 바꾸기 (X)', 'aria-label': '색 바꾸기', onclick: () => P.swapColors() }, '⇄');
-  const def = h('button.ph-def', { title: '기본 색 (D)', 'aria-label': '기본 색', onclick: () => P.defaultColors() }, '◩');
+  // like Photoshop, the swatches open the Color Picker (colorpicker.js); the Color panel otherwise
+  const swFg = h('button.ph-sw.fg', { title: '전경색 설정 (색상 피커)', 'aria-label': '전경색', onclick: () => (P.colorPicker ? P.colorPicker('fg') : P.showPanel('color', 'fg')) });
+  const swBg = h('button.ph-sw.bg', { title: '배경색 설정 (색상 피커)', 'aria-label': '배경색', onclick: () => (P.colorPicker ? P.colorPicker('bg') : P.showPanel('color', 'bg')) });
+  const swap = h('button.ph-swap', { title: '전경/배경색 바꾸기 (X)', 'aria-label': '색 바꾸기', onclick: () => P.swapColors() }, icon('swapColors', 12));
+  const def = h('button.ph-def', { title: '기본 색 (D)', 'aria-label': '기본 색', onclick: () => P.defaultColors() }, icon('defaultColors', 12));
   const qm = h('button.ph-tool.ph-qm', { title: '빠른 마스크 모드로 편집 (Q) · 두 번 눌러 옵션', 'aria-label': '빠른 마스크', onclick: () => P.cmd.quickMask?.(), ondblclick: () => P.cmd.quickMaskOptions?.() }, icon('quickMask', 18));
   const syncQm = () => qm.classList.toggle('on', !!P.doc?.quickMask);
   const btns = [];
@@ -218,6 +219,11 @@ export function buildOptionsBar(P) {
       }
     }
     // tool-specific actions
+    if (P.transform && P.transformBar) {
+      // the transform's own options bar (transform2.js: reference point, numbers, warp grid…)
+      el.replaceChildren(...P.transformBar(render));
+      return;
+    }
     if (P.transform) {
       const T = P.transform;
       const n = T.numbers();
@@ -249,13 +255,13 @@ export function buildOptionsBar(P) {
           }
         }
       } else {
-        ctrls.push(numIn2('x', 'X', 'px'), numIn2('y', 'Y', 'px'), numIn2('w', '폭', '%', 0.1), h('label.ph-opt', link, h('span', '🔗')), numIn2('h', '높이', '%', 0.1), numIn2('angle', '회전', '°', 0.1), numIn2('skew', '기울기', '°', 0.1));
+        ctrls.push(numIn2('x', 'X', 'px'), numIn2('y', 'Y', 'px'), numIn2('w', '폭', '%', 0.1), h('label.ph-opt', { title: '폭·높이 비율 고정' }, link, icon('link', 13)), numIn2('h', '높이', '%', 0.1), numIn2('angle', '회전', '°', 0.1), numIn2('skew', '기울기', '°', 0.1));
       }
-      ctrls.push(h('button.primary.small', { onclick: () => P.applyTransform() }, '✓ 적용'), h('button.small', { onclick: () => P.cancelTransform() }, '✕ 취소'));
+      ctrls.push(h('button.primary.small', { onclick: () => P.applyTransform() }, icon('check', 13), ' 적용'), h('button.small', { onclick: () => P.cancelTransform() }, icon('close', 13), ' 취소'));
       el.replaceChildren(h('span.ph-tname', icon('move', 16), '변형'), ...ctrls);
       return;
-    } else if (t.id === 'crop') {
-      ctrls.push(h('button.primary.small', { onclick: () => t.apply(P) }, '✓ 자르기'), h('button.small', { onclick: () => { t.activate(P); } }, '되돌리기'));
+    } else if (t.id === 'crop' && !t.optionButtons) {
+      ctrls.push(h('button.primary.small', { onclick: () => t.apply(P) }, icon('check', 13), ' 자르기'), h('button.small', { onclick: () => { t.activate(P); } }, '되돌리기'));
     } else if (t.id === 'clone') {
       ctrls.push(h('button.small', { onclick: () => { P.cloneSourceNext = true; toast('복제할 원본 위치를 누르세요'); }, title: '휴대폰: 이 버튼을 누른 뒤 원본 위치를 누르세요' }, '원본 정하기'));
     } else if (['pen', 'freePen', 'pathSelect', 'directSelect', 'addAnchor', 'deleteAnchor', 'convertPoint'].includes(t.id)) {
@@ -263,17 +269,18 @@ export function buildOptionsBar(P) {
         h('button.small', { onclick: () => P.cmd.pathToSelection() }, '선택 영역'),
         h('button.small', { onclick: () => P.cmd.addVectorMask('path') }, '마스크'),
         h('button.small', { onclick: () => P.cmd.pathToShape?.() }, '모양'),
-        P.doc?.workPath ? h('button.small', { onclick: () => P.cmd.savePath() }, '패스 저장') : null);
+        ...(P.doc?.workPath ? [h('button.small', { onclick: () => P.cmd.savePath() }, '패스 저장')] : []));
     } else if (TOOL_BY_ID[t.id]?.optionsFrom === 'text') {
-      ctrls.push(h('button.small', { onclick: () => (P.doc?.active?.kind === 'text' ? P.warpText() : toast('글자 레이어를 고르세요')) }, '⌒ 뒤틀기'), h('button.small', { onclick: () => P.showPanel('char') }, '문자 패널'));
+      ctrls.push(h('button.small', { onclick: () => (P.doc?.active?.kind === 'text' ? P.warpText() : toast('글자 레이어를 고르세요')) }, '텍스트 뒤틀기'), h('button.small', { onclick: () => P.showPanel('char') }, '문자 패널'));
     } else if (t.optionButtons) {
       ctrls.push(...t.optionButtons(P).filter(Boolean));
     }
     if (P.symmetryButton && ['brush', 'pencil', 'eraser', 'mixer'].includes(t.id)) ctrls.push(P.symmetryButton());
     if (P.doc?.active?.mask && ['brush', 'pencil', 'eraser', 'bucket', 'gradient'].includes(t.id)) {
-      ctrls.push(h('span.ph-opt.ph-hint', P.editMask ? '◐ 마스크에 칠하는 중 (검정=숨김, 흰색=보임)' : ''));
+      ctrls.push(h('span.ph-opt.ph-hint', P.editMask ? '마스크에 칠하는 중 (검정=숨김, 흰색=보임)' : ''));
     }
-    el.replaceChildren(h('span.ph-tname', icon(t.icon, 16), t.name), ...ctrls);
+    // leadButtons: controls Photoshop shows first (the brush preset picker)
+    el.replaceChildren(h('span.ph-tname', icon(t.icon, 16), t.name), ...(t.leadButtons?.(P) || []).filter(Boolean), ...ctrls);
   };
   P.on('tool', render);
   P.on('opts', render);
@@ -286,32 +293,40 @@ export function buildOptionsBar(P) {
 // ---------------------------------------------------------------- layers
 
 const thumbCache = new WeakMap();
+/** Layers panel ▸ Panel Options ▸ thumbnail size (px; 0: none). */
+export const THUMB_SIZES = [[0, '없음'], [24, '작게'], [40, '중간'], [64, '크게']];
+let thumbSize = 40;
+try {
+  const v = +loadPref('photo.layerThumb', 40);
+  if (THUMB_SIZES.some(([n]) => n === v)) thumbSize = v;
+} catch { /* default */ }
 function thumb(P, l, which = 'content') {
-  const c = h('canvas.ph-thumb', { width: 40, height: 40 });
+  const S = thumbSize || 40;
+  const c = h('canvas.ph-thumb', { width: S, height: S, style: S !== 40 ? { width: `${S}px`, height: `${S}px` } : null });
   const doc = P.doc;
-  const key = `${l.rev}:${which}:${doc.width}x${doc.height}`;
+  const key = `${l.rev}:${which}:${doc.width}x${doc.height}:${S}`;
   const cache = thumbCache.get(l)?.[which];
   if (cache?.key === key && cache.doc === doc.id) {
     c.getContext('2d').drawImage(cache.c, 0, 0);
     return c;
   }
   const g = c.getContext('2d');
-  const s = Math.min(40 / doc.width, 40 / doc.height);
+  const s = Math.min(S / doc.width, S / doc.height);
   const w = doc.width * s;
   const hh = doc.height * s;
   g.save();
-  g.translate((40 - w) / 2, (40 - hh) / 2);
+  g.translate((S - w) / 2, (S - hh) / 2);
   if (which === 'mask' && l.mask) {
     g.fillStyle = '#000';
     g.fillRect(0, 0, w, hh);
-    const t = makeCanvas(40, 40);
+    const t = makeCanvas(S, S);
     const tg = t.getContext('2d');
     tg.scale(s, s);
     tg.drawImage(l.mask.canvas, l.mask.x, l.mask.y);
     tg.setTransform(1, 0, 0, 1, 0, 0);
     tg.globalCompositeOperation = 'source-in';
     tg.fillStyle = '#fff';
-    tg.fillRect(0, 0, 40, 40);
+    tg.fillRect(0, 0, S, S);
     g.drawImage(t, 0, 0);
   } else if (which === 'vmask' && l.vmask) {
     g.fillStyle = '#777';
@@ -328,17 +343,26 @@ function thumb(P, l, which = 'content') {
   } else if (l.kind === 'adjust') {
     g.fillStyle = '#4a4f58';
     g.fillRect(0, 0, w, hh);
+    // Photoshop's adjustment layer mark: a half-filled circle
+    const r = S * 0.22;
+    g.strokeStyle = '#fff';
     g.fillStyle = '#fff';
-    g.font = 'bold 18px sans-serif';
-    g.textAlign = 'center';
-    g.fillText('◐', w / 2, hh / 2 + 6);
+    g.lineWidth = Math.max(1, S / 24);
+    g.beginPath();
+    g.arc(w / 2, hh / 2, r, 0, Math.PI * 2);
+    g.stroke();
+    g.beginPath();
+    g.arc(w / 2, hh / 2, r, -Math.PI / 2, Math.PI / 2);
+    g.closePath();
+    g.fill();
   } else if (l.kind === 'group') {
     g.restore();
+    const k = S / 40;
     g.fillStyle = '#c9a54a';
-    g.fillRect(4, 10, 32, 22);
-    g.fillRect(4, 7, 13, 5);
+    g.fillRect(4 * k, 10 * k, 32 * k, 22 * k);
+    g.fillRect(4 * k, 7 * k, 13 * k, 5 * k);
     g.fillStyle = '#e4c870';
-    g.fillRect(4, 14, 32, 18);
+    g.fillRect(4 * k, 14 * k, 32 * k, 18 * k);
     g.save();
   } else {
     // checkerboard
@@ -355,20 +379,20 @@ function thumb(P, l, which = 'content') {
   g.restore();
   if (l.kind === 'smart') {
     g.fillStyle = '#fff';
-    g.fillRect(28, 28, 11, 11);
+    g.fillRect(S - 12, S - 12, 11, 11);
     g.strokeStyle = '#333';
-    g.strokeRect(28.5, 28.5, 10, 10);
+    g.strokeRect(S - 11.5, S - 11.5, 10, 10);
     g.fillStyle = '#333';
-    g.fillRect(31, 31, 5, 5);
+    g.fillRect(S - 9, S - 9, 5, 5);
   }
   if (l.kind === 'text') {
     g.fillStyle = 'rgba(0,0,0,.65)';
-    g.fillRect(0, 26, 14, 14);
+    g.fillRect(0, S - 14, 14, 14);
     g.fillStyle = '#fff';
     g.font = 'bold 11px sans-serif';
-    g.fillText('T', 3, 37);
+    g.fillText('T', 3, S - 3);
   }
-  const copy = makeCanvas(40, 40);
+  const copy = makeCanvas(S, S);
   copy.getContext('2d').drawImage(c, 0, 0);
   thumbCache.set(l, { ...(thumbCache.get(l) || {}), [which]: { key, c: copy, doc: doc.id } });
   return c;
@@ -393,7 +417,7 @@ export function buildLayersPanel(P) {
   const opRange = h('input', { type: 'range', min: 0, max: 100, 'aria-label': '불투명도' });
   const fillNum = h('input.ph-num', { type: 'number', min: 0, max: 100, 'aria-label': '칠', title: '칠 (효과는 그대로 두고 레이어 내용만 투명하게)' });
   const lockBtn = (kind, label, glyph) => h('button.small.ph-lock', { title: label, 'aria-label': label, 'data-lock': kind, onclick: () => P.cmd.lock(kind) }, glyph);
-  const locks = [lockBtn('alpha', '투명 픽셀 잠그기 (칠한 곳에만 칠하기)', '▦'), lockBtn('pixels', '이미지 픽셀 잠그기 (칠하기 막기)', '✎'), lockBtn('position', '위치 잠그기 (옮기기 막기)', '✥'), lockBtn('all', '모두 잠그기', icon('lock', 13))];
+  const locks = [lockBtn('alpha', '투명 픽셀 잠그기 (칠한 곳에만 칠하기)', icon('lockAlpha', 13)), lockBtn('pixels', '이미지 픽셀 잠그기 (칠하기 막기)', icon('brush', 13)), lockBtn('position', '위치 잠그기 (옮기기 막기)', icon('move', 13)), lockBtn('all', '모두 잠그기', icon('lock', 13))];
   const list = h('div.ph-layers', { role: 'tree', 'aria-label': '레이어', 'aria-multiselectable': 'true' });
   const footBtn = (ic, label, fn) => h('button.small', { title: label, 'aria-label': label, onclick: fn }, typeof ic === 'string' && ic.length > 2 ? icon(ic, 15) : ic);
   const menuAt = (e, items) => {
@@ -403,8 +427,8 @@ export function buildLayersPanel(P) {
   const foot = h('div.ph-lfoot',
     footBtn('link', '레이어 연결', () => (P.doc?.active?.linkId ? P.cmd.unlink() : P.cmd.link())),
     footBtn('fx', '레이어 스타일 추가', (e) => menuAt(e, [{ label: '혼합 옵션…', action: () => P.cmd.layerStyle('blending') }, '-', ...FX_ORDER.map((k) => ({ label: `${FX_NAMES[k]}…`, action: () => P.cmd.layerStyle(k) }))])),
-    footBtn('mask', '레이어 마스크 추가 (Alt: 모두 숨김)', (e) => P.cmd.addMask(e.altKey)),
-    footBtn('◐', '새 칠 또는 조정 레이어', (e) => menuAt(e, P.newFillOrAdjustMenu())),
+    footBtn('mask', '레이어 마스크 추가 (선택 영역이 있으면 그 부분만 보이게 · Alt: 숨기기)', (e) => (P.cmd.addMaskMode ? P.cmd.addMaskMode(e.altKey ? 'hideSel' : 'revealSel') : P.cmd.addMask(e.altKey))),
+    footBtn('fillAdjust', '새 칠 또는 조정 레이어', (e) => menuAt(e, P.newFillOrAdjustMenu())),
     footBtn('folderPlus', '새 그룹 (Ctrl+G: 고른 레이어로 그룹 만들기)', () => P.cmd.newGroup()),
     footBtn('plus', '새 레이어', () => P.cmd.newLayer()),
     footBtn('trash', '레이어 삭제', () => P.cmd.deleteLayer()));
@@ -424,7 +448,43 @@ export function buildLayersPanel(P) {
     fq.select();
   };
   let filterOn = false;
-  const el = h('div.ph-panel.layers', h('div.ph-lfilter', icon('zoom', 13), fq, fk), head, list, foot);
+  // the panel menu (≡): Photoshop's layers panel menu with Panel Options (thumbnail size)
+  const panelMenu = h('button.small.ph-lmenu', {
+    title: '레이어 패널 메뉴', 'aria-label': '레이어 패널 메뉴',
+    onclick: (e) => {
+      const r = e.currentTarget.getBoundingClientRect();
+      const C = P.cmd;
+      const no = !P.doc;
+      showMenu([
+        { label: '새 레이어…', disabled: no, action: () => C.newLayer() },
+        { label: '레이어 복제…', disabled: no, action: () => C.duplicateLayerDialog() },
+        { label: '레이어 삭제', disabled: no, action: () => C.deleteLayer() },
+        '-',
+        { label: '새 그룹…', disabled: no, action: () => C.newGroup() },
+        { label: '레이어에서 새 그룹…', disabled: no, action: () => C.groupLayers() },
+        '-',
+        { label: '고급 개체로 변환', disabled: no, action: () => C.convertToSmart() },
+        { label: '레이어 속성…', disabled: no, action: () => C.layerProperties() },
+        { label: '혼합 옵션…', disabled: no, action: () => C.layerStyle('blending') },
+        '-',
+        { label: '클리핑 마스크 만들기', key: 'Ctrl+Alt+G', disabled: no, action: () => C.toggleClip() },
+        { label: '아래로 병합', key: 'Ctrl+E', disabled: no, action: () => C.mergeDown() },
+        { label: '보이는 레이어 병합', key: 'Ctrl+Shift+E', disabled: no, action: () => C.mergeVisible() },
+        { label: '이미지 병합', disabled: no, action: () => C.flatten() },
+        '-',
+        { label: '패널 옵션: 축소판 크기', submenu: THUMB_SIZES.map(([n, label]) => ({
+          label, checked: thumbSize === n,
+          action: () => {
+            thumbSize = n;
+            savePref('photo.layerThumb', n);
+            render();
+          },
+        })) },
+        { label: '모든 그룹 닫기', disabled: no, action: () => { for (const x of P.doc.layers) if (x.kind === 'group') x.collapsed = true; P.emit('layers'); } },
+      ], r.left, r.bottom + 2);
+    },
+  }, icon('menu', 14));
+  const el = h('div.ph-panel.layers', h('div.ph-lfilter', icon('zoom', 13), fq, fk, panelMenu), head, list, foot);
 
   let opBefore = null;
   const setNum = (key, v, done) => {
@@ -447,6 +507,7 @@ export function buildLayersPanel(P) {
   opRange.addEventListener('input', () => setNum('opacity', +opRange.value, false));
   opRange.addEventListener('change', () => setNum('opacity', +opRange.value, true));
   opacity.addEventListener('change', () => setNum('opacity', +opacity.value, true));
+  fillNum.addEventListener('input', () => { if (fillNum.value !== '') setNum('fillOpacity', +fillNum.value, false); });
   fillNum.addEventListener('change', () => setNum('fillOpacity', +fillNum.value, true));
   const onBlend = () => {
     const d = P.doc;
@@ -455,6 +516,35 @@ export function buildLayersPanel(P) {
   };
 
   let drag = null;
+  let maskDrag = null;
+  // Double-clicks: the first click rebuilds the list (it selects the layer), so the browser never
+  // sees two clicks on one element. Each target carries a key (data-dbl); two clicks on the same key
+  // in quick succession run its action instead of the second click.
+  const dblActions = new Map();
+  let lastTap = { key: null, t: 0, x: 0, y: 0 };
+  const onDbl = (el, key, fn) => {
+    el.dataset.dbl = key;
+    dblActions.set(key, fn);
+    return el;
+  };
+  list.addEventListener('click', (e) => {
+    const el = e.target.closest?.('[data-dbl]');
+    const ctl = e.target.closest?.('button, input, select, textarea');
+    if (!el || (ctl && ctl !== el && el.contains(ctl))) {
+      lastTap = { key: null, t: 0, x: 0, y: 0 };
+      return;
+    }
+    const key = el.dataset.dbl;
+    const now = performance.now();
+    if (lastTap.key === key && now - lastTap.t < 450 && Math.hypot(e.clientX - lastTap.x, e.clientY - lastTap.y) < 8) {
+      lastTap = { key: null, t: 0, x: 0, y: 0 };
+      e.stopPropagation();
+      e.preventDefault();
+      dblActions.get(key)?.(e);
+      return;
+    }
+    lastTap = { key, t: now, x: e.clientX, y: e.clientY };
+  }, true);
   const rowsFor = (l, depth, rows, clipBaseName) => {
     const doc = P.doc;
     const sel = new Set([...(doc.selectedIds || []), doc.activeId]);
@@ -468,29 +558,56 @@ export function buildLayersPanel(P) {
     if (LAYER_COLOR_CSS[l.color]) eye.style.background = LAYER_COLOR_CSS[l.color];
     const twist = l.kind === 'group' ? h('button.ph-twist', { 'aria-label': l.collapsed ? '펼치기' : '접기', 'aria-expanded': String(!l.collapsed), onclick: (e) => { e.stopPropagation(); l.collapsed = !l.collapsed; P.emit('layers'); } }, l.collapsed ? '▸' : '▾') : null;
     const t = thumb(P, l);
-    t.title = 'Ctrl(⌘)+클릭: 이 레이어 모양대로 선택 · 두 번 클릭: 편집';
+    if (!thumbSize) t.style.display = 'none';
+    t.title = 'Ctrl(⌘)+클릭: 이 레이어 모양대로 선택 (Shift: 추가, Alt: 빼기, Shift+Alt: 교차) · 두 번 클릭: 편집';
     t.addEventListener('click', (e) => {
       if (e.ctrlKey || e.metaKey) {
         e.stopPropagation();
-        P.cmd.selectFromLayer(l, e.shiftKey ? 'add' : e.altKey ? 'sub' : 'new');
+        P.cmd.selectFromLayer(l, e.shiftKey && e.altKey ? 'inter' : e.shiftKey ? 'add' : e.altKey ? 'sub' : 'new');
         return;
       }
       P.editMask = false;
+      // back from looking at a mask alone (Alt+click on a mask)
+      if (P.showMaskOnly) {
+        P.showMaskOnly = null;
+        P.redraw();
+      }
     });
-    t.addEventListener('dblclick', (e) => {
-      e.stopPropagation();
+    onDbl(t, `${l.id}:thumb`, () => {
       if (l.kind === 'smart') P.cmd.editSmartContents(l);
       else if (l.kind === 'fill' || l.kind === 'adjust') P.showPanel('props');
+      else if (l.kind === 'text' && P.editText) P.editText(l);
       else P.cmd.layerStyle('blending');
     });
     const mt = l.mask ? thumb(P, l, 'mask') : null;
+    if (mt && !thumbSize) mt.style.display = 'none';
     if (mt) {
       mt.title = '마스크 편집 (검정으로 칠하면 숨김, 흰색은 보임) · Shift+클릭: 끄기/켜기 · Alt+클릭: 마스크만 보기';
       mt.classList.add('mask');
       mt.classList.toggle('editing', P.editMask && l.id === doc.activeId);
       mt.classList.toggle('disabled', !l.mask.enabled);
+      mt.title = '마스크 편집 (검정으로 칠하면 숨김, 흰색은 보임) · Shift+클릭: 끄기/켜기 · Alt+클릭: 마스크만 보기 · Ctrl+클릭: 선택 영역으로 · 다른 레이어로 끌기: 옮기기 (Alt: 복사)';
+      mt.draggable = true;
+      mt.addEventListener('dragstart', (e) => {
+        e.stopPropagation();
+        maskDrag = l.id;
+        drag = null;
+        e.dataTransfer.effectAllowed = 'copyMove';
+        e.dataTransfer.setData('text/plain', `${l.name} 마스크`);
+      });
+      mt.addEventListener('dragend', () => { maskDrag = null; });
+      onDbl(mt, `${l.id}:mask`, () => {
+        P.selectLayer(l.id);
+        P.editMask = true;
+        P.emit('layers');
+        P.showPanel('props');
+      });
       mt.addEventListener('click', (e) => {
         e.stopPropagation();
+        if (e.ctrlKey || e.metaKey) {
+          P.cmd.selectFromMask?.(l, e.shiftKey && e.altKey ? 'inter' : e.shiftKey ? 'add' : e.altKey ? 'sub' : 'new');
+          return;
+        }
         if (e.shiftKey) {
           P.run('마스크 켜기/끄기', () => { l.mask = { ...l.mask, enabled: !l.mask.enabled }; doc.touch(l); });
           return;
@@ -520,44 +637,93 @@ export function buildLayersPanel(P) {
     const fxOn = hasFx(l.fx);
     const badges = [
       l.linkId ? h('span.ph-badge', { title: '연결된 레이어' }, icon('link', 12)) : null,
-      fxOn ? h('button.ph-badge.fx', { title: '효과 보기/숨기기', onclick: (e) => { e.stopPropagation(); l.fxOpen = !l.fxOpen; P.emit('layers'); } }, 'fx', l.fxOpen ? '▾' : '▸') : null,
+      fxOn ? onDbl(h('button.ph-badge.fx', { title: '효과 보기/숨기기 · 두 번 클릭: 레이어 스타일', onclick: (e) => { e.stopPropagation(); l.fxOpen = !l.fxOpen; P.emit('layers'); } }, 'fx', l.fxOpen ? '▾' : '▸'), `${l.id}:fxb`, () => { l.fxOpen = !l.fxOpen; P.selectLayer(l.id); P.cmd.layerStyle('blending'); }) : null,
       l.locked || l.lockPixels || l.lockPos || l.lockAlpha ? h('span.ph-badge', { title: '잠김' }, icon('lock', 12)) : null,
     ];
-    const name = h('span.ph-lname', l.clip ? h('span.ph-clipmark', { title: `아래 레이어(${clipBaseName || ''})에 클리핑됨` }, '↳ ') : null, h('span', l.name), l.kind === 'group' && l.blend !== 'pass through' ? h('small', ` · ${blendName(l.blend)}`) : null);
-    name.addEventListener('dblclick', (e) => {
-      e.stopPropagation();
-      P.cmd.renameLayer(l);
+    // the name itself (double-click: rename); the rest of the row is the empty part (double-click: style)
+    const nameText = h('span.ph-lnametext', l.name);
+    const name = h('span.ph-lname', l.clip ? h('span.ph-clipmark', { title: `아래 레이어(${clipBaseName || ''})에 클리핑됨` }, '↳ ') : null, nameText, l.kind === 'group' && l.blend !== 'pass through' ? h('small', ` · ${blendName(l.blend)}`) : null);
+    // double-click the name: rename in place (Enter / clicking away keeps it, Esc cancels)
+    onDbl(nameText, `${l.id}:name`, () => {
+      const inp = h('input.ph-lrename', { type: 'text', value: l.name, 'aria-label': '레이어 이름', style: { width: '100%', minWidth: '60px' } });
+      let done = false;
+      const finish = (keep) => {
+        if (done) return;
+        done = true;
+        const v = inp.value.trim();
+        if (keep && v && v !== l.name) P.run('이름 바꾸기', () => { l.name = v; doc.touch(l); });
+        else render();
+      };
+      inp.addEventListener('keydown', (ev) => {
+        ev.stopPropagation();
+        if (ev.key === 'Enter') finish(true);
+        if (ev.key === 'Escape') finish(false);
+      });
+      inp.addEventListener('blur', () => finish(true));
+      for (const ev of ['click', 'dblclick', 'pointerdown']) inp.addEventListener(ev, (x) => x.stopPropagation());
+      row.draggable = false;
+      nameText.replaceChildren(inp);
+      nameText.style.display = 'inline-block';
+      nameText.style.width = '100%';
+      inp.focus();
+      inp.select();
     });
     const row = h(`div.ph-layer${sel.has(l.id) ? '.on' : ''}${l.id === doc.activeId ? '.active' : ''}${doc.shown(l) ? '' : '.hidden'}${l.clip ? '.clipped' : ''}`, {
       role: 'treeitem', 'aria-selected': String(sel.has(l.id)), 'aria-level': String(depth + 1), draggable: 'true',
       style: { paddingLeft: `${6 + depth * 16 + (l.clip ? 12 : 0)}px` },
     }, eye, twist, t, mt, vt, name, h('span.ph-badges', badges));
+    row.title = 'Alt+클릭(레이어 사이 선): 클리핑 마스크 · Alt+끌기: 복제 · 빈 곳 두 번 클릭: 레이어 스타일';
     row.addEventListener('click', (e) => {
-      if (e.altKey && !e.ctrlKey && !e.metaKey) return P.cmd.toggleClipFor(l);
+      if (e.altKey && !e.ctrlKey && !e.metaKey) {
+        // Alt+click on the line between two layers clips the upper one to the lower one
+        const r = row.getBoundingClientRect();
+        const sibs = doc.children(l.parent);
+        const upper = sibs[sibs.indexOf(l) + 1];
+        if ((e.clientY - r.top) / r.height < 0.3 && upper && !filterOn) return P.cmd.toggleClipFor(upper);
+        return P.cmd.toggleClipFor(l);
+      }
       if (doc.activeId !== l.id) P.editMask = false;
       P.selectLayer(l.id, e.ctrlKey || e.metaKey ? 'add' : e.shiftKey ? 'range' : 'single');
       return undefined;
     });
+    onDbl(row, `${l.id}:row`, () => {
+      P.selectLayer(l.id);
+      if (l.kind === 'fill' || l.kind === 'adjust') P.showPanel('props');
+      else P.cmd.layerStyle('blending');
+    });
+    const menuFor = () => (P.layerContextMenu ? P.layerContextMenu(l) : P.layerMenu());
     row.addEventListener('contextmenu', (e) => {
       e.preventDefault();
       if (!sel.has(l.id)) P.selectLayer(l.id);
-      showMenu(P.layerMenu(), e.clientX, e.clientY);
+      showMenu(menuFor(), e.clientX, e.clientY);
     });
     // long press on touch: the layer menu
     let lp = null;
     row.addEventListener('pointerdown', (e) => {
       if (e.pointerType !== 'touch') return;
-      lp = setTimeout(() => { P.selectLayer(l.id); showMenu(P.layerMenu(), e.clientX, e.clientY); }, 550);
+      lp = setTimeout(() => { P.selectLayer(l.id); showMenu(menuFor(), e.clientX, e.clientY); }, 550);
     });
     for (const ev of ['pointerup', 'pointercancel', 'pointermove']) row.addEventListener(ev, () => clearTimeout(lp));
     row.addEventListener('dragstart', (e) => {
       drag = l.id;
-      e.dataTransfer.effectAllowed = 'move';
+      // dropped on another document's tab or canvas, the layers are copied there (core2.js)
+      P.layerDrag = { doc, ids: sel.has(l.id) ? [...sel] : [l.id] };
+      e.dataTransfer.effectAllowed = 'copyMove';
       e.dataTransfer.setData('text/plain', l.name);
     });
+    row.addEventListener('dragend', () => { drag = null; });
     row.addEventListener('dragover', (e) => {
+      if (maskDrag) {
+        if (maskDrag === l.id) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = e.altKey ? 'copy' : 'move';
+        row.dataset.drop = 'into';
+        return;
+      }
       if (!drag || drag === l.id) return;
       e.preventDefault();
+      // Alt (Option) while dropping: a copy
+      e.dataTransfer.dropEffect = e.altKey ? 'copy' : 'move';
       const r = row.getBoundingClientRect();
       const y = (e.clientY - r.top) / r.height;
       const zone = l.kind === 'group' && y > 0.3 && y < 0.7 ? 'into' : y < 0.5 ? 'above' : 'below';
@@ -568,34 +734,81 @@ export function buildLayersPanel(P) {
       e.preventDefault();
       const zone = row.dataset.drop;
       delete row.dataset.drop;
+      if (maskDrag) {
+        const from = maskDrag;
+        maskDrag = null;
+        if (from !== l.id) P.cmd.moveMaskTo(from, l.id, e.altKey);
+        return;
+      }
       if (!drag || drag === l.id) return;
-      if (zone === 'into') P.cmd.moveLayerTo(drag, doc.index(l.id), l.id);
-      else if (zone === 'above') P.cmd.moveLayerTo(drag, doc.index(l.id) + 1, l.parent || null);
-      else P.cmd.moveLayerTo(drag, doc.block(l.id)[0], l.parent || null);
+      const ids = sel.has(drag) ? [...sel] : [drag];
       drag = null;
+      const index = zone === 'into' ? doc.index(l.id) : zone === 'above' ? doc.index(l.id) + 1 : doc.block(l.id)[0];
+      const parent = zone === 'into' ? l.id : l.parent || null;
+      if (e.altKey) P.cmd.duplicateTo(ids, index, parent);
+      else if (ids.length > 1 && P.cmd.moveLayersTo) P.cmd.moveLayersTo(ids, l.id, zone);
+      else P.cmd.moveLayerTo(ids[0], index, parent);
     });
     rows.push(row);
     // effects and smart filters listed under the layer
     if (fxOn && l.fxOpen) {
       rows.push(h('div.ph-subrow', { style: { paddingLeft: `${46 + depth * 16}px` } }, h('span', '효과')));
-      for (const k of FX_ORDER) {
-        const f = l.fx[k];
-        if (!f) continue;
-        const ey = h('button.ph-eye.small', { 'aria-label': f.enabled ? '효과 끄기' : '효과 켜기' }, icon(f.enabled ? 'eye' : 'eyeOff', 13));
-        ey.addEventListener('click', (e) => {
-          e.stopPropagation();
-          P.run('효과 켜기/끄기', () => { l.fx = { ...l.fx, [k]: { ...f, enabled: !f.enabled } }; l._styled = null; doc.touch(l); });
-        });
-        const r = h('div.ph-subrow', { style: { paddingLeft: `${46 + depth * 16}px` }, ondblclick: () => { P.selectLayer(l.id); P.cmd.layerStyle(k); } }, ey, h('span', FX_NAMES[k]));
-        rows.push(r);
+      for (const k0 of FX_ORDER) {
+        for (const k of instanceKeys(l.fx, k0)) {
+          const f = l.fx[k];
+          const ey = h('button.ph-eye.small', { 'aria-label': f.enabled ? '효과 끄기' : '효과 켜기' }, icon(f.enabled ? 'eye' : 'eyeOff', 13));
+          ey.addEventListener('click', (e) => {
+            e.stopPropagation();
+            P.run('효과 켜기/끄기', () => { l.fx = { ...l.fx, [k]: { ...f, enabled: !f.enabled } }; l._styled = null; doc.touch(l); });
+          });
+          const r = onDbl(h('div.ph-subrow', { style: { paddingLeft: `${46 + depth * 16}px` }, title: '두 번 클릭: 설정 바꾸기' }, ey, h('span', FX_NAMES[k0])), `${l.id}:fx:${k}`, () => { P.selectLayer(l.id); P.cmd.layerStyle(k); });
+          rows.push(r);
+        }
       }
     }
     if (l.kind === 'smart' && l.smart.filters?.length) {
-      rows.push(h('div.ph-subrow', { style: { paddingLeft: `${46 + depth * 16}px` } }, h('span', '고급 필터')));
+      // the Smart Filters row: its mask (if any) and a menu for it
+      const fm = l.filterMask;
+      const fmMenu = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        P.selectLayer(l.id);
+        const C = P.cmd;
+        showMenu([
+          { label: '필터 마스크 추가 (모두 보이기)', disabled: !!fm, action: () => C.smartFilterMask(l, 'reveal') },
+          { label: '선택 영역에서 필터 마스크', disabled: !P.doc.selection, action: () => C.smartFilterMask(l, 'select') },
+          { label: '필터 마스크 반전', disabled: !fm, action: () => C.smartFilterMask(l, 'invert') },
+          { label: fm?.enabled === false ? '필터 마스크 사용' : '필터 마스크 사용 안 함', disabled: !fm, action: () => C.smartFilterMask(l, 'toggle') },
+          { label: '필터 마스크를 선택 영역으로', disabled: !fm, action: () => C.smartFilterMask(l, 'toSelection') },
+          { label: '필터 마스크 삭제', disabled: !fm, action: () => C.smartFilterMask(l, 'delete') },
+        ], e.clientX, e.clientY);
+      };
+      let fmThumb = null;
+      if (fm?.canvas) {
+        fmThumb = h('canvas.ph-thumb.mask', { width: 20, height: 20, title: '고급 필터 마스크 (누르면 메뉴)', style: { width: '20px', height: '20px', opacity: fm.enabled === false ? 0.4 : 1 } });
+        const g = fmThumb.getContext('2d');
+        g.fillStyle = fm.invert ? '#fff' : '#000';
+        g.fillRect(0, 0, 20, 20);
+        const k = Math.min(20 / P.doc.width, 20 / P.doc.height);
+        const t2 = makeCanvas(20, 20);
+        const tg = t2.getContext('2d');
+        tg.scale(k, k);
+        tg.drawImage(fm.canvas, fm.x, fm.y);
+        tg.setTransform(1, 0, 0, 1, 0, 0);
+        tg.globalCompositeOperation = 'source-in';
+        tg.fillStyle = fm.invert ? '#000' : '#fff';
+        tg.fillRect(0, 0, 20, 20);
+        g.drawImage(t2, 0, 0);
+        fmThumb.addEventListener('click', fmMenu);
+      }
+      rows.push(h('div.ph-subrow', { style: { paddingLeft: `${46 + depth * 16}px` }, title: '오른쪽 클릭: 필터 마스크 메뉴', oncontextmenu: fmMenu }, fmThumb, h('span', '고급 필터'),
+        h('button.ph-badge', { title: '필터 마스크 메뉴', 'aria-label': '필터 마스크 메뉴', onclick: fmMenu }, icon('mask', 12))));
       l.smart.filters.forEach((f, i) => {
         const ey = h('button.ph-eye.small', { 'aria-label': '필터 켜기/끄기', onclick: (e) => { e.stopPropagation(); P.cmd.smartFilterToggle(l, i); } }, icon(f.enabled === false ? 'eyeOff' : 'eye', 13));
         const del = h('button.ph-badge', { title: '이 고급 필터 지우기', onclick: (e) => { e.stopPropagation(); P.cmd.smartFilterDelete(l, i); } }, '×');
-        rows.push(h('div.ph-subrow', { style: { paddingLeft: `${46 + depth * 16}px` }, title: '두 번 클릭: 설정 바꾸기', ondblclick: () => { P.selectLayer(l.id); P.editSmartFilter?.(l, i); } }, ey, h('span', P.filterName?.(f.id) || f.id), del));
+        const opts = h('button.ph-badge', { title: '혼합 옵션 (모드·불투명도)', 'aria-label': '필터 혼합 옵션', onclick: (e) => { e.stopPropagation(); P.cmd.smartFilterBlending?.(l, i); } }, icon('sliders', 12));
+        const mixed = (f.blend && f.blend !== 'normal') || (f.opacity != null && f.opacity < 1);
+        rows.push(onDbl(h('div.ph-subrow', { style: { paddingLeft: `${46 + depth * 16}px` }, title: '두 번 클릭: 설정 바꾸기' }, ey, h('span', P.filterName?.(f.id) || f.id), mixed ? h('small', ` ${blendName(f.blend || 'normal')} ${Math.round((f.opacity ?? 1) * 100)}%`) : null, opts, del), `${l.id}:sf:${i}`, () => { P.selectLayer(l.id); P.editSmartFilter?.(l, i); }));
       });
     }
     if (l.kind === 'group' && !l.collapsed && !filterOn) renderLevel(l.id, depth + 1, rows);
@@ -633,9 +846,10 @@ export function buildLayersPanel(P) {
       b.classList.toggle('on', !!a?.[key]);
     }
     head.replaceChildren(
-      h('div.ph-lrow', blend, h('label.ph-op', '불투명도', opRange, opacity)),
-      h('div.ph-lrow', h('span.ph-lockl', '잠그기:'), ...locks, h('label.ph-op.fill', '칠', fillNum)));
+      h('div.ph-lrow', blend, h('label.ph-op', { style: { flex: '1 1 210px' } }, h('span', { style: { whiteSpace: 'nowrap' } }, '불투명도'), opRange, opacity)),
+      h('div.ph-lrow', h('span.ph-lockl', '잠그기:'), ...locks, h('label.ph-op.fill', h('span', { style: { whiteSpace: 'nowrap' } }, '칠'), fillNum)));
     const rows = [];
+    dblActions.clear();
     const q = fq.value.trim().toLowerCase();
     const kind = fk.value;
     if (q || kind !== 'all') {
@@ -672,7 +886,7 @@ export function buildColorPanel(P) {
   P.on('color', sync);
   P.on('colortarget', (t) => { target = t; sync(); });
   sync();
-  return h('div.ph-panel.color', h('div.ph-crow', fgB, bgB, h('button.small', { onclick: () => P.swapColors(), title: '바꾸기 (X)' }, '⇄')), picker.el, h('div.ph-sub', '견본'), sw, h('div.ph-sub', '최근 색'), recent);
+  return h('div.ph-panel.color', h('div.ph-crow', fgB, bgB, h('button.small', { onclick: () => P.swapColors(), title: '바꾸기 (X)', 'aria-label': '전경색과 배경색 바꾸기' }, icon('swapColors', 13))), picker.el, h('div.ph-sub', '견본'), sw, h('div.ph-sub', '최근 색'), recent);
 }
 
 // ---------------------------------------------------------------- properties
@@ -705,6 +919,7 @@ export function buildPropertiesPanel(P) {
       return;
     }
     const rows = [h('div.ph-ptitle', l.name)];
+    if (l.kind === 'text' && l.psdPicture?.canvas && l.psdPicture.key === psdTextKey(l)) rows.push(h('div.note', 'PSD에서 연 글자입니다. 고치기 전까지는 포토샵에서 보던 모양 그대로 보이고, 고치면 이 앱의 글꼴로 다시 그립니다.'));
     if (l.kind === 'text') {
       const t = l.text;
       const ta = h('textarea.ph-ptext', { rows: 3 });
@@ -740,6 +955,8 @@ export function buildPropertiesPanel(P) {
         field('자간 (px)', numIn(t.letterSpacing || 0, -50, 200, 0.5, (v) => live('자간', () => { l.text = { ...l.text, letterSpacing: v }; }, true))),
         field('회전 (°)', numIn(l.rotation || 0, -360, 360, 1, (v) => live('회전', () => { l.rotation = v; }, true))),
         h('div.ph-prow', h('button.small', { onclick: () => P.cmd.rasterize() }, '이미지로 바꾸기 (래스터화)')));
+    } else if (l.kind === 'shape' && P.shapeProperties) {
+      rows.push(...P.shapeProperties(l, live));
     } else if (l.kind === 'shape') {
       const s = l.shape;
       const type = h('select', SHAPES.map(([id, n]) => h('option', { value: id }, n)));

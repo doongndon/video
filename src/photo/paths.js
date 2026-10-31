@@ -3,15 +3,17 @@
 // Used by the pen tools, the Paths panel, vector masks and path-based shape layers.
 
 import { setVectorMaskRenderer, setShapePathProvider, makeCanvas } from './doc.js';
+import { SHAPE_LIST } from './shapelib.js';
 
 export const PATH_OPS = [['combine', '모양 결합'], ['subtract', '전면 모양 빼기'], ['intersect', '모양 영역 교차'], ['exclude', '오버랩 모양 영역 제외']];
 
 export const knot = (x, y, inX = x, inY = y, outX = x, outY = y, smooth = false) => ({ p: [x, y], in: [inX, inY], out: [outX, outY], smooth });
-export const clonePath = (sps) => (sps || []).map((sp) => ({ ...sp, knots: sp.knots.map((k) => ({ p: [...k.p], in: [...k.in], out: [...k.out], smooth: k.smooth })) }));
+// knots may carry flags of the tool that made them (the curvature pen's curv / corner): copies keep them
+export const clonePath = (sps) => (sps || []).map((sp) => ({ ...sp, knots: sp.knots.map((k) => ({ ...k, p: [...k.p], in: [...k.in], out: [...k.out] })) }));
 
 /** Map every point of a path through fn([x, y]) → [x, y]. */
 export function mapPath(sps, fn) {
-  return (sps || []).map((sp) => ({ ...sp, knots: sp.knots.map((k) => ({ p: fn(k.p), in: fn(k.in), out: fn(k.out), smooth: k.smooth })) }));
+  return (sps || []).map((sp) => ({ ...sp, knots: sp.knots.map((k) => ({ ...k, p: fn(k.p), in: fn(k.in), out: fn(k.out) })) }));
 }
 export const translatePath = (sps, dx, dy) => mapPath(sps, ([x, y]) => [x + dx, y + dy]);
 
@@ -219,9 +221,14 @@ export function fitFreehand(pts, tolerance = 2, closed = false) {
   const knots = keep.map((p, i) => {
     const prev = keep[closed ? (i - 1 + n) % n : Math.max(0, i - 1)];
     const next = keep[closed ? (i + 1) % n : Math.min(n - 1, i + 1)];
-    const tx = (next[0] - prev[0]) / 6;
-    const ty = (next[1] - prev[1]) / 6;
-    return { p: [...p], in: [p[0] - tx, p[1] - ty], out: [p[0] + tx, p[1] + ty], smooth: true };
+    const l1 = Math.hypot(p[0] - prev[0], p[1] - prev[1]);
+    const l2 = Math.hypot(next[0] - p[0], next[1] - p[1]);
+    // a sharp turn stays a corner (edges traced by the magnetic pen keep their straight sides)
+    if (l1 && l2 && ((p[0] - prev[0]) * (next[0] - p[0]) + (p[1] - prev[1]) * (next[1] - p[1])) / (l1 * l2) < 0.4) return { p: [...p], in: [...p], out: [...p], smooth: false };
+    const tx = next[0] - prev[0];
+    const ty = next[1] - prev[1];
+    const tl = Math.hypot(tx, ty) || 1;
+    return { p: [...p], in: [p[0] - (tx / tl) * (l1 / 3), p[1] - (ty / tl) * (l1 / 3)], out: [p[0] + (tx / tl) * (l2 / 3), p[1] + (ty / tl) * (l2 / 3)], smooth: true };
   });
   if (!closed) {
     knots[0].in = [...knots[0].p];
@@ -309,29 +316,8 @@ export function pathFromMask(maskCanvas, tolerance = 2) {
 
 // ---------------------------------------------------------------- custom shapes (Photoshop "사용자 정의 모양")
 
-/** SVG path data in a 100×100 box. */
-export const CUSTOM_SHAPES = [
-  ['heart', '하트', 'M50 88 C20 66 4 50 4 30 C4 14 16 4 30 4 C40 4 47 10 50 18 C53 10 60 4 70 4 C84 4 96 14 96 30 C96 50 80 66 50 88 Z'],
-  ['arrowRight', '화살표 →', 'M4 36 H60 V14 L96 50 L60 86 V64 H4 Z'],
-  ['arrowLeft', '화살표 ←', 'M96 36 H40 V14 L4 50 L40 86 V64 H96 Z'],
-  ['arrowUp', '화살표 ↑', 'M36 96 V40 H14 L50 4 L86 40 H64 V96 Z'],
-  ['bubble', '말풍선', 'M12 8 H88 C94 8 96 12 96 18 V60 C96 66 94 70 88 70 H40 L20 92 L24 70 H12 C6 70 4 66 4 60 V18 C4 12 6 8 12 8 Z'],
-  ['thought', '생각 풍선', 'M30 70 C10 70 4 56 10 46 C2 36 10 20 26 22 C30 8 52 4 60 16 C74 6 94 16 88 32 C100 40 96 62 78 62 C74 74 50 76 42 68 C38 70 34 70 30 70 Z M18 82 A6 6 0 1 0 18.1 82 Z M8 94 A3 3 0 1 0 8.1 94 Z'],
-  ['check', '체크', 'M8 52 L22 38 L40 56 L80 14 L94 28 L40 84 Z'],
-  ['cross', '엑스', 'M18 4 L50 36 L82 4 L96 18 L64 50 L96 82 L82 96 L50 64 L18 96 L4 82 L36 50 L4 18 Z'],
-  ['plus', '더하기', 'M38 4 H62 V38 H96 V62 H62 V96 H38 V62 H4 V38 H38 Z'],
-  ['lightning', '번개', 'M58 2 L18 56 H44 L36 98 L82 38 H54 Z'],
-  ['cloud', '구름', 'M26 80 C12 80 4 70 4 58 C4 46 14 38 26 40 C28 22 44 12 60 18 C70 8 92 14 92 34 C100 40 98 80 78 80 Z'],
-  ['house', '집', 'M50 6 L96 46 H82 V94 H60 V64 H40 V94 H18 V46 H4 Z'],
-  ['moon', '달', 'M62 4 C36 8 18 30 18 54 C18 80 40 98 66 96 C82 95 92 88 96 80 C88 84 78 86 70 84 C48 80 34 62 36 40 C38 22 48 10 62 4 Z'],
-  ['drop', '물방울', 'M50 4 C66 30 84 48 84 66 C84 84 68 96 50 96 C32 96 16 84 16 66 C16 48 34 30 50 4 Z'],
-  ['badge', '배지', 'M50 2 L62 14 L78 10 L82 26 L96 34 L88 50 L96 66 L82 74 L78 90 L62 86 L50 98 L38 86 L22 90 L18 74 L4 66 L12 50 L4 34 L18 26 L22 10 L38 14 Z'],
-  ['banner', '리본', 'M2 30 H18 V20 H82 V30 H98 L90 46 L98 62 H82 V72 H18 V62 H2 L10 46 Z'],
-  ['frame', '사각 틀', 'M4 4 H96 V96 H4 Z M16 16 V84 H84 V16 Z'],
-  ['ring', '고리', 'M50 4 A46 46 0 1 0 50.1 4 Z M50 24 A26 26 0 1 1 49.9 24 Z'],
-  ['paw', '발자국', 'M50 52 C66 52 82 70 78 84 C74 96 60 90 50 90 C40 90 26 96 22 84 C18 70 34 52 50 52 Z M24 26 A9 12 0 1 0 24.1 26 Z M42 10 A9 12 0 1 0 42.1 10 Z M60 10 A9 12 0 1 0 60.1 10 Z M78 26 A9 12 0 1 0 78.1 26 Z'],
-  ['music', '음표', 'M36 70 V14 L86 4 V60 C86 70 78 76 70 76 C62 76 56 70 56 64 C56 58 62 52 70 52 C73 52 75 53 78 54 V20 L44 27 V80 C44 90 36 96 28 96 C20 96 14 90 14 84 C14 78 20 72 28 72 C31 72 34 73 36 74 Z'],
-];
+/** [id, Korean name, SVG path data in a 100×100 box, ops, group] — the library lives in shapelib.js. */
+export const CUSTOM_SHAPES = SHAPE_LIST;
 const svgCache = new Map();
 
 /** Parse absolute SVG path data (M L H V C Q A Z) into subpaths. */
@@ -452,27 +438,80 @@ function arcToCubics(p0, rx, ry, rotDeg, large, sweep, p1) {
   return out;
 }
 
-// shape layers: custom shapes and pen-drawn paths
+// shape layers: every kind as a Path2D built from its knots (holes follow the subpaths' ops)
+const providerCache = new Map();
 setShapePathProvider((s) => {
-  if (s.type === 'custom') {
-    const d = CUSTOM_SHAPES.find((c) => c[0] === s.custom)?.[2] || CUSTOM_SHAPES[0][2];
-    if (!svgCache.has(d)) svgCache.set(d, new Path2D(d));
-    const p = new Path2D();
-    p.addPath(svgCache.get(d), new DOMMatrix().scale(s.w / 100, s.h / 100));
-    return p;
-  }
   if (s.type === 'path' && s.subpaths) {
     const kx = s.w / (s.pw || s.w || 1);
     const ky = s.h / (s.ph || s.h || 1);
     return toPath2D(mapPath(s.subpaths, ([x, y]) => [x * kx, y * ky]));
   }
-  return null;
+  if (s.type !== 'custom' && !(s.type === 'rect' && s.radii?.some((r) => r > 0)) && !(s.type === 'polygon' && (s.starRatio != null || s.smooth || s.smoothIndents)) && !(s.type === 'triangle' && s.radius > 0)) return null;
+  const key = JSON.stringify([s.type, s.custom, s.w, s.h, s.radii, s.sides, s.starRatio, s.smooth, s.smoothIndents, s.radius]);
+  if (providerCache.has(key)) return providerCache.get(key);
+  const p = toPath2D(shapeToSubpaths(s));
+  if (providerCache.size > 300) providerCache.clear();
+  providerCache.set(key, p);
+  return p;
 });
+
+const K = 0.5522847498;
+
+/** A closed polygon with its corners rounded by r(i) (0: sharp) — tangent points joined by curves. */
+export function roundedPolygon(pts, r) {
+  const n = pts.length;
+  const knots = [];
+  for (let i = 0; i < n; i++) {
+    const V = pts[i];
+    const Pp = pts[(i - 1 + n) % n];
+    const N = pts[(i + 1) % n];
+    const lp = Math.hypot(Pp[0] - V[0], Pp[1] - V[1]) || 1;
+    const ln = Math.hypot(N[0] - V[0], N[1] - V[1]) || 1;
+    const d = Math.min(r(i), lp / 2, ln / 2);
+    if (!(d > 0.01)) {
+      knots.push(knot(V[0], V[1]));
+      continue;
+    }
+    const A = [V[0] + ((Pp[0] - V[0]) / lp) * d, V[1] + ((Pp[1] - V[1]) / lp) * d];
+    const B = [V[0] + ((N[0] - V[0]) / ln) * d, V[1] + ((N[1] - V[1]) / ln) * d];
+    // the handles reach toward the corner: a circular arc for right angles, close to one elsewhere
+    const k = K;
+    knots.push({ p: A, in: [...A], out: [A[0] + (V[0] - A[0]) * k, A[1] + (V[1] - A[1]) * k], smooth: false });
+    knots.push({ p: B, in: [B[0] + (V[0] - B[0]) * k, B[1] + (V[1] - B[1]) * k], out: [...B], smooth: false });
+  }
+  return { closed: true, op: 'combine', knots };
+}
+
+/** Corner points of a polygon or star shape in its w×h box (star ratio in %, 100: a plain polygon). */
+export function polygonPoints(s) {
+  const { w, h } = s;
+  const n = Math.max(3, Math.min(100, Math.round(s.sides || 5)));
+  const ratio = s.starRatio != null ? s.starRatio / 100 : s.type === 'star' ? (s.indent != null ? 1 - s.indent / 100 : 0.4) : 1;
+  const star = ratio < 0.999;
+  const pts = [];
+  for (let i = 0; i < (star ? n * 2 : n); i++) {
+    const a = -Math.PI / 2 + (i * (star ? Math.PI : 2 * Math.PI)) / n;
+    const r = star && i % 2 ? ratio : 1;
+    pts.push([w / 2 + Math.cos(a) * (w / 2) * r, h / 2 + Math.sin(a) * (h / 2) * r]);
+  }
+  return { pts, star };
+}
+
+/** Arrowhead polygon at the end of a line from a to b (Photoshop: width / length in % of the weight, concavity in %). */
+export function arrowHead(a, b, weight, { w = 500, l = 1000, c = 0 } = {}) {
+  const ang = Math.atan2(b[1] - a[1], b[0] - a[0]);
+  const W = (weight * w) / 100;
+  const L = (weight * l) / 100;
+  const cos = Math.cos(ang);
+  const sin = Math.sin(ang);
+  const P = (u, v) => [b[0] + u * cos - v * sin, b[1] + u * sin + v * cos];
+  const back = -L + (L * c) / 100;
+  return { pts: [P(0, 0), P(-L, -W / 2), P(back, 0), P(-L, W / 2)], inset: Math.max(0, -back) };
+}
 
 /** A parametric shape (rectangle, ellipse…) as editable path knots in a w×h box. */
 export function shapeToSubpaths(s) {
   const { w, h } = s;
-  const K = 0.5522847498;
   if (s.type === 'ellipse') {
     const rx = w / 2;
     const ry = h / 2;
@@ -485,37 +524,55 @@ export function shapeToSubpaths(s) {
       knot(0, cy, 0, cy + ry * K, 0, cy - ry * K, true),
     ] }];
   }
-  if (s.type === 'round') {
-    const r = Math.min(s.radius || 20, w / 2, h / 2);
-    const k = r * K;
-    return [{ closed: true, op: 'combine', knots: [
-      knot(r, 0, r - k, 0, r, 0), knot(w - r, 0, w - r, 0, w - r + k, 0),
-      knot(w, r, w, r - k, w, r), knot(w, h - r, w, h - r, w, h - r + k),
-      knot(w - r, h, w - r + k, h, w - r, h), knot(r, h, r, h, r - k, h),
-      knot(0, h - r, 0, h - r + k, 0, h - r), knot(0, r, 0, r, 0, r - k),
-    ] }];
+  const corners = [[0, 0], [w, 0], [w, h], [0, h]];
+  if (s.type === 'round' || (s.type === 'rect' && s.radii?.some((r) => r > 0))) {
+    const radii = s.type === 'round' ? [1, 1, 1, 1].map(() => s.radius ?? 20) : s.radii;
+    const lim = Math.min(w, h) / 2;
+    return [roundedPolygon(corners, (i) => Math.max(0, Math.min(lim, radii[i] || 0)))];
   }
   const poly = (pts) => [{ closed: true, op: 'combine', knots: pts.map(([x, y]) => knot(x, y)) }];
-  if (s.type === 'triangle') return poly([[w / 2, 0], [w, h], [0, h]]);
+  if (s.type === 'triangle') {
+    const pts = [[w / 2, 0], [w, h], [0, h]];
+    return s.radius > 0 ? [roundedPolygon(pts, () => s.radius)] : poly(pts);
+  }
   if (s.type === 'polygon' || s.type === 'star') {
-    const n = Math.max(3, Math.round(s.sides || 5));
-    const star = s.type === 'star';
-    const inner = s.indent != null ? 1 - s.indent / 100 : 0.4;
-    const pts = [];
-    for (let i = 0; i < (star ? n * 2 : n); i++) {
-      const a = -Math.PI / 2 + (i * (star ? Math.PI : 2 * Math.PI)) / n;
-      const r = star && i % 2 ? inner : 1;
-      pts.push([w / 2 + Math.cos(a) * (w / 2) * r, h / 2 + Math.sin(a) * (h / 2) * r]);
+    const { pts, star } = polygonPoints(s);
+    if (s.smooth || s.smoothIndents || s.radius > 0) {
+      const big = Math.max(w, h);
+      return [roundedPolygon(pts, (i) => {
+        const outer = !star || i % 2 === 0;
+        if (outer && s.smooth) return big;
+        if (!outer && s.smoothIndents) return big;
+        return outer ? s.radius || 0 : 0;
+      })];
     }
     return poly(pts);
   }
-  if (s.type === 'line') return [{ closed: false, op: 'combine', knots: [knot(0, h / 2), knot(w, h / 2)] }];
+  if (s.type === 'line') {
+    const weight = Math.max(1, s.strokeWidth || h || 1);
+    let a = [0, h / 2];
+    let b = [w, h / 2];
+    const out = [];
+    const opt = { w: s.arrowW ?? 500, l: s.arrowL ?? 1000, c: s.arrowC ?? 0 };
+    if (s.arrowEnd) {
+      const ah = arrowHead(a, b, weight, opt);
+      out.push({ closed: true, op: 'combine', knots: ah.pts.map(([x, y]) => knot(x, y)) });
+      b = [b[0] - ah.inset, b[1]];
+    }
+    if (s.arrowStart) {
+      const ah = arrowHead([w, h / 2], [0, h / 2], weight, opt);
+      out.push({ closed: true, op: 'combine', knots: ah.pts.map(([x, y]) => knot(x, y)) });
+      a = [a[0] + ah.inset, a[1]];
+    }
+    return [{ closed: false, op: 'combine', knots: [knot(a[0], a[1]), knot(b[0], b[1])] }, ...out];
+  }
   if (s.type === 'custom') {
-    const d = CUSTOM_SHAPES.find((c) => c[0] === s.custom)?.[2] || CUSTOM_SHAPES[0][2];
-    const sps = parseSvgPath(d);
-    // inner subpaths cut holes (the shapes are drawn with the non-zero rule)
-    return mapPath(sps, ([x, y]) => [(x * w) / 100, (y * h) / 100]).map((sp, i) => ({ ...sp, op: i && /^(frame|ring)$/.test(s.custom) ? 'subtract' : 'combine' }));
+    const entry = CUSTOM_SHAPES.find((c) => c[0] === s.custom) || CUSTOM_SHAPES[0];
+    const sps = parseSvgPath(entry[2]);
+    const ops = entry[3] || '';
+    // ops say which subpaths are holes (the shapes are drawn with the non-zero rule)
+    return mapPath(sps, ([x, y]) => [(x * w) / 100, (y * h) / 100]).map((sp, i) => ({ ...sp, op: i && ops[i] === 's' ? 'subtract' : 'combine' }));
   }
   if (s.type === 'path') return clonePath(s.subpaths);
-  return poly([[0, 0], [w, 0], [w, h], [0, h]]);
+  return poly(corners);
 }

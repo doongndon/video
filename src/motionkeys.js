@@ -3,7 +3,7 @@
 // deleting keys, the motion feel (easing) and the data for the motion path on the monitor.
 
 import { store } from './store.js';
-import { clipEnd, evalParam, isAnimated, setParamValue, keyframeDefaults } from './model.js';
+import { clipEnd, evalParam, isAnimated, setParamValue, keyframeDefaults, newKey } from './model.js';
 import { clamp } from './util.js';
 
 export const KEY_PARAMS = [['motion', 'posX'], ['motion', 'posY'], ['motion', 'scale'], ['motion', 'rotation'], ['opacity', 'opacity']];
@@ -45,7 +45,7 @@ export function keyCurrentPose(clipId) {
   store.transact('키프레임 추가', () => {
     for (const { p } of keyParams(c)) {
       const v = evalParam(p, t);
-      if (!isAnimated(p)) p.kf = [{ t, v, ease: keyframeDefaults.ease }];
+      if (!isAnimated(p)) p.kf = [newKey(t, v)];
       else setParamValue(p, v, t, fd());
       n++;
     }
@@ -120,7 +120,8 @@ export function rawSetPathKey(c, t, x, y) {
   if (!m) return;
   const { posX, posY } = m.params;
   for (const [p, other] of [[posX, posY], [posY, posX]]) {
-    if (!isAnimated(p) && isAnimated(other)) p.kf = other.kf.map((k) => ({ t: k.t, v: p.value, ease: k.ease }));
+    // same timing and interpolation type; speeds are not copied (they are in the other axis' units)
+    if (!isAnimated(p) && isAnimated(other)) p.kf = other.kf.map((k) => ({ t: k.t, v: p.value, ease: k.ease, ...(k.interp ? { interp: k.interp } : {}) }));
   }
   setParamValue(posX, x, t, fd());
   setParamValue(posY, y, t, fd());

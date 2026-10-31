@@ -1,12 +1,18 @@
-// Font picker popup: every font previewed in its own face, categories, search, live preview on
-// hover, and buttons to import font files or list the fonts installed on this computer.
+// Font picker popup: every font previewed in its own face, recently used fonts at the top, categories,
+// search, live preview on hover, and buttons to import font files or list the fonts installed on this
+// computer. Used by the video editor's text clips and the photo editor's type tools.
 
 import { store } from '../store.js';
 import { h } from '../util.js';
 import { toast } from './common.js';
-import { FONT_CATEGORIES, fontChoices, loadFontFor, loadLocalFonts, localFontsAvailable } from '../fonts.js';
+import { FONT_CATEGORIES, fontChoices, loadFontFor, loadLocalFonts, localFontsAvailable, recentFonts, noteFontUsed } from '../fonts.js';
 import { importFiles } from '../media.js';
 import { pickFiles } from './project-panel.js';
+import { injectStyle } from './style-inject.js';
+
+injectStyle('fp-style', `
+.font-picker .fp-group { padding: 4px 12px 2px; font-size: var(--fs-xs); color: var(--text-faint); background: #20242a; border-bottom: 1px solid #2f343c; position: sticky; top: 0; z-index: 1; }
+`);
 
 let open = null;
 
@@ -42,19 +48,25 @@ export function openFontPicker(anchor, { current, sample = '', onPreview = () =>
     h('div.fp-foot', importBtn, localBtn, h('span.note', '마우스를 올리면 화면에 미리 적용됩니다')));
   document.body.append(pop);
 
-  const r = anchor.getBoundingClientRect();
-  const W = Math.min(380, window.innerWidth - 16);
-  pop.style.width = `${W}px`;
-  pop.style.left = `${Math.max(8, Math.min(r.left, window.innerWidth - W - 8))}px`;
-  const below = window.innerHeight - r.bottom;
-  if (below > 320 || below > r.top) {
-    pop.style.top = `${r.bottom + 4}px`;
-    pop.style.maxHeight = `${Math.max(240, below - 16)}px`;
-  } else {
-    pop.style.bottom = `${window.innerHeight - r.top + 4}px`;
-    pop.style.maxHeight = `${Math.max(240, r.top - 16)}px`;
+  function place() {
+    const r = anchor.getBoundingClientRect();
+    const W = Math.min(380, window.innerWidth - 16);
+    pop.style.width = `${W}px`;
+    pop.style.left = `${Math.max(8, Math.min(r.left, window.innerWidth - W - 8))}px`;
+    const below = window.innerHeight - r.bottom;
+    if (below > 320 || below > r.top) {
+      pop.style.top = `${r.bottom + 4}px`;
+      pop.style.bottom = '';
+      pop.style.maxHeight = `${Math.max(240, below - 16)}px`;
+    } else {
+      pop.style.top = '';
+      pop.style.bottom = `${window.innerHeight - r.top + 4}px`;
+      pop.style.maxHeight = `${Math.max(240, r.top - 16)}px`;
+    }
   }
+  place();
 
+  // fonts load as their row scrolls into view (never all at once: most are web fonts)
   const io = new IntersectionObserver((entries) => {
     for (const en of entries) {
       if (!en.isIntersecting) continue;
@@ -63,29 +75,56 @@ export function openFontPicker(anchor, { current, sample = '', onPreview = () =>
       loadFontFor(fam, text).catch(() => {});
     }
   }, { root: list, rootMargin: '120px' });
+  const observeAll = () => {
+    io.disconnect();
+    for (const el of items) if (!/^(sans-serif|serif|monospace)$/.test(el.dataset.family)) io.observe(el);
+  };
+
+  function row(f, i) {
+    const preview = h('div.fp-preview', { style: { fontFamily: `"${f.family}", "Noto Sans KR", sans-serif` } }, text);
+    const el = h(`div.fp-item${f.family === current ? '.current' : ''}`, { role: 'option', 'aria-selected': String(f.family === current), title: f.korean ? f.label : `${f.label} — 한글 글자가 없어 한글은 다른 글꼴로 보입니다` },
+      h('div.fp-name', f.label, f.korean ? null : h('span.fp-tag', '영문')), preview);
+    el.dataset.family = f.family;
+    el.addEventListener('pointerenter', () => setActive(i, false));
+    el.addEventListener('click', () => pick(f.family));
+    return el;
+  }
 
   function render() {
     chips.querySelectorAll('button').forEach((b) => b.classList.toggle('on', b.dataset.cat === cat));
     const q = query.trim().toLowerCase();
+    const choices = fontChoices(store.project);
     // a search looks through every category
-    const all = fontChoices(store.project).filter((f) => (q ? f.label.toLowerCase().includes(q) || f.family.toLowerCase().includes(q) : cat === 'all' || f.cat === cat));
+    const all = choices.filter((f) => (q ? f.label.toLowerCase().includes(q) || f.family.toLowerCase().includes(q) : cat === 'all' || f.cat === cat));
     chips.classList.toggle('dim', !!q);
-    io.disconnect();
     list.replaceChildren();
-    items = all.map((f, i) => {
-      const preview = h('div.fp-preview', { style: { fontFamily: `"${f.family}", "Noto Sans KR", sans-serif` } }, text);
-      const el = h(`div.fp-item${f.family === current ? '.current' : ''}`, { role: 'option', 'aria-selected': String(f.family === current), title: f.korean ? f.label : `${f.label} — 한글 글자가 없어 한글은 다른 글꼴로 보입니다` },
-        h('div.fp-name', f.label, f.korean ? null : h('span.fp-tag', '영문')), preview);
-      el.dataset.family = f.family;
-      if (!/^(sans-serif|serif|monospace)$/.test(f.family)) io.observe(el);
-      el.addEventListener('pointerenter', () => setActive(i, false));
-      el.addEventListener('click', () => pick(f.family));
-      return el;
-    });
-    if (!items.length) list.append(h('div.empty-hint', cat === 'mine' ? '아직 가져온 글꼴이 없습니다.\n아래 "글꼴 파일 가져오기"를 누르세요.' : '맞는 글꼴이 없습니다'));
-    list.append(...items);
+    items = [];
+    // 최근 사용: the families picked lately, on top of the full list (like Premiere / Photoshop)
+    const recent = !q && cat === 'all'
+      ? recentFonts().map((fam) => choices.find((f) => f.family === fam) || { family: fam, label: fam, cat: 'mine', korean: true }).filter(Boolean)
+      : [];
+    if (recent.length) {
+      list.append(h('div.fp-group', '최근 사용한 글꼴'));
+      for (const f of recent) {
+        const el = row(f, items.length);
+        items.push(el);
+        list.append(el);
+      }
+      list.append(h('div.fp-group', '모든 글꼴'));
+    }
+    for (const f of all) {
+      const el = row(f, items.length);
+      items.push(el);
+      list.append(el);
+    }
+    if (!all.length) list.append(h('div.empty-hint', cat === 'mine' ? '아직 가져온 글꼴이 없습니다.\n아래 "글꼴 파일 가져오기"를 누르세요.' : '맞는 글꼴이 없습니다'));
+    observeAll();
+    // open at the current font: among the recent ones when it is one (they stay in view at the top)
     active = items.findIndex((el) => el.dataset.family === current);
-    if (active >= 0) items[active].scrollIntoView({ block: 'center' });
+    if (active >= 0) {
+      if (active < recent.length) list.scrollTop = 0;
+      else items[active].scrollIntoView({ block: 'center' });
+    }
   }
 
   let previewTimer = null;
@@ -109,12 +148,14 @@ export function openFontPicker(anchor, { current, sample = '', onPreview = () =>
     pop.remove();
     document.removeEventListener('pointerdown', outside, true);
     document.removeEventListener('keydown', onKey, true);
+    window.removeEventListener('resize', place);
     open = null;
     if (!picked) onCancel();
   }
 
   function pick(family) {
     clearTimeout(previewTimer);
+    noteFontUsed(family);
     onPick(family);
     close(true);
   }
@@ -127,7 +168,7 @@ export function openFontPicker(anchor, { current, sample = '', onPreview = () =>
     if (fams.length) {
       toast(`글꼴 ${fams.length}개를 가져왔습니다: ${fams.join(', ')}`);
       cat = 'mine';
-      render();
+      if (!done) render();
     }
   }
 
@@ -136,7 +177,7 @@ export function openFontPicker(anchor, { current, sample = '', onPreview = () =>
       const n = await loadLocalFonts();
       toast(`이 컴퓨터의 글꼴 ${n}개를 불러왔습니다 (내 글꼴)`);
       cat = 'mine';
-      render();
+      if (!done) render();
     } catch (err) {
       toast(err?.name === 'SecurityError' || err?.name === 'NotAllowedError'
         ? '글꼴 목록 권한이 없습니다. 이 화면(예: claude.ai 보기 화면)에서는 막혀 있을 수 있습니다.'
@@ -166,9 +207,11 @@ export function openFontPicker(anchor, { current, sample = '', onPreview = () =>
     }
   };
   setTimeout(() => {
+    if (done) return;
     document.addEventListener('pointerdown', outside, true);
     document.addEventListener('keydown', onKey, true);
   }, 0);
+  window.addEventListener('resize', place);
 
   search.addEventListener('input', () => {
     query = search.value;
@@ -177,7 +220,8 @@ export function openFontPicker(anchor, { current, sample = '', onPreview = () =>
   sampleInput.addEventListener('input', () => {
     text = sampleInput.value || '가나다라 Abc 123';
     for (const el of list.querySelectorAll('.fp-preview')) el.textContent = text;
-    for (const el of items) loadFontFor(el.dataset.family, text).catch(() => {});
+    // the new characters may need other font files: load them for the rows on screen
+    observeAll();
   });
   list.addEventListener('pointerleave', () => {
     clearTimeout(previewTimer);
@@ -185,7 +229,8 @@ export function openFontPicker(anchor, { current, sample = '', onPreview = () =>
   });
 
   render();
-  search.focus();
+  // on phones the keyboard would cover the list
+  if (!document.body.classList.contains('mobile')) search.focus();
   open = { close };
   return open;
 }

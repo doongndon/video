@@ -59,7 +59,11 @@ export function installView3(P) {
 
   // ---------------------------------------------------------------- preferences
 
-  C.preferences = () => {
+  /**
+   * Edit ▸ Preferences (Ctrl+K). `section` scrolls to one part: 'perf' (history, memory), 'cursor',
+   * 'transparency', 'units', 'guides'.
+   */
+  C.preferences = (section = null) => {
     const pr = P.prefs;
     const sel = (value, opts) => {
       const s = h('select', opts.map(([v, n]) => h('option', { value: v }, n)));
@@ -73,26 +77,49 @@ export function installView3(P) {
     const wheel = h('input', { type: 'checkbox', checked: !!pr.wheelZoom });
     const autosave = h('input', { type: 'checkbox', checked: pr.autosave !== false });
     const hist = h('input', { type: 'number', min: 100, max: 4000, step: 50, value: pr.historyMB, style: { width: '90px' } });
-    openModal({
-      title: '환경 설정',
-      width: '460px',
-      body: [
-        h('div.ph-sub', '화면'),
+    const states = h('input', { type: 'number', min: 1, max: 1000, step: 1, value: pr.historyStates || 50, style: { width: '90px' } });
+    const snapSave = h('input', { type: 'checkbox', checked: !!pr.snapOnSave });
+    const units = sel(pr.units || 'px', (P.unitList || [['px', '픽셀']]).map(([v, n]) => [v, n]));
+    const res = h('input', { type: 'number', min: 1, max: 4800, step: 1, value: P.doc?.resolution || 72, style: { width: '90px' }, disabled: !P.doc });
+    const guides = P.guidePrefControls?.();
+    const part = (id, title, ...rows) => {
+      const el = h('div.ph-prefsec', h('div.ph-sub', title), ...rows);
+      el.dataset.sec = id;
+      return el;
+    };
+    const body = [
+      part('general', '화면',
         formRow('캔버스 바깥 색', paste),
-        formRow('투명 격자 크기', checker),
-        formRow('투명 격자 색', tone),
-        formRow('칠하기 도구 커서', cursor),
-        h('label.ph-prow', wheel, h('span', '마우스 휠로 확대·축소 (끄면 휠은 화면 이동, Ctrl+휠로 확대)')),
-        h('div.ph-sub', '작업'),
+        h('label.ph-prow', wheel, h('span', '마우스 휠로 확대·축소 (끄면 휠은 화면 이동, Ctrl+휠·Alt+휠로 확대)')),
+        h('label.ph-prow', autosave, h('span', '열린 문서를 이 브라우저에 자동 저장 (새로 고쳐도 이어서)'))),
+      part('perf', '성능 · 작업 내역',
+        formRow('작업 내역 상태 (단계 수)', states),
         formRow('작업 내역 메모리 (MB)', hist),
-        h('label.ph-prow', autosave, h('span', '열린 문서를 이 브라우저에 자동 저장 (새로 고쳐도 이어서)')),
-        h('div.note', '작업 내역 메모리를 늘리면 더 많이 되돌릴 수 있지만 기기 메모리를 더 씁니다. 휴대폰은 350MB 안쪽을 권합니다.'),
-      ],
+        h('label.ph-prow', snapSave, h('span', '저장할 때 자동으로 새 스냅숏 만들기')),
+        h('div.note', '작업 내역 상태는 되돌릴 수 있는 단계 수입니다 (포토샵 기본값 50). 큰 문서에서는 메모리 한도가 먼저 걸릴 수 있어요. 휴대폰은 메모리 350MB 안쪽을 권합니다.')),
+      part('cursor', '커서', formRow('칠하기 도구 커서', cursor)),
+      part('transparency', '투명도', formRow('격자 크기', checker), formRow('격자 색', tone)),
+      part('units', '단위와 눈금자',
+        formRow('눈금자 단위', units),
+        formRow('해상도 (픽셀/인치, 이 문서)', res),
+        h('div.note', 'cm·mm·인치·포인트는 문서 해상도로 픽셀과 바꿉니다. 눈금자를 오른쪽 클릭해도 단위를 바꿀 수 있어요.')),
+      ...(guides ? [part('guides', '안내선, 격자 및 분할 영역', ...guides.rows)] : []),
+    ];
+    const m = openModal({
+      title: '환경 설정',
+      width: '480px',
+      body,
       buttons: [
         { label: '기본값', action: () => {
-          Object.assign(P.prefs, { pasteboard: '#1f2125', checker: 'medium', checkerTone: 'light', cursor: 'outline', wheelZoom: false, autosave: true });
+          Object.assign(P.prefs, { pasteboard: '#1f2125', checker: 'medium', checkerTone: 'light', cursor: 'outline', wheelZoom: false, autosave: true, historyStates: 50, snapOnSave: false, units: 'px' });
           savePref('photo.prefs', P.prefs);
+          guides?.reset();
+          for (const d of P.docs) if (d.history) {
+            d.history.states = 50;
+            d.history.trim();
+          }
           P.invalidateView();
+          P.emit('history');
           toast('환경 설정을 기본값으로 되돌렸습니다');
         } },
         { label: '취소' },
@@ -100,15 +127,36 @@ export function installView3(P) {
           Object.assign(P.prefs, {
             pasteboard: paste.value, checker: checker.value, checkerTone: tone.value, cursor: cursor.value,
             wheelZoom: wheel.checked, autosave: autosave.checked, historyMB: clamp(Math.round(+hist.value || 900), 100, 4000),
+            historyStates: clamp(Math.round(+states.value || 50), 1, 1000), snapOnSave: snapSave.checked, units: units.value,
           });
           savePref('photo.prefs', P.prefs);
-          for (const d of P.docs) if (d.history) d.history.budgetBytes = P.prefs.historyMB * 1e6;
+          for (const d of P.docs) {
+            if (!d.history) continue;
+            d.history.budgetBytes = P.prefs.historyMB * 1e6;
+            d.history.states = P.prefs.historyStates;
+            d.history.trim();
+          }
+          const r = Math.round(+res.value);
+          if (P.doc && r > 0 && r !== P.doc.resolution) P.run('해상도', () => { P.doc.resolution = r; });
+          guides?.apply();
           P.invalidateView();
+          P.emit('history');
+          P.emit('pointer');
           if (P.prefs.autosave) P.scheduleSave?.();
         } },
       ],
     });
+    if (section) {
+      const el = m.modal.querySelector(`[data-sec="${section}"]`);
+      if (el) setTimeout(() => {
+        el.scrollIntoView({ block: 'start' });
+        el.classList.add('ph-prefsec-on');
+        el.querySelector('input,select')?.focus({ preventScroll: true });
+      }, 0);
+    }
   };
+  /** History panel ▸ History Options: steps kept, snapshot on save. */
+  C.historyOptions = () => C.preferences('perf');
 
   // ---------------------------------------------------------------- file, layer commands
 
@@ -171,32 +219,22 @@ export function installView3(P) {
     };
     const at = (items, label) => items.findIndex((x) => typeof x === 'object' && x?.label?.startsWith(label));
     const no = () => !P.doc;
-    const mod = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘' : 'Ctrl+';
-    wrap('파일', (items) => {
-      const i = at(items, '닫기');
-      items.splice(i + 1, 0, { label: '되돌리기 (연 상태로)', disabled: no() || !P.doc?.openState, action: () => C.revert() });
-      return items;
-    });
-    wrap('편집', (items) => {
-      items.push('-', { label: '환경 설정…', key: `${mod}K`, action: () => C.preferences() });
-      return items;
-    });
     wrap('레이어', (items) => {
+      // (Find Layers lives in the Select menu, like Photoshop's)
       const i = at(items, '삭제');
-      items.splice(i + 1, 0, { label: '숨긴 레이어 삭제', disabled: no(), action: () => C.deleteHiddenLayers() });
-      items.splice(at(items, '이름 바꾸기'), 0, { label: '레이어 찾기', key: `${mod}Alt+Shift+F`, action: () => P.focusLayerFilter?.() });
+      items.splice(i >= 0 ? i + 1 : items.length, 0, { label: '숨긴 레이어 삭제', disabled: no(), action: () => C.deleteHiddenLayers() });
       const m = at(items, '레이어 마스크');
       items.splice(m >= 0 ? m : items.length, 0, { label: '배경 제거 (피사체만 남기기)', disabled: no(), action: () => C.removeBackground() });
       return items;
     });
-    wrap('보기', (items) => {
-      items.push('-',
-        { label: '화면 모드', submenu: SCREEN_MODES.map(([k, n]) => ({ label: n, key: k === 'standard' ? 'F' : undefined, checked: mode === k, action: () => C.screenMode(k) })) },
-        { label: '도구·패널 숨기기 / 보이기', key: 'Tab', action: () => C.togglePanels() },
-        { label: '오른쪽 패널만 숨기기 / 보이기', key: 'Shift+Tab', action: () => C.toggleSidePanels() });
-      return items;
-    });
   }];
+  /** View ▸ Screen Mode (view2.js puts it in the View menu). */
+  P.screenModeMenu = () => ({ label: '화면 모드', submenu: [
+    ...SCREEN_MODES.map(([k, n]) => ({ label: n, key: k === 'standard' ? 'F' : undefined, checked: mode === k, action: () => C.screenMode(k) })),
+    '-',
+    { label: '도구·패널 숨기기 / 보이기', key: 'Tab', action: () => C.togglePanels() },
+    { label: '오른쪽 패널만 숨기기 / 보이기', key: 'Shift+Tab', action: () => C.toggleSidePanels() },
+  ] });
 
   // ---------------------------------------------------------------- filters
 

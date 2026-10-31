@@ -6,6 +6,10 @@ import * as SEL from './selection.js';
 import { hasFx } from './styles.js';
 import { mixIntoMask } from './selectx.js';
 import { FONT_CATEGORIES } from '../fonts.js';
+import { h } from '../util.js';
+import { icon } from '../ui/icons.js';
+import { BLEND_MODES, compositeOnto } from './blend.js';
+import { GRADIENTS } from './resources.js';
 
 const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
 const hexRgb = (hex) => {
@@ -231,7 +235,8 @@ export class Stroke {
       g.globalAlpha = 1;
       mixIntoMask(g, this.buf, v, this.o.opacity ?? 1);
     } else {
-      g.globalCompositeOperation = this.mode === 'erase' ? 'destination-out' : this.layer.lockAlpha ? 'source-atop' : 'source-over';
+      // o.blend: the brush's mode in the options bar (a canvas operation, set by brushes.js)
+      g.globalCompositeOperation = this.mode === 'erase' ? 'destination-out' : this.layer.lockAlpha ? 'source-atop' : this.o.blend || 'source-over';
       g.drawImage(this.buf, 0, 0);
     }
     g.restore();
@@ -249,7 +254,9 @@ export class Stroke {
     this.flush();
     if (this.mode === 'heal' && !this.E.healFill?.(this)) heal(this);
     else if (this.o.afterStroke) this.o.afterStroke(this);
-    this.E.commit(this.o.label || '브러시', this.before);
+    // every change was already marked (flush, healing): no need to redraw the whole picture, which
+    // made the end of each stroke stall on big documents
+    this.E.commit(this.o.label || '브러시', this.before, { touched: true });
   }
 }
 
@@ -533,6 +540,11 @@ export function needRaster(E, what = '이 도구') {
     E.toast('잠긴 레이어입니다 (레이어 패널에서 잠금 해제)');
     return false;
   }
+  // like Photoshop: painting on a layer nobody can see would change nothing visible
+  if (E.doc.shown && !E.doc.shown(l)) {
+    E.toast(`대상 레이어가 숨겨져 있어 칠할 수 없습니다: ${what} (레이어 패널에서 눈 아이콘을 켜세요)`);
+    return false;
+  }
   if (E.editMask && l.mask) return true;
   if (l.kind === 'smart') {
     E.toast('고급 개체에는 바로 칠할 수 없습니다. 레이어 ▸ 고급 개체 ▸ 내용 편집, 또는 래스터화한 뒤 칠하세요.');
@@ -545,25 +557,69 @@ export function needRaster(E, what = '이 도구') {
   return true;
 }
 
-function pickColor(E, p, toBg) {
-  const c = E.composite();
-  const x = Math.floor(p.x);
-  const y = Math.floor(p.y);
-  if (x < 0 || y < 0 || x >= c.width || y >= c.height) return;
-  const s = E.opts('eyedropper').sample || 1;
+// what the eyedropper reads, remembered until the picture changes
+const sampleCache = { key: '', c: null };
+
+/** The canvas (doc coords at x, y) the eyedropper samples: all layers, the layers up to the active one, or the active one. */
+function sampleSource(E, which) {
+  const doc = E.doc;
+  const l = doc.active;
+  if (which === 'current' && l) {
+    const ct = doc.content(l);
+    return ct ? { canvas: ct.canvas, x: ct.x, y: ct.y } : null;
+  }
+  if (which === 'below' && l) {
+    const key = `${doc.id}:${doc.rev}:${l.id}`;
+    if (sampleCache.key !== key) {
+      sampleCache.key = key;
+      sampleCache.c = doc.flatten({ upTo: doc.index(l.id) + 1, fg: E.fg, bg: E.bg });
+    }
+    return { canvas: sampleCache.c, x: 0, y: 0 };
+  }
+  return { canvas: E.composite(), x: 0, y: 0 };
+}
+
+/**
+ * The colour at p averaged over the eyedropper's sample size (transparent pixels count for
+ * nothing), or null where there is nothing to pick.
+ */
+export function sampleColor(E, p, o = E.opts('eyedropper')) {
+  const src = sampleSource(E, o.layers || 'all');
+  if (!src?.canvas) return null;
+  const s = Math.max(1, +o.sample || 1);
   const r = Math.floor(s / 2);
-  const d = c.getContext('2d').getImageData(Math.max(0, x - r), Math.max(0, y - r), s, s).data;
+  const cx = Math.floor(p.x) - src.x;
+  const cy = Math.floor(p.y) - src.y;
+  const x0 = Math.max(0, cx - r);
+  const y0 = Math.max(0, cy - r);
+  const x1 = Math.min(src.canvas.width, cx - r + s);
+  const y1 = Math.min(src.canvas.height, cy - r + s);
+  if (x1 <= x0 || y1 <= y0) return null;
+  const d = src.canvas.getContext('2d').getImageData(x0, y0, x1 - x0, y1 - y0).data;
   let rr = 0;
   let gg = 0;
   let bb = 0;
-  let n = 0;
+  let aa = 0;
   for (let i = 0; i < d.length; i += 4) {
-    rr += d[i];
-    gg += d[i + 1];
-    bb += d[i + 2];
-    n++;
+    const a = d[i + 3];
+    rr += d[i] * a;
+    gg += d[i + 1] * a;
+    bb += d[i + 2] * a;
+    aa += a;
   }
-  E.setColor(rgbHex(rr / n, gg / n, bb / n), toBg);
+  return aa ? [rr / aa, gg / aa, bb / aa] : null;
+}
+
+function pickColor(E, p, toBg) {
+  const c = sampleColor(E, p);
+  if (c) E.setColor(rgbHex(...c), toBg);
+  return c;
+}
+
+/** The eyedropper's overlay: the marks brushes.js draws (samplers, notes) and the sampling ring. */
+function eyedropperOverlay(E, g) {
+  this.marks?.(E, g);
+  this.drawRing?.(E, g);
 }
 
 /** Selection mode from options + modifier keys. */
@@ -813,7 +869,8 @@ function strokeTool(id, name, key, icon, mode, extra = {}) {
       if (extra.hardness100) bo.hardness = 1;
       if (E.brushEngine && mode !== 'heal') bo.engine = E.brushEngine(id, o, bo, mode);
       this.st = new Stroke(E, mode, bo);
-      this.st.to(p, e.pressure || 1);
+      // a mouse reports pressure 0.5 while a button is down: only a pen's pressure counts
+      this.st.to(p, e.pointerType === 'pen' ? e.pressure || 1 : 1);
       this.st.flush();
     },
     move(E, p, e) {
@@ -952,6 +1009,134 @@ function typeTool(id, name, key, icon, { vertical, mask }) {
 }
 const p0 = (d) => d.a;
 
+// ---------------------------------------------------------------- crop presets and overlays
+
+/** The crop tool's ratio menu (Photoshop's presets; "px:" entries set a pixel size). */
+export const CROP_PRESETS = [
+  ['free', '비율'], ['wxh', 'W x H x 해상도'], ['orig', '원본 비율'], ['1:1', '1:1 (정사각형)'], ['4:5', '4:5 (8:10)'], ['5:7', '5:7'], ['2:3', '2:3 (4:6)'], ['16:9', '16:9'],
+  ['4:3', '4:3'], ['3:2', '3:2'], ['9:16', '9:16'], ['px:1080x1080', '1080 x 1080 픽셀 72ppi'], ['px:1080x1350', '1080 x 1350 픽셀 72ppi'], ['px:1920x1080', '1920 x 1080 픽셀 72ppi'], ['px:1280x720', '1280 x 720 픽셀 72ppi'],
+];
+export const CROP_OVERLAYS = [['thirds', '삼등분 법칙'], ['grid', '격자'], ['diagonal', '대각선'], ['triangle', '삼각형'], ['golden', '황금 비율'], ['spiral', '황금 나선'], ['none', '오버레이 없음']];
+
+/** An angle in (-π, π]. */
+const normAngle = (a) => {
+  let x = a % (Math.PI * 2);
+  if (x > Math.PI) x -= Math.PI * 2;
+  if (x <= -Math.PI) x += Math.PI * 2;
+  return x;
+};
+
+/** A crop overlay in a W×H box centred on the origin (the context is already turned with the box). */
+function drawCropOverlay(g, kind, flip, W, H) {
+  const x0 = -W / 2;
+  const y0 = -H / 2;
+  g.save();
+  g.beginPath();
+  g.rect(x0, y0, W, H);
+  g.clip();
+  // Shift+O turns the shapes that have a direction
+  if (kind === 'triangle' || kind === 'spiral' || kind === 'diagonal') g.scale(flip & 1 ? -1 : 1, flip & 2 ? -1 : 1);
+  g.beginPath();
+  const line = (ax, ay, bx, by) => {
+    g.moveTo(x0 + ax, y0 + ay);
+    g.lineTo(x0 + bx, y0 + by);
+  };
+  if (kind === 'thirds' || kind === 'golden') {
+    for (const k of kind === 'thirds' ? [1 / 3, 2 / 3] : [0.382, 0.618]) {
+      line(W * k, 0, W * k, H);
+      line(0, H * k, W, H * k);
+    }
+  } else if (kind === 'grid') {
+    const step = Math.max(12, Math.max(W, H) / 12);
+    for (let x = step; x < W; x += step) line(x, 0, x, H);
+    for (let y = step; y < H; y += step) line(0, y, W, y);
+  } else if (kind === 'diagonal') {
+    const m = Math.min(W, H);
+    line(0, 0, m, m);
+    line(W, 0, W - m, m);
+    line(0, H, m, H - m);
+    line(W, H, W - m, H - m);
+  } else if (kind === 'triangle') {
+    line(0, 0, W, H);
+    // perpendiculars from the two other corners onto the diagonal
+    const L2 = W * W + H * H || 1;
+    const foot = (px, py) => {
+      const t = (px * W + py * H) / L2;
+      return [W * t, H * t];
+    };
+    line(W, 0, ...foot(W, 0));
+    line(0, H, ...foot(0, H));
+  } else if (kind === 'spiral') {
+    // golden sections turning inwards, a quarter curve in each
+    let [rx, ry, rw, rh] = [x0, y0, W, H];
+    const start = W >= H ? 0 : 1;
+    for (let i = start; i < start + 12; i++) {
+      const k = 0.618;
+      const side = i % 4;
+      let px;
+      let py;
+      let pw;
+      let ph;
+      if (side === 0) {
+        [px, py, pw, ph] = [rx, ry, rw * k, rh];
+        [rx, rw] = [rx + pw, rw - pw];
+        g.moveTo(px + pw, py);
+        g.lineTo(px + pw, py + ph);
+        g.moveTo(px, py + ph);
+        g.ellipse(px + pw, py + ph, pw, ph, 0, Math.PI, Math.PI * 1.5);
+      } else if (side === 1) {
+        [px, py, pw, ph] = [rx, ry, rw, rh * k];
+        [ry, rh] = [ry + ph, rh - ph];
+        g.moveTo(px, py + ph);
+        g.lineTo(px + pw, py + ph);
+        g.moveTo(px, py);
+        g.ellipse(px, py + ph, pw, ph, 0, Math.PI * 1.5, Math.PI * 2);
+      } else if (side === 2) {
+        [pw, ph] = [rw * k, rh];
+        [px, py] = [rx + rw - pw, ry];
+        rw -= pw;
+        g.moveTo(px, py);
+        g.lineTo(px, py + ph);
+        g.moveTo(px + pw, py);
+        g.ellipse(px, py, pw, ph, 0, 0, Math.PI * 0.5);
+      } else {
+        [pw, ph] = [rw, rh * k];
+        [px, py] = [rx, ry + rh - ph];
+        rh -= ph;
+        g.moveTo(px, py);
+        g.lineTo(px + pw, py);
+        g.moveTo(px + pw, py + ph);
+        g.ellipse(px + pw, py, pw, ph, 0, Math.PI * 0.5, Math.PI);
+      }
+      if (pw < 1 || ph < 1) break;
+    }
+  }
+  g.stroke();
+  g.restore();
+}
+
+// ---------------------------------------------------------------- gradient options
+
+const GRAD_MODE = ['mode', '모드', 'select', null, null, 'normal', BLEND_MODES.map(([id, name]) => [id, name])];
+const GRAD_TRANSPARENCY = ['transparency', '투명도', 'bool', null, null, true];
+const GRAD_ORDER = ['preset', 'style', 'type', 'to', 'mode', 'opacity', 'reverse', 'dither', 'transparency'];
+
+/** The gradient tool's options with Mode and Transparency, in Photoshop's order. */
+function gradientOptions(list) {
+  const rest = list.filter((o) => o[0] !== 'mode' && o[0] !== 'transparency');
+  const all = [...rest, GRAD_MODE, GRAD_TRANSPARENCY];
+  const rank = (o) => {
+    const i = GRAD_ORDER.indexOf(o[0]);
+    return i < 0 ? GRAD_ORDER.length + all.indexOf(o) : i;
+  };
+  return all.sort((a, b) => rank(a) - rank(b));
+}
+
+/** The gradient the options name (a preset or the edited one). */
+function gradientOf(o) {
+  return o.preset === 'custom' && o.custom ? o.custom : GRADIENTS.find((g) => g.id === o.preset) || GRADIENTS[0];
+}
+
 export const TOOLS = [
   // ---- move
   {
@@ -980,6 +1165,8 @@ export const TOOLS = [
       const doc = E.doc;
       const l = doc.active;
       if (!E.opts('move').showTransform || E.transform || doc.selectedLayers.length !== 1 || !l || l.kind === 'adjust' || l.kind === 'fill' || isBackdrop(doc, l)) return null;
+      // with a selection, a free transform works on the selected pixels, not the layer's box
+      if (doc.selection && l.kind === 'raster') return null;
       const f = E.layerFrame(l);
       if (!f || f.box.w < 1 || f.box.h < 1) return null;
       const q = f.quad;
@@ -1111,14 +1298,17 @@ export const TOOLS = [
       }
       const before = doc.capture();
       let float = null;
+      let dup = false;
       // with a selection, Alt+drag duplicates the pixels instead of cutting them out
       if (doc.selection && l.kind === 'raster') float = liftSelection(E, { copy: !!e?.altKey });
       else if (e?.altKey && !doc.selection) {
-        // Alt+drag a layer: move a copy
+        // Alt+drag a layer: move a copy (one undo step with the move, see up())
+        const top = doc.history.undoStack.at(-1);
         E.cmd.duplicateLayer();
-        doc.history.undoStack.pop();
+        dup = doc.history.undoStack.at(-1) !== top;
+        if (dup) doc.history.undoStack.pop();
       }
-      this.d = { a: p, before, float, moving: doc.selectedLayers.filter((x) => x.kind !== 'adjust' || x.mask), last: { dx: 0, dy: 0 }, sel: doc.selection };
+      this.d = { a: p, before, float, dup, moving: doc.selectedLayers.filter((x) => x.kind !== 'adjust' || x.mask), last: { dx: 0, dy: 0 }, sel: doc.selection };
       E.float = float;
       E.redraw();
     },
@@ -1147,8 +1337,18 @@ export const TOOLS = [
       const d = this.d;
       this.d = null;
       if (!d) return;
+      const off = d.offset || { dx: 0, dy: 0 };
+      // a click without a drag changes nothing: no lifted pixels are put back as a step, and an
+      // Alt+click leaves no unrecorded copy of the layer behind
+      if (d.float ? !off.dx && !off.dy : !d.last.dx && !d.last.dy) {
+        E.float = null;
+        if (d.float || d.dup) {
+          E.doc.restore(d.before);
+          E.afterHistory();
+        } else E.redraw();
+        return;
+      }
       if (d.float) {
-        const off = d.offset || { dx: 0, dy: 0 };
         dropFloat(E, E.float || d.float);
         E.float = null;
         if (d.sel && (off.dx || off.dy)) {
@@ -1157,20 +1357,34 @@ export const TOOLS = [
           E.doc.selection = { canvas: c };
         }
         E.doc.touch(E.doc.active);
-      } else if (!d.last.dx && !d.last.dy) {
-        E.redraw();
-        return;
       }
       // a plain move touched the layers while dragging: touching again would redo masks and styles,
       // and redrawing the whole picture would stall the end of the drag
-      E.commit('이동', d.before, { touched: true });
+      E.commit(d.dup ? '레이어 복제' : '이동', d.before, { touched: true });
     },
     cancel(E) {
       if (!this.d) return;
       E.float = null;
       E.doc.restore(this.d.before);
       this.d = null;
-      E.redraw();
+      E.afterHistory();
+    },
+    /** Options bar: align and distribute the selected layers (Photoshop's move tool buttons). */
+    optionButtons(E) {
+      const C = E.cmd;
+      const b = (ic, title, fn) => h('button.small.ph-icobtn', { title, 'aria-label': title, onclick: fn }, icon(ic, 16));
+      return [
+        h('span.ph-opt', { style: { gap: '2px' } },
+          b('alignLeft', '왼쪽 가장자리 정렬', () => C.align('left')),
+          b('alignHCenter', '수평 중앙 정렬', () => C.align('hcenter')),
+          b('alignRight', '오른쪽 가장자리 정렬', () => C.align('right')),
+          b('alignTop', '위쪽 가장자리 정렬', () => C.align('top')),
+          b('alignVCenter', '수직 중앙 정렬', () => C.align('vcenter')),
+          b('alignBottom', '아래쪽 가장자리 정렬', () => C.align('bottom'))),
+        h('span.ph-opt', { style: { gap: '2px' } },
+          b('distH', '수평 중앙 분포 (레이어 3개 이상)', () => C.distribute('h')),
+          b('distV', '수직 중앙 분포 (레이어 3개 이상)', () => C.distribute('v'))),
+      ];
     },
   },
   // ---- selections
@@ -1194,115 +1408,488 @@ export const TOOLS = [
   // ---- crop
   {
     id: 'crop', name: '자르기', key: 'C', icon: 'crop', group: 'crop', cursor: 'crosshair',
-    options: [['ratio', '비율', 'select', null, null, 'free', [['free', '자유'], ['1:1', '1:1'], ['4:3', '4:3'], ['3:2', '3:2'], ['16:9', '16:9'], ['9:16', '9:16'], ['4:5', '4:5']]], ['deletePixels', '잘린 픽셀 삭제', 'bool', null, null, false]],
+    // shown by optionButtons (ratio menu, W ⇄ H, straighten, overlay, delete cropped pixels…)
+    options: [
+      ['ratio', '비율', 'none', null, null, 'free'],
+      ['rw', 'W', 'none', null, null, ''],
+      ['rh', 'H', 'none', null, null, ''],
+      ['res', '해상도', 'none', null, null, 72],
+      ['overlay', '오버레이', 'none', null, null, 'thirds'],
+      ['flip', '오버레이 방향', 'none', null, null, 0],
+      ['deletePixels', '자른 픽셀 삭제', 'none', null, null, false],
+      ['contentAware', '내용 인식', 'none', null, null, false],
+    ],
     activate(E) {
-      // the whole picture to start with; dragging inside it draws a new box (like Photoshop)
-      this.r = { x: 0, y: 0, w: E.doc.width, h: E.doc.height };
+      // the whole picture to start with; dragging draws a new box (like Photoshop)
+      const doc = E.doc;
+      this.d = null;
+      this.b = doc ? { cx: doc.width / 2, cy: doc.height / 2, w: doc.width, h: doc.height, a: 0 } : null;
+      this.on = doc ? { doc, w: doc.width, h: doc.height } : null;
       this.fresh = true;
+      if (doc && this.ratio(E)) this.fitRatio(E, true);
       E.overlay();
     },
     deactivate() {
-      this.r = null;
+      this.b = null;
+      this.d = null;
+      this.straighten = false;
     },
-    down(E, p) {
-      const r = this.r || { x: 0, y: 0, w: E.doc.width, h: E.doc.height };
-      const h = this.handleAt(E, p, r);
-      this.d = { a: p, r0: { ...r }, h: h || (inside(p, r) && !this.fresh ? 'move' : 'new') };
-      this.fresh = false;
-      if (this.d.h === 'new') this.r = { x: p.x, y: p.y, w: 0, h: 0 };
+    /** The box, kept in step with the picture while it is untouched (undo, another document). */
+    box(E) {
+      const doc = E.doc;
+      if (!doc) return null;
+      const moved = !this.on || this.on.doc !== doc || this.on.w !== doc.width || this.on.h !== doc.height;
+      if (!this.b || (moved && !this.d && (this.fresh || this.on?.doc !== doc))) this.activate(E);
+      return this.b;
+    },
+    /** Width : height the box keeps, or 0 when free. */
+    ratio(E) {
+      const o = E.opts('crop');
+      if (o.ratio === 'orig') return E.doc ? E.doc.width / E.doc.height : 0;
+      const w = +o.rw;
+      const hh = +o.rh;
+      return w > 0 && hh > 0 ? w / hh : 0;
+    },
+    corners(b = this.b) {
+      const c = Math.cos(b.a);
+      const s = Math.sin(b.a);
+      return [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([u, v]) => [b.cx + ((u * b.w) / 2) * c - ((v * b.h) / 2) * s, b.cy + ((u * b.w) / 2) * s + ((v * b.h) / 2) * c]);
+    },
+    /** A doc point in the box's own (turned, centred) frame. */
+    local(p, b = this.b) {
+      const c = Math.cos(b.a);
+      const s = Math.sin(b.a);
+      const dx = p.x - b.cx;
+      const dy = p.y - b.cy;
+      return [dx * c + dy * s, -dx * s + dy * c];
+    },
+    handleAt(E, p) {
+      const b = this.b;
+      const tol = 10 / E.view.zoom;
+      const [lx, ly] = this.local(p);
+      const hw = b.w / 2;
+      const hh = b.h / 2;
+      const hs = { tl: [-hw, -hh], tr: [hw, -hh], bl: [-hw, hh], br: [hw, hh], t: [0, -hh], b: [0, hh], l: [-hw, 0], r: [hw, 0] };
+      let best = null;
+      let bd = tol;
+      for (const [k, [x, y]] of Object.entries(hs)) {
+        const d = Math.hypot(lx - x, ly - y);
+        if (d <= bd) {
+          bd = d;
+          best = k;
+        }
+      }
+      return best;
+    },
+    hover(E, p) {
+      // the pointer shows what a drag does: turn outside the box, move inside
+      const b = this.box(E);
+      if (!b || this.d) return;
+      const st = document.querySelector('.ph-stage');
+      if (!st) return;
+      const k = this.straighten ? 'crosshair' : this.handleAt(E, p);
+      const [lx, ly] = this.local(p);
+      const inside = Math.abs(lx) <= b.w / 2 && Math.abs(ly) <= b.h / 2;
+      const cur = k === 'crosshair' ? k : k ? (['t', 'b'].includes(k) ? 'ns-resize' : ['l', 'r'].includes(k) ? 'ew-resize' : ['tl', 'br'].includes(k) ? 'nwse-resize' : 'nesw-resize') : this.fresh ? 'crosshair' : inside ? 'move' : 'alias';
+      this.cursor = cur;
+    },
+    down(E, p, e) {
+      const b = this.box(E);
+      if (!b) return;
+      // Straighten (or Ctrl held): draw a line along what should be level
+      if (this.straighten || e.ctrlKey || e.metaKey) {
+        this.d = { h: 'line', a: p, b: p, moved: false };
+        return;
+      }
+      const hd = this.handleAt(E, p);
+      const [lx, ly] = this.local(p);
+      const inside = Math.abs(lx) <= b.w / 2 && Math.abs(ly) <= b.h / 2;
+      this.d = { h: hd || (this.fresh ? 'new' : inside ? 'move' : 'rotate'), a: p, b0: { ...b }, moved: false };
     },
     move(E, p, e) {
       const d = this.d;
       if (!d) return;
-      const dx = p.x - d.a.x;
-      const dy = p.y - d.a.y;
-      let r = { ...d.r0 };
-      if (d.h === 'move') {
-        r.x += dx;
-        r.y += dy;
-      } else if (d.h === 'new') r = { x: Math.min(d.a.x, p.x), y: Math.min(d.a.y, p.y), w: Math.abs(p.x - d.a.x), h: Math.abs(p.y - d.a.y) };
-      else {
-        if (d.h.includes('l')) {
-          r.x += dx;
-          r.w -= dx;
+      if (!d.moved && Math.hypot(p.x - d.a.x, p.y - d.a.y) * E.view.zoom < 2) return;
+      d.moved = true;
+      const b0 = d.b0;
+      const k = this.ratio(E);
+      if (d.h === 'line') d.b = p;
+      else if (d.h === 'move') this.b = { ...b0, cx: b0.cx + p.x - d.a.x, cy: b0.cy + p.y - d.a.y };
+      else if (d.h === 'rotate') {
+        let ang = b0.a + Math.atan2(p.y - b0.cy, p.x - b0.cx) - Math.atan2(d.a.y - b0.cy, d.a.x - b0.cx);
+        if (e.shiftKey) ang = Math.round(ang / (Math.PI / 12)) * (Math.PI / 12);
+        this.b = this.fitInside(E, { ...b0, a: normAngle(ang) }, b0);
+      } else if (d.h === 'new') {
+        let w = p.x - d.a.x;
+        let hh = p.y - d.a.y;
+        // a ratio (or Shift: a square) keeps the corner pressed on where it is
+        const kk = k || (e.shiftKey ? 1 : 0);
+        if (kk) {
+          if (Math.abs(w) / kk > Math.abs(hh)) hh = (Math.sign(hh) || 1) * (Math.abs(w) / kk);
+          else w = (Math.sign(w) || 1) * Math.abs(hh) * kk;
         }
-        if (d.h.includes('r')) r.w += dx;
-        if (d.h.includes('t')) {
-          r.y += dy;
-          r.h -= dy;
-        }
-        if (d.h.includes('b')) r.h += dy;
-      }
-      const ratio = E.opts('crop').ratio;
-      const k = e.shiftKey ? d.r0.w / Math.max(1, d.r0.h) : ratio === 'free' ? 0 : ratio.split(':').reduce((a, c) => a / c);
-      if (k && d.h !== 'move') r.h = Math.abs(r.w) / k;
-      if (r.w < 0) {
-        r.x += r.w;
-        r.w = -r.w;
-      }
-      if (r.h < 0) {
-        r.y += r.h;
-        r.h = -r.h;
-      }
-      this.r = r;
+        this.b = e.altKey ? { cx: d.a.x, cy: d.a.y, w: Math.abs(w) * 2, h: Math.abs(hh) * 2, a: 0 } : { cx: d.a.x + w / 2, cy: d.a.y + hh / 2, w: Math.abs(w), h: Math.abs(hh), a: 0 };
+      } else this.b = this.resize(d, p, e, k);
       E.overlay();
     },
-    up(E) {
-      // a click without dragging brings the whole-picture box back
-      if (this.d?.h === 'new' && this.r && (this.r.w < 2 || this.r.h < 2)) this.activate(E);
-      this.d = null;
+    /** Drag a handle: in the box's own frame, the opposite side stays (Alt: the centre). */
+    resize(d, p, e, k) {
+      const b0 = d.b0;
+      const [ax, ay] = this.local(d.a, b0);
+      const [px, py] = this.local(p, b0);
+      const dx = px - ax;
+      const dy = py - ay;
+      let L = -b0.w / 2;
+      let R = b0.w / 2;
+      let T = -b0.h / 2;
+      let B = b0.h / 2;
+      const hd = d.h;
+      const alt = !!e.altKey;
+      if (hd.includes('l')) {
+        L += dx;
+        if (alt) R -= dx;
+      }
+      if (hd.includes('r')) {
+        R += dx;
+        if (alt) L -= dx;
+      }
+      if (hd.includes('t')) {
+        T += dy;
+        if (alt) B -= dy;
+      }
+      if (hd.includes('b')) {
+        B += dy;
+        if (alt) T -= dy;
+      }
+      const corner = hd.length === 2;
+      // Shift on a corner keeps the box's own proportions when no ratio is set
+      const kk = k || (corner && e.shiftKey ? b0.w / Math.max(1e-6, b0.h) : 0);
+      if (kk) {
+        let w = R - L;
+        let hh = B - T;
+        if (corner) {
+          if (Math.abs(w) / kk > Math.abs(hh)) hh = (Math.sign(hh) || 1) * (Math.abs(w) / kk);
+          else w = (Math.sign(w) || 1) * Math.abs(hh) * kk;
+          if (alt) [L, R, T, B] = [-w / 2, w / 2, -hh / 2, hh / 2];
+          else {
+            if (hd.includes('l')) L = R - w;
+            else R = L + w;
+            if (hd.includes('t')) T = B - hh;
+            else B = T + hh;
+          }
+        } else if (hd === 't' || hd === 'b') {
+          w = Math.abs(hh) * kk;
+          const mid = (L + R) / 2;
+          [L, R] = [mid - w / 2, mid + w / 2];
+        } else {
+          hh = Math.abs(w) / kk;
+          const mid = (T + B) / 2;
+          [T, B] = [mid - hh / 2, mid + hh / 2];
+        }
+      }
+      const c = Math.cos(b0.a);
+      const s = Math.sin(b0.a);
+      const mx = (L + R) / 2;
+      const my = (T + B) / 2;
+      return { cx: b0.cx + mx * c - my * s, cy: b0.cy + mx * s + my * c, w: Math.max(1, Math.abs(R - L)), h: Math.max(1, Math.abs(B - T)), a: b0.a };
     },
-    dblclick(E) {
-      this.apply(E);
+    /**
+     * While turning: shrink the box (from its size before the turn) so no empty corners come in,
+     * unless Content-Aware will fill them or the box already reached outside the picture.
+     */
+    fitInside(E, b, b0 = b) {
+      if (E.opts('crop').contentAware) return b;
+      const W = E.doc.width;
+      const H = E.doc.height;
+      if (!this.corners({ ...b0 }).every(([x, y]) => x >= -0.5 && y >= -0.5 && x <= W + 0.5 && y <= H + 0.5)) return b;
+      const c = Math.cos(b.a);
+      const sn = Math.sin(b.a);
+      let s = 1;
+      for (const [u, v] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) {
+        const vx = ((u * b.w) / 2) * c - ((v * b.h) / 2) * sn;
+        const vy = ((u * b.w) / 2) * sn + ((v * b.h) / 2) * c;
+        if (vx > 1e-9) s = Math.min(s, (W - b.cx) / vx);
+        else if (vx < -1e-9) s = Math.min(s, -b.cx / vx);
+        if (vy > 1e-9) s = Math.min(s, (H - b.cy) / vy);
+        else if (vy < -1e-9) s = Math.min(s, -b.cy / vy);
+      }
+      s = Math.max(0.02, s);
+      return { ...b, w: b.w * s, h: b.h * s };
+    },
+    /** Turn the box so a line at `ang` (radians) becomes level (or upright, whichever is nearer). */
+    straightenTo(E, ang) {
+      const doc = E.doc;
+      const a = normAngle(ang - Math.round(ang / (Math.PI / 2)) * (Math.PI / 2));
+      const k = this.ratio(E);
+      let w = doc.width;
+      let hh = doc.height;
+      if (k) {
+        if (w / hh > k) w = hh * k;
+        else hh = w / k;
+      }
+      // the biggest box of these proportions inside the turned picture
+      const b0 = { cx: doc.width / 2, cy: doc.height / 2, w, h: hh, a: 0 };
+      this.b = this.fitInside(E, { ...b0, a }, b0);
+      this.fresh = false;
+    },
+    up(E) {
+      const d = this.d;
+      this.d = null;
+      if (!d) return;
+      if (d.h === 'line') {
+        if (d.moved && dist(d.a, d.b) * E.view.zoom > 4) this.straightenTo(E, Math.atan2(d.b.y - d.a.y, d.b.x - d.a.x));
+        if (this.straighten) {
+          this.straighten = false;
+          E.emit('opts');
+        }
+        E.overlay();
+        return;
+      }
+      if (!d.moved) return;
+      // a box too small to see: back to the whole picture
+      if (d.h === 'new' && (this.b.w * E.view.zoom < 3 || this.b.h * E.view.zoom < 3)) {
+        this.activate(E);
+        return;
+      }
+      this.fresh = false;
+      E.overlay();
+    },
+    dblclick(E, p) {
+      const b = this.box(E);
+      if (!b) return;
+      const [lx, ly] = this.local(p);
+      if (Math.abs(lx) <= b.w / 2 && Math.abs(ly) <= b.h / 2) this.apply(E);
     },
     onKey(E, e) {
+      if (!this.box(E)) return false;
       if (e.key === 'Enter') this.apply(E);
-      else if (e.key === 'Escape') this.activate(E);
-      else return false;
+      else if (e.key === 'Escape') this.reset(E);
+      else if (e.code === 'KeyO' && !e.altKey) this.cycleOverlay(E, e.shiftKey);
+      else if (e.code === 'KeyX' && !e.altKey && !e.shiftKey) this.swap(E);
+      else if (e.key.startsWith('Arrow')) {
+        const s = e.shiftKey ? 10 : 1;
+        const dx = e.key === 'ArrowLeft' ? -s : e.key === 'ArrowRight' ? s : 0;
+        const dy = e.key === 'ArrowUp' ? -s : e.key === 'ArrowDown' ? s : 0;
+        this.b = { ...this.b, cx: this.b.cx + dx, cy: this.b.cy + dy };
+        this.fresh = false;
+        E.overlay();
+      } else return false;
       return true;
     },
-    apply(E) {
-      const r = this.r;
-      if (!r || r.w < 1 || r.h < 1) return;
-      if (Math.round(r.x) === 0 && Math.round(r.y) === 0 && Math.round(r.w) === E.doc.width && Math.round(r.h) === E.doc.height) return;
-      E.cropTo({ x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.w), h: Math.round(r.h) }, E.opts('crop').deletePixels);
+    reset(E) {
+      this.straighten = false;
       this.activate(E);
+      E.emit('opts');
     },
-    handleAt(E, p, r) {
-      const tol = 10 / E.view.zoom;
-      const near = (x, y) => Math.abs(p.x - x) < tol && Math.abs(p.y - y) < tol;
-      const hs = { tl: [r.x, r.y], tr: [r.x + r.w, r.y], bl: [r.x, r.y + r.h], br: [r.x + r.w, r.y + r.h], t: [r.x + r.w / 2, r.y], b: [r.x + r.w / 2, r.y + r.h], l: [r.x, r.y + r.h / 2], r: [r.x + r.w, r.y + r.h / 2] };
-      return Object.keys(hs).find((k) => near(...hs[k])) || null;
+    /** O: the next overlay; Shift+O: turn the triangle / spiral / diagonal around. */
+    cycleOverlay(E, turn) {
+      const o = E.opts('crop');
+      if (turn) E.setOpt('crop', 'flip', ((+o.flip || 0) + 1) % 4);
+      else {
+        const list = CROP_OVERLAYS.filter((x) => x[0] !== 'none');
+        const i = list.findIndex((x) => x[0] === o.overlay);
+        const next = list[(i + 1) % list.length];
+        E.setOpt('crop', 'overlay', next[0]);
+        E.toast(`오버레이: ${next[1]}`);
+      }
+    },
+    /** X / the swap button: portrait ⇄ landscape (the ratio fields swap too). */
+    swap(E) {
+      const o = E.opts('crop');
+      if (o.ratio === 'orig') E.setOpt('crop', 'ratio', 'free');
+      if (o.rw !== '' || o.rh !== '' || o.ratio === 'free') {
+        const [w, hh] = [o.ratio === 'orig' ? E.doc.width : o.rw, o.ratio === 'orig' ? E.doc.height : o.rh];
+        E.setOpt('crop', 'rw', hh);
+        E.setOpt('crop', 'rh', w);
+      }
+      const b = this.b;
+      this.b = this.fitInside(E, { ...b, w: b.h, h: b.w }, { ...b, w: b.h, h: b.w });
+      // the swapped box keeps inside the picture
+      const doc = E.doc;
+      if (this.b.w > doc.width || this.b.h > doc.height) {
+        const s = Math.min(doc.width / this.b.w, doc.height / this.b.h);
+        if (!this.b.a) this.b = { ...this.b, w: this.b.w * s, h: this.b.h * s, cx: doc.width / 2, cy: doc.height / 2 };
+      }
+      this.fresh = false;
+      E.overlay();
+    },
+    /** A ratio preset from the menu (W x H x Resolution presets set a pixel size). */
+    setPreset(E, v) {
+      const set = (k, x) => E.setOpt('crop', k, x);
+      if (v.startsWith('px:')) {
+        const [w, hh] = v.slice(3).split('x').map(Number);
+        set('ratio', 'wxh');
+        set('rw', w);
+        set('rh', hh);
+        set('res', 72);
+      } else if (v === 'free' || v === 'wxh' || v === 'orig') {
+        set('ratio', v);
+        set('rw', '');
+        set('rh', '');
+      } else {
+        const [w, hh] = v.split(':').map(Number);
+        set('ratio', v);
+        set('rw', w);
+        set('rh', hh);
+      }
+      this.fitRatio(E);
+    },
+    /** A new ratio: the box becomes the biggest one of those proportions inside the current one. */
+    fitRatio(E, keepFresh = false) {
+      const k = this.ratio(E);
+      const b = this.box(E);
+      if (!k || !b) return void E.overlay();
+      let w = b.w;
+      let hh = b.h;
+      if (w / hh > k) w = hh * k;
+      else hh = w / k;
+      this.b = { ...b, w, h: hh };
+      if (!keepFresh) this.fresh = false;
+      E.overlay();
+    },
+    apply(E) {
+      const b = this.box(E);
+      const doc = E.doc;
+      if (!b || b.w < 1 || b.h < 1) return;
+      const o = E.opts('crop');
+      const size = o.ratio === 'wxh' && +o.rw > 0 && +o.rh > 0 ? { w: Math.round(+o.rw), h: Math.round(+o.rh) } : null;
+      const turned = Math.abs(b.a) > 1e-4;
+      const whole = !turned && Math.round(b.cx - b.w / 2) === 0 && Math.round(b.cy - b.h / 2) === 0 && Math.round(b.w) === doc.width && Math.round(b.h) === doc.height;
+      if (whole && (!size || (size.w === doc.width && size.h === doc.height))) return;
+      const opts = { deletePixels: !!o.deletePixels, contentAware: !!o.contentAware, size, res: size ? +o.res || null : null };
+      this.b = null;
+      this.straighten = false;
+      const r = E.cmd.cropBox
+        ? E.cmd.cropBox({ cx: b.cx, cy: b.cy, w: b.w, h: b.h, a: turned ? b.a : 0 }, opts)
+        : E.cropTo({ x: Math.round(b.cx - b.w / 2), y: Math.round(b.cy - b.h / 2), w: Math.round(b.w), h: Math.round(b.h) }, opts.deletePixels);
+      Promise.resolve(r).then(() => {
+        if (E.tool === 'crop') this.activate(E);
+        E.emit('opts');
+      });
     },
     overlay(E, g) {
-      const r = this.r;
-      if (!r) return;
-      const [x, y] = E.toScreen(r.x, r.y);
-      const w = r.w * E.view.zoom;
-      const h = r.h * E.view.zoom;
+      const b = this.box(E);
+      if (!b) return;
+      const z = E.view.zoom;
+      const cs = this.corners(b).map(([x, y]) => E.toScreen(x, y));
       g.save();
+      // what is cut away is dimmed
       g.fillStyle = 'rgba(0,0,0,0.5)';
       g.beginPath();
-      g.rect(0, 0, g.canvas.width, g.canvas.height);
-      g.rect(x, y, w, h);
+      g.rect(-1e5, -1e5, 2e5, 2e5);
+      cs.forEach(([x, y], i) => (i ? g.lineTo(x, y) : g.moveTo(x, y)));
+      g.closePath();
       g.fill('evenodd');
-      g.strokeStyle = '#fff';
+      const [sx, sy] = E.toScreen(b.cx, b.cy);
+      const W = b.w * z;
+      const H = b.h * z;
+      g.translate(sx, sy);
+      g.rotate(b.a);
+      const o = E.opts('crop');
       g.lineWidth = 1;
-      g.strokeRect(x + 0.5, y + 0.5, w, h);
-      g.strokeStyle = 'rgba(255,255,255,0.4)';
-      for (const k of [1, 2]) {
-        g.beginPath();
-        g.moveTo(x + (w * k) / 3, y);
-        g.lineTo(x + (w * k) / 3, y + h);
-        g.moveTo(x, y + (h * k) / 3);
-        g.lineTo(x + w, y + (h * k) / 3);
-        g.stroke();
+      if (this.d?.h === 'rotate') {
+        // turning: a fine grid to line things up with
+        g.strokeStyle = 'rgba(255,255,255,.35)';
+        drawCropOverlay(g, 'grid', 0, W, H);
+      } else if (o.overlay !== 'none') {
+        g.strokeStyle = 'rgba(255,255,255,.6)';
+        drawCropOverlay(g, o.overlay, +o.flip || 0, W, H);
       }
+      g.strokeStyle = '#fff';
+      g.strokeRect(-W / 2, -H / 2, W, H);
       g.fillStyle = '#fff';
-      for (const [hx, hy] of [[0, 0], [1, 0], [0, 1], [1, 1], [0.5, 0], [0.5, 1], [0, 0.5], [1, 0.5]]) g.fillRect(x + w * hx - 4, y + h * hy - 4, 8, 8);
-      g.font = '12px sans-serif';
-      g.fillText(`${Math.round(r.w)} × ${Math.round(r.h)}  (Enter 또는 두 번 눌러 자르기)`, x + 4, y - 6 > 12 ? y - 6 : y + 16);
+      g.strokeStyle = 'rgba(0,0,0,.6)';
+      for (const [u, v] of [[-1, -1], [1, -1], [1, 1], [-1, 1], [0, -1], [0, 1], [-1, 0], [1, 0]]) {
+        g.fillRect((u * W) / 2 - 4, (v * H) / 2 - 4, 8, 8);
+        g.strokeRect((u * W) / 2 - 4.5, (v * H) / 2 - 4.5, 9, 9);
+      }
       g.restore();
+      // the size (and the turn) of the result
+      const turnDeg = Math.round((b.a * 1800) / Math.PI) / 10;
+      const label = `${Math.round(b.w)} × ${Math.round(b.h)} px${turnDeg ? ` · ${turnDeg}°` : ''}  (Enter 또는 두 번 눌러 자르기 · Esc 취소)`;
+      const top = cs.reduce((m, q) => (q[1] < m[1] ? q : m), cs[0]);
+      g.save();
+      g.font = '12px system-ui, sans-serif';
+      g.lineWidth = 3;
+      g.strokeStyle = 'rgba(0,0,0,.7)';
+      g.fillStyle = '#fff';
+      const ly = top[1] - 8 > 12 ? top[1] - 8 : top[1] + 18;
+      g.strokeText(label, Math.max(4, top[0] - 40), ly);
+      g.fillText(label, Math.max(4, top[0] - 40), ly);
+      g.restore();
+      // Straighten: the line being drawn and its angle
+      if (this.d?.h === 'line' && this.d.moved) {
+        const [x1, y1] = E.toScreen(this.d.a.x, this.d.a.y);
+        const [x2, y2] = E.toScreen(this.d.b.x, this.d.b.y);
+        g.save();
+        for (const [c, w] of [['rgba(0,0,0,.7)', 3], ['#fff', 1]]) {
+          g.strokeStyle = c;
+          g.lineWidth = w;
+          g.beginPath();
+          g.moveTo(x1, y1);
+          g.lineTo(x2, y2);
+          g.stroke();
+        }
+        const ang = (Math.atan2(this.d.b.y - this.d.a.y, this.d.b.x - this.d.a.x) * 180) / Math.PI;
+        g.font = '12px system-ui, sans-serif';
+        g.fillStyle = '#fff';
+        g.strokeStyle = 'rgba(0,0,0,.7)';
+        g.lineWidth = 3;
+        const t = `${(-ang).toFixed(1)}°`;
+        g.strokeText(t, x2 + 10, y2 + 4);
+        g.fillText(t, x2 + 10, y2 + 4);
+        g.restore();
+      }
+    },
+    optionButtons(E) {
+      const o = E.opts('crop');
+      const doc = E.doc;
+      const set = (k, v) => E.setOpt('crop', k, v);
+      const wxh = o.ratio === 'wxh';
+      const sel = h('select', { 'aria-label': '자르기 비율', title: '비율 · 크기 사전 설정' }, CROP_PRESETS.map(([v, t]) => h('option', { value: v }, t)));
+      sel.value = CROP_PRESETS.some((p) => p[0] === o.ratio) ? o.ratio : 'free';
+      sel.addEventListener('change', () => this.setPreset(E, sel.value));
+      const num = (key, label) => {
+        const shown = o.ratio === 'orig' && doc ? (key === 'rw' ? doc.width : doc.height) : o[key];
+        const inp = h('input.ph-num', { type: 'number', min: 0, step: 'any', value: shown, 'aria-label': label, title: label, placeholder: key === 'rw' ? 'W' : 'H' });
+        inp.addEventListener('change', () => {
+          const v = inp.value === '' ? '' : Math.max(0, +inp.value);
+          if (o.ratio === 'orig') {
+            set('rw', doc.width);
+            set('rh', doc.height);
+          }
+          // typed numbers make a ratio of their own (or a pixel size in W x H x Resolution)
+          if (!wxh) set('ratio', 'free');
+          set(key, v);
+          this.fitRatio(E);
+        });
+        return inp;
+      };
+      const res = h('input.ph-num', { type: 'number', min: 1, max: 9999, value: o.res, 'aria-label': '해상도 (ppi)', title: '해상도 (픽셀/인치)' });
+      res.addEventListener('change', () => set('res', Math.max(1, +res.value || 72)));
+      const ov = h('select', { 'aria-label': '오버레이', title: '자르기 오버레이 (O: 다음, Shift+O: 방향 바꾸기)' }, CROP_OVERLAYS.map(([v, t]) => h('option', { value: v }, t)));
+      ov.value = o.overlay;
+      ov.addEventListener('change', () => set('overlay', ov.value));
+      const chk = (key, label, title) => {
+        const c = h('input', { type: 'checkbox', checked: !!o[key] });
+        c.addEventListener('change', () => set(key, c.checked));
+        return h('label.ph-opt', { title }, c, h('span', label));
+      };
+      return [
+        h('label.ph-opt', sel),
+        h('span.ph-opt', { style: { gap: '4px' } },
+          num('rw', wxh ? '폭 (px)' : '폭 비율'),
+          h('button.small.ph-icobtn', { title: '높이와 폭 교체 (X)', 'aria-label': '높이와 폭 교체', onclick: () => this.swap(E) }, icon('swap', 16)),
+          num('rh', wxh ? '높이 (px)' : '높이 비율'),
+          wxh ? h('span.ph-opt', res, h('small', 'ppi')) : null,
+          h('button.small', { title: '비율 지우기', onclick: () => this.setPreset(E, wxh ? 'wxh' : 'free') }, '지우기')),
+        h(`button.small.ph-tog${this.straighten ? '.on' : ''}`, { title: '사진 안에서 수평(또는 수직)이어야 할 선을 따라 끌면 똑바르게 돌립니다 (Ctrl을 누른 채 끌어도 됨)', onclick: () => { this.straighten = !this.straighten; E.emit('opts'); } }, icon('straighten', 16), ' 똑바르게'),
+        h('label.ph-opt', icon('grid', 16), ov),
+        chk('deletePixels', '자른 픽셀 삭제', '끄면 잘린 부분이 캔버스 밖에 남아 나중에 옮길 수 있습니다'),
+        chk('contentAware', '내용 인식', '돌리거나 넓혀서 생긴 빈 곳을 주변 내용으로 채웁니다'),
+        h('button.small.ph-icobtn', { title: '현재 자르기 작업 취소 (Esc)', 'aria-label': '자르기 취소', onclick: () => this.reset(E) }, icon('close', 16)),
+        h('button.primary.small.ph-icobtn', { title: '현재 자르기 작업 적용 (Enter)', 'aria-label': '자르기 적용', onclick: () => this.apply(E) }, icon('check', 16)),
+      ];
     },
   },
   // ---- perspective crop
@@ -1394,16 +1981,68 @@ export const TOOLS = [
   // ---- eyedropper
   {
     id: 'eyedropper', name: '스포이드', key: 'I', icon: 'eyedropper', group: 'crop', cursor: 'crosshair',
-    options: [['sample', '샘플 크기', 'select', null, null, 1, [[1, '1 픽셀'], [3, '3×3 평균'], [5, '5×5 평균']]]],
+    options: [
+      ['sample', '샘플 크기', 'select', null, null, 1, [[1, '포인트 샘플'], [3, '3 x 3 평균'], [5, '5 x 5 평균'], [11, '11 x 11 평균'], [31, '31 x 31 평균'], [51, '51 x 51 평균'], [101, '101 x 101 평균']]],
+      ['layers', '샘플', 'select', null, null, 'all', [['current', '현재 레이어'], ['below', '현재 및 아래'], ['all', '모든 레이어']]],
+      ['ring', '샘플링 링 표시', 'bool', null, null, true],
+    ],
+    // Alt+click picks the background colour; dragging keeps picking the same one
     down(E, p, e) {
-      pickColor(E, p, e.altKey);
-      this.on = !e.altKey;
+      this.toBg = !!e.altKey;
+      this.prev = this.toBg ? E.bg : E.fg;
+      this.on = true;
+      this.pick(E, p);
     },
     move(E, p) {
-      if (this.on) pickColor(E, p, false);
+      if (this.on) this.pick(E, p);
     },
-    up() {
+    up(E) {
+      // the colour let go on goes to the recent colours (and is remembered)
+      if (this.on && this.ring?.color) E.setColor(this.ring.color, this.toBg);
       this.on = false;
+      this.ring = null;
+      E.overlay();
+    },
+    cancel(E) {
+      this.up(E);
+    },
+    pick(E, p) {
+      const c = sampleColor(E, p);
+      if (c) E.setColor(rgbHex(...c), this.toBg, true);
+      this.ring = c ? { p, color: rgbHex(...c) } : this.ring && { ...this.ring, p };
+      E.overlay();
+    },
+    /** The sampling ring: the new colour above, the colour before below (Photoshop). */
+    drawRing(E, g) {
+      const r = this.ring;
+      if (!r || !E.opts('eyedropper').ring) return;
+      const [x, y] = E.toScreen(r.p.x, r.p.y);
+      const R = 58;
+      const w = 16;
+      g.save();
+      g.lineWidth = w;
+      g.strokeStyle = 'rgba(128,128,128,.85)';
+      g.beginPath();
+      g.arc(x, y, R + w / 2 + 3, 0, Math.PI * 2);
+      g.lineWidth = 6;
+      g.stroke();
+      g.lineWidth = w;
+      g.strokeStyle = r.color;
+      g.beginPath();
+      g.arc(x, y, R, Math.PI, Math.PI * 2);
+      g.stroke();
+      g.strokeStyle = this.prev || '#000000';
+      g.beginPath();
+      g.arc(x, y, R, 0, Math.PI);
+      g.stroke();
+      g.restore();
+    },
+    // brushes.js sets the overlay (notes, counts and samplers); the ring is drawn over it
+    set overlay(fn) {
+      this.marks = fn;
+    },
+    get overlay() {
+      return eyedropperOverlay;
     },
   },
   // ---- painting
@@ -1415,7 +2054,7 @@ export const TOOLS = [
   // ---- fills
   {
     id: 'bucket', name: '페인트 통', key: 'G', icon: 'bucket', group: 'fill', cursor: 'crosshair',
-    options: [['tolerance', '허용치', 'range', 0, 255, 32], ['contiguous', '인접', 'bool', null, null, true], ['sampleAll', '모든 레이어 샘플링', 'bool', null, null, false], ['opacity', '불투명도', 'range', 1, 100, 100, '%']],
+    options: [GRAD_MODE, ['opacity', '불투명도', 'range', 1, 100, 100, '%'], ['tolerance', '허용치', 'range', 0, 255, 32], ['contiguous', '인접', 'bool', null, null, true], ['sampleAll', '모든 레이어 샘플링', 'bool', null, null, false]],
     down(E, p, e) {
       if (e.altKey) {
         pickColor(E, p, false);
@@ -1456,37 +2095,150 @@ export const TOOLS = [
         mg.drawImage(doc.selection.canvas, 0, 0);
       }
       const g = doc.editPixels(l);
-      g.globalAlpha = (o.opacity ?? 100) / 100;
-      if (l.lockAlpha) g.globalCompositeOperation = 'source-atop';
-      g.drawImage(m, -l.x, -l.y);
-      g.globalAlpha = 1;
-      g.globalCompositeOperation = 'source-over';
+      const op = (o.opacity ?? 100) / 100;
+      const mode = o.mode || 'normal';
+      if (mode === 'normal') {
+        g.globalAlpha = op;
+        if (l.lockAlpha) g.globalCompositeOperation = 'source-atop';
+        g.drawImage(m, -l.x, -l.y);
+        g.globalAlpha = 1;
+        g.globalCompositeOperation = 'source-over';
+      } else if (!l.lockAlpha) compositeOnto(g, m, -l.x, -l.y, mode, op);
+      else {
+        // a blend mode with transparency locked: blend, then keep the old alpha
+        const t = cloneCanvas(g.canvas);
+        compositeOnto(t.getContext('2d'), m, -l.x, -l.y, mode, op);
+        g.save();
+        g.globalCompositeOperation = 'source-atop';
+        g.drawImage(t, 0, 0);
+        g.restore();
+      }
       l._styled = null;
       E.commit('페인트 통', before);
     },
   },
   {
     id: 'gradient', name: '그레이디언트', key: 'G', icon: 'gradient', group: 'fill', cursor: 'crosshair',
-    options: [['type', '종류', 'select', null, null, 'linear', [['linear', '선형'], ['radial', '방사형'], ['reflected', '반사']]], ['to', '끝 색', 'select', null, null, 'bg', [['bg', '전경색 → 배경색'], ['clear', '전경색 → 투명']]], ['opacity', '불투명도', 'range', 1, 100, 100, '%']],
+    _options: gradientOptions([['type', '종류', 'select', null, null, 'linear', [['linear', '선형'], ['radial', '방사형'], ['reflected', '반사']]], ['to', '끝 색', 'select', null, null, 'bg', [['bg', '전경색 → 배경색'], ['clear', '전경색 → 투명']]], ['opacity', '불투명도', 'range', 1, 100, 100, '%']]),
+    // paint2.js replaces the options (presets, styles…): mode and transparency are kept in them
+    get options() {
+      return this._options;
+    },
+    set options(v) {
+      this._options = gradientOptions(v);
+    },
     down(E, p) {
-      if (!needRaster(E, '그레이디언트')) return;
+      // the gradient just drawn stays editable: drag its start or end point (or the line) again
+      const live = this.liveAt(E, p);
+      if (live) {
+        const e0 = this.live.entry;
+        const after = E.doc.capture();
+        this.live = null;
+        E.doc.history.undoStack.pop();
+        E.doc.restore(e0.state);
+        if (!this.begin(E, live.a, live.b, e0.state)) {
+          E.doc.restore(after);
+          E.commit('그레이디언트', e0.state);
+          return;
+        }
+        this.d.after = after;
+        this.d.edit = live.part;
+        this.d.grab = p;
+        this.d.a0 = live.a;
+        this.d.b0 = live.b;
+        return;
+      }
+      this.live = null;
+      this.begin(E, p, p, null);
+    },
+    begin(E, a, b, before) {
+      if (!needRaster(E, '그레이디언트')) return false;
       const l = E.doc.active;
-      this.d = { a: p, b: p, before: E.doc.capture() };
+      this.d = { a, b, before: before || E.doc.capture() };
       const mt = E.maskTarget?.();
       if (mt) {
         this.d.mt = mt;
         this.d.base = mt.canvas;
         this.d.mg = mt.edit();
-        return;
+        return true;
       }
       const old = l.canvas;
       const [ox, oy] = [l.x, l.y];
       E.doc.editPixels(l);
       this.d.base = sameGeometry(old, ox, oy, l) ? old : cloneCanvas(l.canvas);
+      return true;
+    },
+    /** Which part of the live gradient is under p (screen tolerance): 'a', 'b', 'line' or null. */
+    liveAt(E, p) {
+      const L = this.live;
+      if (!L || L.doc !== E.doc || E.doc.history.undoStack.at(-1) !== L.entry) return null;
+      const tol = 10 / E.view.zoom;
+      if (dist(p, L.a) <= tol) return { ...L, part: 'a' };
+      if (dist(p, L.b) <= tol) return { ...L, part: 'b' };
+      const dx = L.b.x - L.a.x;
+      const dy = L.b.y - L.a.y;
+      const t = ((p.x - L.a.x) * dx + (p.y - L.a.y) * dy) / Math.max(1e-9, dx * dx + dy * dy);
+      if (t > 0 && t < 1 && dist(p, { x: L.a.x + dx * t, y: L.a.y + dy * t }) <= tol * 0.7) return { ...L, part: 'line' };
+      return null;
+    },
+    activate(E) {
+      // the live gradient follows changed options and colours (reverse, style, mode…)
+      if (this.hooked || !E.on) return;
+      this.hooked = true;
+      let raf = 0;
+      const again = () => {
+        if (raf || E.tool !== 'gradient' || this.d || !this.liveOk(E)) return;
+        raf = requestAnimationFrame(() => {
+          raf = 0;
+          if (E.tool === 'gradient' && !this.d && this.liveOk(E)) this.repaintLive(E);
+        });
+      };
+      E.on('opts', again);
+      E.on('color', again);
+    },
+    liveOk(E) {
+      const L = this.live;
+      return !!L && L.doc === E.doc && E.doc.history.undoStack.at(-1) === L.entry;
+    },
+    /** Draw the live gradient again over what was there before it (one step, still live). */
+    repaintLive(E) {
+      const L = this.live;
+      const e0 = L.entry;
+      const after = E.doc.capture();
+      E.doc.history.undoStack.pop();
+      E.doc.restore(e0.state);
+      if (!this.begin(E, L.a, L.b, e0.state)) {
+        E.doc.restore(after);
+        E.commit('그레이디언트', e0.state);
+        this.live = { ...L, entry: E.doc.history.undoStack.at(-1) };
+        return;
+      }
+      this.d.final = true;
+      this.paint(E);
+      this.d = null;
+      E.commit('그레이디언트', e0.state);
+      this.live = { a: L.a, b: L.b, doc: E.doc, entry: E.doc.history.undoStack.at(-1) };
+    },
+    onKey(E, e) {
+      if (!this.live || (e.key !== 'Enter' && e.key !== 'Escape')) return false;
+      this.live = null;
+      E.overlay();
+      return true;
+    },
+    deactivate(E) {
+      this.live = null;
+      E?.overlay?.();
     },
     move(E, p) {
       if (!this.d) return;
-      this.d.b = p;
+      const d = this.d;
+      if (d.edit === 'a') d.a = p;
+      else if (d.edit === 'line') {
+        const dx = p.x - d.grab.x;
+        const dy = p.y - d.grab.y;
+        d.a = { x: d.a0.x + dx, y: d.a0.y + dy };
+        d.b = { x: d.b0.x + dx, y: d.b0.y + dy };
+      } else d.b = p;
       // pointers report far more often than the screen updates: paint once per frame
       if (!this.raf) {
         this.raf = requestAnimationFrame(() => {
@@ -1500,22 +2252,39 @@ export const TOOLS = [
       cancelAnimationFrame(this.raf);
       this.raf = 0;
       if (this.d.floating) E.float = null;
-      if (dist(this.d.a, this.d.b) > 1) {
-        this.d.final = true;
+      const d = this.d;
+      if (dist(d.a, d.b) > 1) {
+        d.final = true;
         this.paint(E);
-        E.commit('그레이디언트', this.d.before);
-      } else E.doc.restore(this.d.before);
+        E.commit('그레이디언트', d.before);
+        // until something else happens, its start and end points can still be dragged
+        this.live = { a: d.a, b: d.b, doc: E.doc, entry: E.doc.history.undoStack.at(-1) };
+        this.activate(E);
+      } else if (d.edit) this.restoreLive(E, d);
+      else {
+        E.doc.restore(d.before);
+        E.afterHistory();
+      }
       this.d = null;
       E.redraw();
+    },
+    /** An edit of the live gradient called off: the gradient as it was is the last step again. */
+    restoreLive(E, d) {
+      E.doc.restore(d.after);
+      E.commit('그레이디언트', d.before);
+      this.live = { a: d.a0, b: d.b0, doc: E.doc, entry: E.doc.history.undoStack.at(-1) };
     },
     paint(E) {
       const { a, b, base } = this.d;
       const doc = E.doc;
       const l = doc.active;
-      const o = E.opts('gradient');
+      const o0 = E.opts('gradient');
+      const mode = o0.mode || 'normal';
+      // Transparency off: the gradient's opacity stops are left out
+      const o = o0.transparency === false ? { ...o0, preset: 'custom', custom: { ...gradientOf(o0), alphas: [{ pos: 0, a: 1 }, { pos: 1, a: 1 }] } } : o0;
       // while dragging over a plain layer, the gradient floats just above it instead of being
       // painted into the layer every frame; on the top layer it is made at screen size
-      const plain = !this.d.mt && !this.d.final && !l.lockAlpha && (l.blend || 'normal') === 'normal' && !l.mask && !l.vmask && !l.clip && !hasFx(l.fx) && (l.fillOpacity ?? 1) === 1;
+      const plain = !this.d.mt && !this.d.final && mode === 'normal' && !l.lockAlpha && (l.blend || 'normal') === 'normal' && !l.mask && !l.vmask && !l.clip && !hasFx(l.fx) && (l.fillOpacity ?? 1) === 1;
       const li = doc.layers.indexOf(l);
       const top = plain && !l.parent && doc.layers.slice(li + 1).every((x) => !doc.shown(x));
       const scale = top ? Math.min(1, doc.view.zoom * (window.devicePixelRatio || 1)) : 1;
@@ -1605,13 +2374,27 @@ export const TOOLS = [
         this.d.floating = false;
       }
       const g = l.canvas.getContext('2d');
+      const op = (o.opacity ?? 100) / 100;
       g.save();
       g.globalCompositeOperation = 'copy';
       g.drawImage(base, 0, 0);
-      g.globalCompositeOperation = l.lockAlpha ? 'source-atop' : 'source-over';
-      g.globalAlpha = (o.opacity ?? 100) / 100;
-      g.drawImage(gc, -l.x, -l.y);
       g.restore();
+      if (mode === 'normal') {
+        g.save();
+        g.globalCompositeOperation = l.lockAlpha ? 'source-atop' : 'source-over';
+        g.globalAlpha = op;
+        g.drawImage(gc, -l.x, -l.y);
+        g.restore();
+      } else if (!l.lockAlpha) compositeOnto(g, gc, -l.x, -l.y, mode, op);
+      else {
+        // a blend mode on a layer whose transparency is locked: blend, then keep the old alpha
+        const t = cloneCanvas(base);
+        compositeOnto(t.getContext('2d'), gc, -l.x, -l.y, mode, op);
+        g.save();
+        g.globalCompositeOperation = 'source-atop';
+        g.drawImage(t, 0, 0);
+        g.restore();
+      }
       l._styled = null;
       doc.touch(l);
       E.redraw();
@@ -1621,11 +2404,46 @@ export const TOOLS = [
       cancelAnimationFrame(this.raf);
       this.raf = 0;
       if (this.d.floating) E.float = null;
-      E.doc.restore(this.d.before);
+      const d = this.d;
       this.d = null;
-      E.redraw();
+      if (d.edit) this.restoreLive(E, d);
+      else {
+        E.doc.restore(d.before);
+        E.afterHistory();
+      }
     },
     overlay(E, g) {
+      const L = !this.d && this.live?.doc === E.doc && E.doc.history.undoStack.at(-1) === this.live.entry ? this.live : null;
+      if (L) {
+        // the live gradient: its line with the start and end points to drag
+        const [x1, y1] = E.toScreen(L.a.x, L.a.y);
+        const [x2, y2] = E.toScreen(L.b.x, L.b.y);
+        g.save();
+        for (const [c, w] of [['rgba(0,0,0,.55)', 3], ['#fff', 1.5]]) {
+          g.strokeStyle = c;
+          g.lineWidth = w;
+          g.beginPath();
+          g.moveTo(x1, y1);
+          g.lineTo(x2, y2);
+          g.stroke();
+        }
+        for (const [x, y, c] of [[x1, y1, E.fg], [x2, y2, E.bg]]) {
+          g.beginPath();
+          g.arc(x, y, 6, 0, Math.PI * 2);
+          g.fillStyle = c;
+          g.fill();
+          g.lineWidth = 2;
+          g.strokeStyle = '#fff';
+          g.stroke();
+          g.lineWidth = 1;
+          g.strokeStyle = 'rgba(0,0,0,.6)';
+          g.beginPath();
+          g.arc(x, y, 7.5, 0, Math.PI * 2);
+          g.stroke();
+        }
+        g.restore();
+        return;
+      }
       if (!this.d) return;
       const [x1, y1] = E.toScreen(this.d.a.x, this.d.a.y);
       const [x2, y2] = E.toScreen(this.d.b.x, this.d.b.y);
@@ -1742,15 +2560,102 @@ export const TOOLS = [
     up() {
       this.d = null;
     },
+    optionButtons: (E) => viewButtons(E),
   },
   {
-    id: 'zoom', name: '돋보기', key: 'Z', icon: 'zoomIn', group: 'view', cursor: 'zoom-in',
-    options: [],
-    down(E, p, e) {
-      E.zoomAt(e.altKey ? 1 / 1.5 : 1.5, e.clientX, e.clientY);
+    id: 'zoom', name: '돋보기', key: 'Z', icon: 'zoomIn', group: 'view',
+    options: [['scrubby', '스크러비 확대/축소', 'bool', null, null, true]],
+    // Alt (held while the pointer moves over the picture) zooms out
+    get cursor() {
+      return this.alt ? 'zoom-out' : 'zoom-in';
     },
+    hover(E, p, e) {
+      this.alt = !!e?.altKey;
+    },
+    down(E, p, e) {
+      this.alt = !!e.altKey;
+      this.d = { cx: e.clientX, cy: e.clientY, p, zoom: E.view.zoom, out: !!e.altKey, moved: false, b: p };
+    },
+    move(E, p, e) {
+      const d = this.d;
+      if (!d) return;
+      if (Math.hypot(e.clientX - d.cx, e.clientY - d.cy) > 3) d.moved = true;
+      if (!d.moved) return;
+      // scrubby zoom: drag right to zoom in, left to zoom out, about the point pressed on;
+      // without it, drag a box to zoom into
+      if (E.opts('zoom').scrubby) E.setZoom(d.zoom * Math.exp((e.clientX - d.cx) * 0.01), d.cx, d.cy);
+      else {
+        d.b = p;
+        E.overlay();
+      }
+    },
+    up(E, p, e) {
+      const d = this.d;
+      this.d = null;
+      if (!d) return;
+      if (!d.moved) {
+        zoomStepAt(E, d.out ? -1 : 1, d.cx, d.cy);
+        return;
+      }
+      if (E.opts('zoom').scrubby) return;
+      const r = rectOf({ a: d.p, b: d.b });
+      E.overlay();
+      if (d.out) {
+        zoomStepAt(E, -1, d.cx, d.cy);
+        return;
+      }
+      const st = document.querySelector('.ph-stage')?.getBoundingClientRect();
+      if (!st || r.w * E.view.zoom < 4 || r.h * E.view.zoom < 4) return;
+      // zoom so the box fills the window, centred on it
+      E.setZoom(Math.min(st.width / r.w, st.height / r.h), st.left + st.width / 2, st.top + st.height / 2);
+      const [sx, sy] = E.toScreen(r.x + r.w / 2, r.y + r.h / 2);
+      E.view.x += st.width / 2 - sx;
+      E.view.y += st.height / 2 - sy;
+      E.viewChanged();
+    },
+    overlay(E, g) {
+      const d = this.d;
+      if (!d?.moved || E.opts('zoom').scrubby) return;
+      const r = rectOf({ a: d.p, b: d.b });
+      const [x, y] = E.toScreen(r.x, r.y);
+      g.save();
+      g.setLineDash([4, 4]);
+      g.strokeStyle = '#fff';
+      g.strokeRect(x + 0.5, y + 0.5, r.w * E.view.zoom, r.h * E.view.zoom);
+      g.lineDashOffset = 4;
+      g.strokeStyle = '#000';
+      g.strokeRect(x + 0.5, y + 0.5, r.w * E.view.zoom, r.h * E.view.zoom);
+      g.restore();
+    },
+    optionButtons: (E) => [h('span.ph-opt.ph-hint', 'Alt: 축소'), ...viewButtons(E)],
   },
 ];
+
+const ZOOM_STEPS = [0.02, 0.05, 0.1, 0.167, 0.25, 0.333, 0.5, 0.667, 1, 1.5, 2, 3, 4, 6, 8, 12, 16, 32];
+
+/** One zoom level in or out, keeping the point under (cx, cy) in place. */
+function zoomStepAt(E, dir, cx, cy) {
+  const z = E.view.zoom;
+  const next = dir > 0 ? ZOOM_STEPS.find((x) => x > z * 1.001) : [...ZOOM_STEPS].reverse().find((x) => x < z / 1.001);
+  E.setZoom(next ?? z, cx, cy);
+}
+
+/** The hand and zoom tools' buttons: 100%, Fit on Screen, Fill Screen. */
+function viewButtons(E) {
+  const fill = () => {
+    const doc = E.doc;
+    const st = document.querySelector('.ph-stage')?.getBoundingClientRect();
+    if (!doc || !st) return;
+    const z = Math.max(st.width / doc.width, st.height / doc.height);
+    doc.view = { ...doc.view, zoom: z, x: (st.width - doc.width * z) / 2, y: (st.height - doc.height * z) / 2, fitted: true, auto: false };
+    E.viewChanged();
+  };
+  return [
+    h('button.small', { onclick: () => E.doc && E.setZoom(1), title: '실제 픽셀 크기로 보기' }, '100%'),
+    h('button.small', { onclick: () => E.doc && E.fit(), title: '화면에 맞게 보기 (Ctrl+0)' }, '화면 맞추기'),
+    h('button.small', { onclick: fill, title: '화면을 가득 채우게 보기' }, '화면 채우기'),
+  ];
+}
 
 export const TOOL_BY_ID = Object.fromEntries(TOOLS.map((t) => [t.id, t]));
 
@@ -1759,8 +2664,6 @@ export const TOOL_GROUPS = [
   ['move'], ['rect', 'ellipse'], ['lasso'], ['wand'], ['crop', 'perspCrop'], ['eyedropper'], ['heal'], ['brush', 'pencil'], ['clone'], ['eraser'],
   ['gradient', 'bucket'], ['blur', 'sharpen', 'smudge', 'push'], ['dodge', 'burn', 'sponge'], ['text', 'verticalText', 'textMask', 'verticalTextMask'], ['shape'], ['hand'], ['zoom'],
 ];
-
-const inside = (p, r) => p.x >= r.x && p.y >= r.y && p.x <= r.x + r.w && p.y <= r.y + r.h;
 
 function pointInPoly(p, pts) {
   let inside2 = false;

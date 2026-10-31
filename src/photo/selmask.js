@@ -1,17 +1,29 @@
 // Select and Mask: a workspace to refine the selection's edge (radius / smart radius, smooth,
 // feather, contrast, shift edge, decontaminate colours) with the quick selection, refine edge and
-// plain brushes, several view modes, and output to a selection, mask, new layer or new document.
+// plain brushes, Refine Hair, the colour-aware / object-aware refine modes, several view modes, and
+// output to a selection, mask, new layer or new document.
 // The preview runs at a reduced size; the output is computed at full size.
 
 import { h, clamp } from '../util.js';
 import { toast, openModal, loadPref, savePref } from '../ui/common.js';
+import { icon } from '../ui/icons.js';
 import { makeCanvas, cloneCanvas, newLayer, PhotoDoc } from './doc.js';
 import * as SEL from './selection.js';
 import * as SX from './selectx.js';
 
-const VIEWS = [['onion', '어니언 스킨'], ['ants', '개미 행렬'], ['overlay', '오버레이'], ['black', '검정 바탕'], ['white', '흰색 바탕'], ['bw', '흑백'], ['layers', '레이어 위']];
+const VIEWS = [['onion', '어니언 스킨 (O)'], ['ants', '개미 행렬 (M)'], ['overlay', '오버레이 (V)'], ['black', '검정 바탕 (A)'], ['white', '흰색 바탕 (T)'], ['bw', '흑백 (K)'], ['layers', '레이어 위 (Y)']];
+const VIEW_KEYS = { KeyO: 'onion', KeyM: 'ants', KeyV: 'overlay', KeyA: 'black', KeyT: 'white', KeyK: 'bw', KeyY: 'layers' };
 const OUTPUTS = [['selection', '선택 영역'], ['mask', '레이어 마스크'], ['layer', '새 레이어'], ['layerMask', '레이어 마스크가 있는 새 레이어'], ['doc', '새 문서'], ['docMask', '레이어 마스크가 있는 새 문서']];
-const DEFAULTS = { view: 'onion', opacity: 50, radius: 0, smart: false, smooth: 0, feather: 0, contrast: 0, shift: 0, decon: false, deconAmount: 50, output: 'selection', sampleAll: true, remember: false, tool: 'refine', size: 40 };
+const MODES = [['color', '색상 인식'], ['object', '개체 인식']];
+const DEFAULTS = {
+  view: 'onion', opacity: 50, overlayColor: '#ff0000', mode: 'color', radius: 0, smart: false, smooth: 0, feather: 0, contrast: 0, shift: 0,
+  decon: false, deconAmount: 50, output: 'selection', sampleAll: true, remember: false, tool: 'refine', size: 40,
+};
+
+const hexRgb = (hex) => {
+  const n = parseInt((hex || '#ff0000').slice(1), 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+};
 
 export function selectAndMaskDialog(P) {
   const doc = P.doc;
@@ -30,12 +42,11 @@ export function selectAndMaskDialog(P) {
   const pw = Math.max(1, Math.round(W * ps));
   const ph = Math.max(1, Math.round(H * ps));
   let smallPx = null;
-  let smallImg = null;
   const loadSource = () => {
     src = o.sampleAll ? P.composite() : P.layerAsDocCanvas(doc.active);
     srcPx = null;
-    smallImg = makeCanvas(pw, ph);
-    const g = smallImg.getContext('2d');
+    const c = makeCanvas(pw, ph);
+    const g = c.getContext('2d');
     g.imageSmoothingQuality = 'high';
     g.drawImage(src, 0, 0, pw, ph);
     smallPx = g.getImageData(0, 0, pw, ph).data;
@@ -43,7 +54,8 @@ export function selectAndMaskDialog(P) {
   loadSource();
 
   // ---------------------------------------------------------------- preview
-  const view = h('canvas.ph-samview', { width: pw, height: ph });
+  const view = h('canvas.ph-samview', { width: pw, height: ph, tabindex: 0, 'aria-label': '미리 보기 (브러시로 칠하기)' });
+  const wrap = h('div.ph-samwrap', view);
   const scaledAlpha = (c) => {
     const t = makeCanvas(pw, ph);
     const g = t.getContext('2d');
@@ -57,7 +69,7 @@ export function selectAndMaskDialog(P) {
     const b = scaledAlpha(brushC);
     const brush = Uint8Array.from(b, (v) => (v > 0.3 ? 1 : 0));
     const r = SX.refineAlpha(smallPx, pw, ph, a0, {
-      radius: o.radius * ps, smart: o.smart, brush, smooth: o.smooth, feather: o.feather * ps, contrast: o.contrast, shift: o.shift,
+      radius: o.radius * ps, smart: o.smart, brush, mode: o.mode, smooth: o.smooth, feather: o.feather * ps, contrast: o.contrast, shift: o.shift,
       decontaminate: o.decon ? o.deconAmount : 0, scale: ps,
     });
     result = { a0, ...r };
@@ -73,6 +85,7 @@ export function selectAndMaskDialog(P) {
     const px = smallPx;
     const fg = !showOrig.checked && o.decon ? result.fg : null;
     const amt = o.deconAmount / 100;
+    const [ovR, ovG, ovB] = hexRgb(o.overlayColor);
     if (!checker) {
       checker = new Uint8Array(pw * ph);
       for (let y = 0; y < ph; y++) for (let x = 0; x < pw; x++) checker[y * pw + x] = ((x >> 3) + (y >> 3)) & 1 ? 255 : 204;
@@ -97,9 +110,9 @@ export function selectAndMaskDialog(P) {
           continue;
         case 'overlay': {
           const m = (1 - al) * T;
-          d[p] = r * (1 - m) + 255 * m;
-          d[p + 1] = gg * (1 - m);
-          d[p + 2] = b * (1 - m);
+          d[p] = r * (1 - m) + ovR * m;
+          d[p + 1] = gg * (1 - m) + ovG * m;
+          d[p + 2] = b * (1 - m) + ovB * m;
           d[p + 3] = 255;
           continue;
         }
@@ -158,14 +171,73 @@ export function selectAndMaskDialog(P) {
     });
   };
 
+  // ---------------------------------------------------------------- zoom (to look at hair closely)
+  let zoom = 1;
+  const zoomLabel = h('span.ph-val', '맞춤');
+  let fitted = null;
+  const setZoom = (z) => {
+    zoom = clamp(z, 1, 8);
+    if (zoom <= 1) {
+      view.style.width = '';
+      view.style.height = '';
+      view.style.maxWidth = '';
+      view.style.maxHeight = '';
+      view.style.imageRendering = '';
+      for (const k of ['overflow', 'display', 'width', 'height', 'flex']) wrap.style[k] = '';
+      fitted = null;
+      zoomLabel.textContent = '맞춤';
+      return;
+    }
+    if (!fitted) {
+      // the preview box keeps its size and scrolls; the picture's fitted size is the 100% mark
+      const r = wrap.getBoundingClientRect();
+      const v = view.getBoundingClientRect();
+      fitted = { w: v.width || pw };
+      wrap.style.width = `${Math.round(r.width)}px`;
+      wrap.style.height = `${Math.round(r.height)}px`;
+      wrap.style.flex = 'none';
+    }
+    const k = fitted.w / pw;
+    view.style.maxWidth = 'none';
+    view.style.maxHeight = 'none';
+    view.style.width = `${Math.round(pw * k * zoom)}px`;
+    view.style.height = `${Math.round(ph * k * zoom)}px`;
+    view.style.imageRendering = zoom >= 2 ? 'pixelated' : '';
+    wrap.style.overflow = 'auto';
+    wrap.style.display = 'block';
+    zoomLabel.textContent = `${Math.round(zoom * 100)}%`;
+  };
+  wrap.addEventListener('wheel', (e) => {
+    if (!e.ctrlKey && !e.altKey && !e.metaKey) return;
+    e.preventDefault();
+    const r = view.getBoundingClientRect();
+    const fx = (e.clientX - r.left) / r.width;
+    const fy = (e.clientY - r.top) / r.height;
+    setZoom(zoom * Math.exp(-e.deltaY * 0.004));
+    // keep the point under the pointer in place
+    const r2 = view.getBoundingClientRect();
+    wrap.scrollLeft += r2.left + fx * r2.width - e.clientX;
+    wrap.scrollTop += r2.top + fy * r2.height - e.clientY;
+  }, { passive: false });
+
   // ---------------------------------------------------------------- brushes on the preview
   let sub = false;
-  const toolBtns = [['quick', '빠른 선택'], ['refine', '가장자리 다듬기 브러시'], ['brush', '브러시']].map(([id, label]) => {
-    const b = h('button.small.ph-tog', { onclick: () => { o.tool = id; toolBtns.forEach((x) => x.classList.toggle('on', x === b)); } }, label);
-    if (o.tool === id) b.classList.add('on');
+  const toolBtns = [['quick', 'quickSel', '빠른 선택 도구 (W)'], ['refine', 'brush', '가장자리 다듬기 브러시 도구 (R)'], ['brush', 'pencil', '브러시 도구 (B)']].map(([id, ic, label]) => {
+    const b = h('button.small.ph-tog', { title: label, 'aria-label': label, onclick: () => setTool(id) }, icon(ic), ` ${label.replace(/ 도구.*$/, '')}`);
+    b.dataset.tool = id;
     return b;
   });
-  const modeBtn = h('button.small.ph-tog', { title: '더하기 / 빼기 (Alt를 누르고 칠해도 빼기)', onclick: () => { sub = !sub; modeBtn.textContent = sub ? '－ 빼기' : '＋ 더하기'; modeBtn.classList.toggle('on', sub); } }, '＋ 더하기');
+  const setTool = (id) => {
+    o.tool = id;
+    toolBtns.forEach((x) => x.classList.toggle('on', x.dataset.tool === id));
+  };
+  setTool(o.tool);
+  const modeBtn = h('button.small.ph-tog', { title: '더하기 / 빼기 (Alt를 누르고 칠해도 빼기)', onclick: () => setSub(!sub) }, icon('plus'), ' 더하기');
+  const setSub = (v) => {
+    sub = v;
+    modeBtn.replaceChildren(icon(sub ? 'minus' : 'plus'), sub ? ' 빼기' : ' 더하기');
+    modeBtn.classList.toggle('on', sub);
+  };
   const size = h('input', { type: 'range', min: 2, max: 300, value: o.size, 'aria-label': '브러시 크기' });
   size.addEventListener('input', () => { o.size = +size.value; });
   let stroke = null;
@@ -199,14 +271,27 @@ export function selectAndMaskDialog(P) {
     g.fill();
     g.globalCompositeOperation = 'source-over';
   };
+  // Space (or the middle button) drags the zoomed preview around
+  let spaceHeld = false;
+  let pan = null;
   view.addEventListener('pointerdown', (e) => {
     view.setPointerCapture(e.pointerId);
+    view.focus({ preventScroll: true });
+    if (spaceHeld || e.button === 1) {
+      pan = { x: e.clientX, y: e.clientY, sl: wrap.scrollLeft, st: wrap.scrollTop };
+      return;
+    }
     const p = docPt(e);
     stroke = { last: p, sub: sub || e.altKey };
     dab(p);
     update();
   });
   view.addEventListener('pointermove', (e) => {
+    if (pan) {
+      wrap.scrollLeft = pan.sl - (e.clientX - pan.x);
+      wrap.scrollTop = pan.st - (e.clientY - pan.y);
+      return;
+    }
     if (!stroke) return;
     const p = docPt(e);
     const step = Math.max(1, (o.size / 4) * p.k);
@@ -217,14 +302,16 @@ export function selectAndMaskDialog(P) {
   });
   const end = () => {
     stroke = null;
+    pan = null;
   };
   view.addEventListener('pointerup', end);
   view.addEventListener('pointercancel', end);
 
   // ---------------------------------------------------------------- settings
   const num = (key, label, min, max, step = 1, unit = '') => {
-    const r = h('input', { type: 'range', min, max, step, value: o[key] });
-    const n = h('input.ph-num', { type: 'number', min, max, step, value: o[key], style: { width: '64px' } });
+    const r = h('input', { type: 'range', min, max, step, value: o[key], 'aria-label': label });
+    const n = h('input.ph-num', { type: 'number', min, max, step, value: o[key], style: { width: '64px' }, 'aria-label': label });
+    const lab = h('label', label);
     const set = (v) => {
       o[key] = clamp(+v || 0, min, max);
       r.value = o[key];
@@ -233,7 +320,10 @@ export function selectAndMaskDialog(P) {
     };
     r.addEventListener('input', () => set(r.value));
     n.addEventListener('change', () => set(n.value));
-    return h('div.ph-samrow', h('label', label), h('div.inline', r, n, unit ? h('small', unit) : null));
+    const row = h('div.ph-samrow', lab, h('div.inline', r, n, unit ? h('small', unit) : null));
+    row.set = set;
+    row.lab = lab;
+    return row;
   };
   const check = (key, label, after) => {
     const c = h('input', { type: 'checkbox', checked: !!o[key] });
@@ -242,23 +332,38 @@ export function selectAndMaskDialog(P) {
       after?.();
       update();
     });
-    return h('label.ph-samchk', c, ` ${label}`);
+    const l = h('label.ph-samchk', c, ` ${label}`);
+    l.box = c;
+    return l;
   };
-  const viewSel = h('select', ...VIEWS.map(([v, t]) => h('option', { value: v }, t)));
+  const viewSel = h('select', { 'aria-label': '보기 모드' }, ...VIEWS.map(([v, t]) => h('option', { value: v }, t)));
   viewSel.value = o.view;
-  viewSel.addEventListener('change', () => {
-    o.view = viewSel.value;
-    if (!saved?.remember) o.opacity = ['onion', 'overlay'].includes(o.view) ? 50 : 100;
-    opRow.querySelector('input[type=range]').value = o.opacity;
-    opRow.querySelector('input[type=number]').value = o.opacity;
+  const opRow = num('opacity', '투명도', 0, 100, 1, '%');
+  const color = h('input', { type: 'color', value: o.overlayColor, title: '오버레이 색상', 'aria-label': '오버레이 색상' });
+  color.addEventListener('input', () => {
+    o.overlayColor = color.value;
     render();
   });
-  const opRow = num('opacity', '투명도', 0, 100, 1, '%');
+  const colorRow = h('div.ph-samrow', h('label', '색상'), color);
+  const syncView = () => {
+    viewSel.value = o.view;
+    // Photoshop names the slider after what it does in each view
+    opRow.lab.textContent = o.view === 'onion' ? '투명도' : '불투명도';
+    opRow.hidden = ['ants', 'bw'].includes(o.view);
+    colorRow.hidden = o.view !== 'overlay';
+  };
+  const setView = (v) => {
+    o.view = v;
+    if (!saved?.remember) opRow.set(['onion', 'overlay'].includes(o.view) ? 50 : 100);
+    syncView();
+    render();
+  };
+  viewSel.addEventListener('change', () => setView(viewSel.value));
   const showEdge = h('input', { type: 'checkbox' });
   const showOrig = h('input', { type: 'checkbox' });
   showEdge.addEventListener('change', render);
   showOrig.addEventListener('change', render);
-  const outSel = h('select', ...OUTPUTS.map(([v, t]) => h('option', { value: v }, t)));
+  const outSel = h('select', { 'aria-label': '출력 위치' }, ...OUTPUTS.map(([v, t]) => h('option', { value: v }, t)));
   outSel.value = o.output;
   const syncOut = () => {
     // decontaminated colours need pixels of their own (Photoshop does the same)
@@ -267,14 +372,73 @@ export function selectAndMaskDialog(P) {
     o.output = outSel.value;
   };
   outSel.addEventListener('change', syncOut);
+  const modeSel = h('select', { 'aria-label': '다듬기 모드', title: '색상 인식: 배경이 단순하거나 대비가 클 때 · 개체 인식: 배경이 복잡할 때' }, ...MODES.map(([v, t]) => h('option', { value: v }, t)));
+  modeSel.value = o.mode;
+  modeSel.addEventListener('change', () => {
+    o.mode = modeSel.value;
+    update();
+  });
+  const radiusRow = num('radius', '반경', 0, 250, 1, 'px');
+  const smartChk = check('smart', '고급 반경');
+  const selectSubject = () => {
+    toast('피사체를 찾는 중…');
+    setTimeout(() => {
+      const m = SX.selectSubject(src);
+      if (!m) {
+        toast('피사체를 찾지 못했습니다');
+        return;
+      }
+      const g = base.getContext('2d');
+      g.clearRect(0, 0, W, H);
+      g.drawImage(m, 0, 0);
+      update();
+    }, 30);
+  };
+  /**
+   * Refine Hair: like brushing the refine edge brush over the hair, the edge areas that look like
+   * hair or fur get their alpha estimated again (and the edge gets a little radius when it has none).
+   */
+  const refineHair = () => {
+    const a0 = scaledAlpha(base);
+    const box = SX.boundsOf(a0, pw, ph, 0.5);
+    if (!box) {
+      toast('먼저 피사체를 선택하세요 (피사체 선택 또는 빠른 선택 도구)');
+      return;
+    }
+    // loose strands reach well out from the selection (about a fifth of its size)
+    const R = clamp(Math.sqrt(box.w * box.h) * 0.2, 8, 120);
+    const areas = SX.hairAreas(smallPx, pw, ph, a0, R);
+    let any = 0;
+    for (let i = 0; i < areas.length; i++) any += areas[i];
+    if (!any) {
+      toast('머리카락처럼 보이는 가장자리를 찾지 못했습니다. 가장자리 다듬기 브러시로 직접 칠해 보세요.');
+      return;
+    }
+    const t = SX.alphaCanvas(Float32Array.from(areas), pw, ph);
+    const g = brushC.getContext('2d');
+    g.imageSmoothingEnabled = true;
+    g.drawImage(t, 0, 0, W, H);
+    if (!o.radius) radiusRow.set(3);
+    if (o.view === 'bw' || o.view === 'ants') setView('onion');
+    update();
+    toast('머리카락 가장자리를 다듬었습니다. 남은 곳은 가장자리 다듬기 브러시로 칠하세요.');
+  };
+  const top = h('div.ph-samtools',
+    ...toolBtns, modeBtn, h('label.inline', h('span', '크기'), size),
+    h('button.small', { onclick: selectSubject, title: '피사체 선택' }, icon('smile'), ' 피사체 선택'),
+    h('button.small', { onclick: refineHair, title: '머리카락 다듬기: 머리카락·털처럼 보이는 가장자리를 자동으로 다듬습니다' }, icon('sparkle'), ' 머리카락 다듬기'),
+    h('label.inline', h('span', '다듬기 모드'), modeSel),
+    h('span.inline', h('button.small', { title: '축소 (Ctrl+휠)', 'aria-label': '미리 보기 축소', onclick: () => setZoom(zoom / 1.5) }, icon('zoomOut')), zoomLabel, h('button.small', { title: '확대 (Ctrl+휠, Space를 누른 채 끌어 이동)', 'aria-label': '미리 보기 확대', onclick: () => setZoom(zoom * 1.5) }, icon('zoomIn'))));
+  const rememberChk = check('remember', '설정 기억');
   const side = h('div.ph-samside',
     h('h4', '보기 모드'),
     h('div.ph-samrow', h('label', '보기'), viewSel),
     opRow,
-    h('div.inline', h('label.ph-samchk', showEdge, ' 가장자리 표시'), h('label.ph-samchk', showOrig, ' 원본 표시')),
+    colorRow,
+    h('div.inline', h('label.ph-samchk', showEdge, ' 가장자리 표시 (J)'), h('label.ph-samchk', showOrig, ' 원본 표시 (P)')),
     h('h4', '가장자리 감지'),
-    num('radius', '반경', 0, 250, 1, 'px'),
-    check('smart', '고급 반경'),
+    radiusRow,
+    smartChk,
     h('h4', '전역 다듬기'),
     num('smooth', '매끄럽게', 0, 100),
     num('feather', '페더', 0, 250, 0.5, 'px'),
@@ -293,35 +457,56 @@ export function selectAndMaskDialog(P) {
           g.globalCompositeOperation = 'source-over';
           update();
         },
-      }, '반전'),
-      h('button.small', {
-        onclick: () => {
-          const m = SX.selectSubject(src);
-          if (!m) return toast('피사체를 찾지 못했습니다');
-          const g = base.getContext('2d');
-          g.clearRect(0, 0, W, H);
-          g.drawImage(m, 0, 0);
-          update();
-          return undefined;
-        },
-      }, '피사체 선택')),
+      }, '반전')),
     h('h4', '출력 설정'),
     check('decon', '색상 정화', syncOut),
     num('deconAmount', '양', 0, 100, 1, '%'),
     h('div.ph-samrow', h('label', '출력 위치'), outSel),
     check('sampleAll', '모든 레이어 샘플링', () => { loadSource(); }),
-    check('remember', '설정 기억하기'),
-    h('div.note', '가장자리 다듬기 브러시로 머리카락 같은 곳을 칠하면 주변의 확실한 개체·배경 색으로 투명도를 다시 계산합니다. 포토샵의 인공지능 기반 다듬기와는 다른 단순한 색 추정 방식이라 결과가 다를 수 있습니다.'));
+    rememberChk,
+    h('div.note', '머리카락 다듬기나 가장자리 다듬기 브러시로 칠한 곳은 주변의 확실한 개체·배경 색으로 투명도를 다시 계산합니다. 배경이 복잡하면 다듬기 모드를 개체 인식으로 바꿔 보세요. 단축키: F 보기 바꾸기, J 가장자리, P 원본, [ ] 브러시 크기, Alt 빼기.'));
+  syncView();
   syncOut();
   const body = h('div.ph-sam',
-    h('div.ph-samleft',
-      h('div.ph-samtools', ...toolBtns, modeBtn, h('label.inline', h('span', '크기'), size)),
-      h('div.ph-samwrap', view)),
+    h('div.ph-samleft', top, wrap),
     side);
+  // the workspace's own shortcuts (when the keyboard is not in a field)
+  body.addEventListener('keydown', (e) => {
+    const t = e.target;
+    if (t instanceof HTMLInputElement && !['checkbox', 'range', 'radio', 'color'].includes(t.type)) return;
+    if (t instanceof HTMLSelectElement || t instanceof HTMLTextAreaElement || e.ctrlKey || e.metaKey) return;
+    const k = e.code;
+    if (k === 'Space') {
+      spaceHeld = true;
+      view.style.cursor = 'grab';
+    } else if (k === 'KeyF') setView(VIEWS[(VIEWS.findIndex(([v]) => v === o.view) + (e.shiftKey ? VIEWS.length - 1 : 1)) % VIEWS.length][0]);
+    else if (VIEW_KEYS[k]) setView(VIEW_KEYS[k]);
+    else if (k === 'KeyJ') {
+      showEdge.checked = !showEdge.checked;
+      render();
+    } else if (k === 'KeyP') {
+      showOrig.checked = !showOrig.checked;
+      render();
+    } else if (k === 'KeyW') setTool('quick');
+    else if (k === 'KeyR') setTool('refine');
+    else if (k === 'KeyB') setTool('brush');
+    else if (k === 'BracketLeft' || k === 'BracketRight') {
+      o.size = clamp(Math.round(o.size * (k === 'BracketLeft' ? 0.85 : 1.18)), 2, 300);
+      size.value = o.size;
+    } else return;
+    e.preventDefault();
+  });
+  body.addEventListener('keyup', (e) => {
+    if (e.code === 'Space') {
+      spaceHeld = false;
+      view.style.cursor = '';
+    }
+  });
   openModal({
     title: '선택 및 마스크',
     width: 'min(1240px, 98vw)',
     body,
+    peek: false,
     buttons: [{ label: '취소' }, {
       label: '확인', primary: true, action: () => {
         savePref('photo.sam', o.remember ? { ...o } : { remember: false });
@@ -330,6 +515,7 @@ export function selectAndMaskDialog(P) {
       },
     }],
   });
+  setTimeout(() => view.focus({ preventScroll: true }), 0);
   update();
 }
 
@@ -338,7 +524,7 @@ function output(P, src, base, brushC, o) {
   const W = doc.width;
   const H = doc.height;
   const res = SX.refineCanvas(src, base, brushC, {
-    radius: o.radius, smart: o.smart, smooth: o.smooth, feather: o.feather, contrast: o.contrast, shift: o.shift, decontaminate: o.decon ? o.deconAmount : 0,
+    radius: o.radius, smart: o.smart, mode: o.mode, smooth: o.smooth, feather: o.feather, contrast: o.contrast, shift: o.shift, decontaminate: o.decon ? o.deconAmount : 0,
   });
   const alpha = res.alpha;
   const l = doc.active;

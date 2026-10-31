@@ -4,12 +4,12 @@
 import { store } from './store.js';
 import { uid, EPS, clamp, snapFrame, deepClone } from './util.js';
 import {
-  setParamValue, isAnimated, keyframeDefaults, evalParam, mediaTimeAt, contentTime, sourceOut, remapSpeedAt, createClip, createTrack, clipEnd, clipsOnTrack, linkedClips, getTrack, videoTracks, audioTracks,
+  setParamValue, isAnimated, evalParam, mediaTimeAt, contentTime, sourceOut, remapSpeedAt, createClip, createTrack, clipEnd, clipsOnTrack, linkedClips, getTrack, videoTracks, audioTracks,
   sequenceDuration, prevAdjacent, nextAdjacent, shiftClipKeyframes, scaleClipKeyframes, renameTracks,
   clampTransitionDuration, trackKindForClip, DEFAULT_STILL_DURATION, createEffect, isTimed,
-  addSequenceToProject, createSequence, sequenceContains, sequenceMediaId,
+  addSequenceToProject, createSequence, sequenceContains, sequenceMediaId, newKey, scaleParamValues,
 } from './model.js';
-import { DEFAULT_AUDIO_TRANSITION, DEFAULT_VIDEO_TRANSITION, TRANSITIONS, EFFECTS, effectFitsClip } from './effects.js';
+import { DEFAULT_AUDIO_TRANSITION, DEFAULT_VIDEO_TRANSITION, TRANSITIONS, EFFECTS, effectFitsClip, fixedEffectsFor } from './effects.js';
 
 const seq = () => store.seq;
 const media = (id) => store.project.media[id];
@@ -34,7 +34,18 @@ function cloneClip(c, overrides = {}) {
   const copy = deepClone(c);
   copy.id = uid('clip');
   for (const fx of copy.effects) fx.id = uid('fx');
+  // clip markers are found by id (marker dialog, delete): a copy gets its own
+  for (const mk of copy.markers || []) mk.id = uid('mk');
   return Object.assign(copy, overrides);
+}
+
+/**
+ * After cutting clip `left` at `cut` seconds (clip-local) into `right` (whose markers were already
+ * shifted by -cut), each half keeps the clip markers on its own side of the cut.
+ */
+function splitClipMarkers(left, right, cut) {
+  if (left.markers?.length) left.markers = left.markers.filter((mk) => mk.time < cut - EPS);
+  if (right.markers?.length) right.markers = right.markers.filter((mk) => mk.time >= -EPS);
 }
 
 /** Remove the range [t0, t1) from a track (overwrite semantics). Clips crossing the range are trimmed or split. */
@@ -55,6 +66,7 @@ export function rawClearRange(trackId, t0, t1, exceptIds = new Set()) {
       right.duration = ce - t1;
       right.inPoint = inPointAfterCut(c, cut);
       shiftClipKeyframes(right, -cut);
+      splitClipMarkers(c, right, t0 - c.start);
       right.transIn = null;
       if (c.reverse) c.inPoint = reverseLeftInPoint(c, t0 - c.start);
       c.duration = t0 - c.start;
@@ -115,6 +127,7 @@ export function rawSplit(c, t) {
   right.inPoint = inPointAfterCut(c, cut);
   right.transIn = null;
   shiftClipKeyframes(right, -cut);
+  splitClipMarkers(c, right, cut);
   if (c.reverse) c.inPoint = reverseLeftInPoint(c, cut);
   c.duration = cut;
   c.transOut = null;
@@ -178,6 +191,19 @@ export function withLinked(ids) {
 export function placeMedia(mediaId, opts) {
   const m = media(mediaId);
   if (!m) return [];
+  // a subclip (하위 클립) places its master clip, kept inside the subclip's range
+  if (m.subclipOf && media(m.subclipOf)) {
+    const lo = m.subIn ?? 0;
+    const hi = m.subOut ?? media(m.subclipOf).duration;
+    const inP = clamp(opts.inPoint ?? m.inPoint ?? lo, lo, hi);
+    const ids = placeMedia(m.subclipOf, { ...opts, inPoint: inP, outPoint: clamp(opts.outPoint ?? m.outPoint ?? hi, inP, hi) });
+    for (const id of ids) {
+      const c = seq().clips[id];
+      if (c) Object.assign(c, { name: m.name, subclip: { id: m.id, in: lo, out: hi, restrict: m.restrictTrims !== false } });
+    }
+    if (ids.length) store.changed();
+    return ids;
+  }
   if (m.kind === 'font') {
     store.toast('글꼴 파일은 타임라인에 놓지 않습니다. 텍스트 클립을 선택하고 효과 컨트롤 ▸ 글꼴에서 고르세요.');
     return [];
@@ -201,15 +227,20 @@ export function placeMedia(mediaId, opts) {
   const wantVideo = opts.video !== false && m.kind !== 'audio';
   const wantAudio = opts.audio !== false && (m.kind === 'audio' || ((m.kind === 'video' || m.kind === 'sequence') && m.hasAudio));
 
-  const vTrack = wantVideo ? getTrack(s, opts.vTrackId) || targetTrack('video') : null;
-  const aTrack = wantAudio ? getTrack(s, opts.aTrackId) || targetTrack('audio') : null;
+  // explicit tracks (drag and drop) win; otherwise the source patching decides (Premiere's V1 / A1 source indicators)
+  const vTrack = wantVideo ? getTrack(s, opts.vTrackId) || (opts.aTrackId && !opts.vTrackId ? targetTrack('video') : sourceTrack('video')) : null;
+  const aTrack = wantAudio ? getTrack(s, opts.aTrackId) || (opts.vTrackId && !opts.aTrackId ? targetTrack('audio') : sourceTrack('audio')) : null;
+  const wasEmpty = !Object.keys(s.clips).length;
   if ((vTrack && vTrack.locked) || (aTrack && aTrack.locked)) {
     store.toast('대상 트랙이 잠겨 있습니다');
     return [];
   }
-  if (!vTrack && !aTrack) return [];
+  if (!vTrack && !aTrack) {
+    if (wantVideo || wantAudio) store.toast('넣을 트랙이 없습니다: 트랙 머리글의 소스 패치(V1·A1 표시)가 꺼져 있거나 트랙이 잠겨 있습니다');
+    return [];
+  }
 
-  return store.transact(mode === 'insert' ? '삽입' : '덮어쓰기', () => {
+  const created = store.transact(mode === 'insert' ? '삽입' : '덮어쓰기', () => {
     const linkId = vTrack && aTrack ? uid('link') : null;
     const trackIds = [vTrack?.id, aTrack?.id].filter(Boolean);
     if (mode === 'insert') {
@@ -234,12 +265,54 @@ export function placeMedia(mediaId, opts) {
     store.selectClips(created);
     return created;
   });
+  // 클립 불일치 경고: the first clip in an empty sequence has another frame size or frame rate
+  if (wasEmpty && created.length && opts.checkMismatch !== false && clipMismatch(m, s)) store.emit('clip-mismatch', { mediaId, sequenceId: s.id });
+  return created;
 }
 
+/** True when video media differs from the sequence in frame size or frame rate. */
+export function clipMismatch(m, s = seq()) {
+  if (!m || m.kind !== 'video' || !m.width || !m.height) return false;
+  const w = Math.round(m.width / 2) * 2;
+  const h = Math.round(m.height / 2) * 2;
+  return w !== s.width || h !== s.height || (m.fps > 0 && Math.abs(m.fps - s.fps) > 0.01);
+}
+
+/** Track targeting: the targeted (or first unlocked) track of a kind; used by paste and similar edits. */
 export function targetTrack(kind) {
   const s = seq();
   const list = kind === 'video' ? videoTracks(s) : audioTracks(s);
   return list.find((t) => t.targeted && !t.locked) || list.find((t) => !t.locked) || null;
+}
+
+/**
+ * Source patching: the track that insert / overwrite from the source put this kind on. Sequences
+ * without patch flags (older projects) fall back to track targeting. Returns null when the kind's
+ * source indicator is switched off.
+ */
+export function sourceTrack(kind) {
+  const s = seq();
+  const list = kind === 'video' ? videoTracks(s) : audioTracks(s);
+  if (s.patchOff?.[kind]) return null;
+  const patched = list.find((t) => t.patched);
+  if (patched) return patched.locked ? null : patched;
+  return targetTrack(kind);
+}
+
+/** Move the source patch of a kind to a track; patching the patched track again switches the kind off. */
+export function setSourcePatch(trackId) {
+  const s = seq();
+  const tr = getTrack(s, trackId);
+  if (!tr) return;
+  store.transact('소스 패치', () => {
+    const list = tr.kind === 'video' ? videoTracks(s) : audioTracks(s);
+    s.patchOff = s.patchOff || {};
+    if (tr.patched && !s.patchOff[tr.kind]) s.patchOff[tr.kind] = true;
+    else {
+      for (const t of list) t.patched = t.id === tr.id;
+      s.patchOff[tr.kind] = false;
+    }
+  });
 }
 
 /** Create a text clip at the playhead on the first free video track. */
@@ -374,7 +447,7 @@ export function liftExtract(extract) {
 // ---------------------------------------------------------------- split
 
 /** Add edit at time t on targeted tracks (or all tracks), or on the selected clips if any are under t. */
-export function addEdit({ allTracks = false, t = store.ui.playhead, clipIds = null } = {}) {
+export function addEdit({ allTracks = false, t = store.ui.playhead, clipIds = null, linked = true } = {}) {
   const s = seq();
   t = q(t);
   let targets;
@@ -387,16 +460,21 @@ export function addEdit({ allTracks = false, t = store.ui.playhead, clipIds = nu
       targets = Object.values(s.clips).filter((c) => tracks.includes(c.trackId));
     }
   }
-  targets = [...withLinked(targets.map((c) => c.id))].map((id) => s.clips[id]).filter((c) => c && !isLocked(c.trackId) && c.start < t - EPS && clipEnd(c) > t + EPS);
+  const ids = targets.map((c) => c.id);
+  targets = [...(linked ? withLinked(ids) : new Set(ids))].map((id) => s.clips[id]).filter((c) => c && !isLocked(c.trackId) && c.start < t - EPS && clipEnd(c) > t + EPS);
   if (!targets.length) return;
   store.transact('편집점 추가', () => {
     const groups = new Map();
     for (const c of targets) {
-      const key = c.linkId || c.id;
+      // a cut of only one side of a linked pair (Alt+razor) leaves both halves linked to the other side
+      const key = linked ? c.linkId || c.id : c.id;
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key).push(c);
     }
-    for (const g of groups.values()) splitGroup(g, t);
+    for (const g of groups.values()) {
+      if (linked) splitGroup(g, t);
+      else for (const c of g) rawSplit(c, t);
+    }
   });
 }
 
@@ -424,11 +502,17 @@ export function rawMoveClips(ids, dt, dTrackVideo, dTrackAudio, { mode = 'overwr
   let targets = plan.map((p) => p.c);
   if (duplicate) {
     const linkMap = new Map();
+    const groupMap = new Map();
     targets = plan.map((p) => {
       const copy = cloneClip(p.c);
       if (p.c.linkId) {
         if (!linkMap.has(p.c.linkId)) linkMap.set(p.c.linkId, uid('link'));
         copy.linkId = linkMap.get(p.c.linkId);
+      }
+      // copies of grouped clips form their own group
+      if (p.c.groupId) {
+        if (!groupMap.has(p.c.groupId)) groupMap.set(p.c.groupId, uid('grp'));
+        copy.groupId = groupMap.get(p.c.groupId);
       }
       s.clips[copy.id] = copy;
       p.c = copy;
@@ -477,11 +561,14 @@ export function trimLimits(c, edge, { ripple = false, rolling = false } = {}) {
   const rateIn = Math.max(1e-3, c.speed * remapSpeedAt(c, 0));
   const rateOut = Math.max(1e-3, c.speed * remapSpeedAt(c, c.duration));
   const srcOut = sourceOut(c);
+  // clips from a subclip (하위 클립) are kept inside the subclip's range
+  const lo = c.subclip?.restrict ? c.subclip.in : 0;
+  const hi = c.subclip?.restrict ? Math.min(c.subclip.out, m?.duration ?? Infinity) : m?.duration;
   if (edge === 'in') {
     max = c.duration - f; // keep at least one frame
     if (bounded) {
       // extending the head reveals earlier media (or later media for reversed clips)
-      min = Math.max(min, c.reverse ? -(m.duration - (c.inPoint + contentTime(c, c.duration))) / rateIn : -c.inPoint / rateIn);
+      min = Math.max(min, c.reverse ? -(hi - (c.inPoint + contentTime(c, c.duration))) / rateIn : -(c.inPoint - lo) / rateIn);
     }
     if (!ripple) min = Math.max(min, -c.start);
     if (!ripple && !rolling) {
@@ -490,7 +577,7 @@ export function trimLimits(c, edge, { ripple = false, rolling = false } = {}) {
     }
   } else {
     min = -(c.duration - f);
-    if (bounded) max = Math.min(max, c.reverse ? c.inPoint / rateOut : (m.duration - srcOut) / rateOut);
+    if (bounded) max = Math.min(max, c.reverse ? (c.inPoint - lo) / rateOut : (hi - srcOut) / rateOut);
     if (!ripple && !rolling) {
       const next = clipsOnTrack(s, c.trackId).find((x) => x.id !== c.id && x.start >= clipEnd(c) - EPS);
       if (next) max = Math.min(max, next.start - clipEnd(c));
@@ -569,7 +656,11 @@ export function setSpeed(ids, { speed, duration, ripple = false, hold, reverse, 
       const oldDur = c.duration;
       if (isTimed(c)) {
         // frame hold only applies to pictures; linked audio keeps playing normally
-        if (hold != null) c.hold = !!hold && c.kind === 'video';
+        if (hold != null) {
+          if (!!hold && c.kind === 'video' && !c.hold) c.holdTime = mediaTimeAt(c, c.start);
+          c.hold = !!hold && c.kind === 'video';
+          if (!c.hold) delete c.holdTime;
+        }
         if (reverse != null) c.reverse = !!reverse;
         if (maintainPitch != null) c.maintainPitch = !!maintainPitch;
         const newSpeed = speed ?? c.speed;
@@ -602,15 +693,82 @@ export function toggleReverse(ids) {
   });
 }
 
-/** Add Frame Hold: split at the playhead and freeze the frame there for the rest of the clip. */
+/** Media time a clip shows at sequence time t when it is not frame-held. */
+function liveMediaTime(c, t) {
+  const hold = c.hold;
+  c.hold = false;
+  const v = mediaTimeAt(c, t);
+  c.hold = hold;
+  return v;
+}
+
+/** 프레임 고정 추가: split at the playhead and freeze the frame there for the rest of the clip. */
 export function addFrameHold(c, t = store.ui.playhead) {
-  if (c.kind !== 'video') return;
-  store.transact('프레임 고정', () => {
-    const at = q(t);
+  if (c?.kind !== 'video') return;
+  store.transact('프레임 고정 추가', () => {
+    const at = clamp(q(t), c.start, clipEnd(c) - fd());
+    const frame = liveMediaTime(c, at);
     const target = at > c.start + EPS ? rawSplit(c, at) || c : c;
     target.hold = true;
-    target.name = `${c.name} (고정)`;
+    target.holdTime = frame;
+    if (!/\(고정\)$/.test(target.name)) target.name = `${c.name} (고정)`;
+    store.selectClips([target.id]);
   });
+}
+
+/**
+ * 프레임 고정 세그먼트 삽입: split at the playhead and insert a frozen frame of `dur` seconds there;
+ * everything after it on unlocked tracks moves later (like an insert edit, keeping sync).
+ */
+export function insertFrameHoldSegment(c, t = store.ui.playhead, dur = 2) {
+  if (c?.kind !== 'video' || isLocked(c.trackId)) return null;
+  const at = q(t);
+  if (at < c.start - EPS || at > clipEnd(c) + EPS) return null;
+  const d = Math.max(fd(), q(dur));
+  let id = null;
+  store.transact('프레임 고정 세그먼트 삽입', () => {
+    const atIn = clamp(at, c.start, clipEnd(c) - fd());
+    const frame = liveMediaTime(c, atIn);
+    const tracks = unlockedTrackIds();
+    splitAllAt(tracks, at);
+    rawRipple(tracks, at, d);
+    const hold = cloneClip(c, { start: at, duration: d, hold: true, holdTime: frame, linkId: null, groupId: undefined, transIn: null, transOut: null, name: `${c.name} (고정)`, markers: [] });
+    shiftClipKeyframes(hold, -(atIn - c.start));
+    seq().clips[hold.id] = hold;
+    id = hold.id;
+    store.selectClips([hold.id]);
+  });
+  return id;
+}
+
+/**
+ * 프레임 고정 옵션: hold (or release) whole clips at a chosen frame. at: 'in' | 'out' | 'playhead' |
+ * 'source' (time = source seconds) | 'sequence' (time = sequence seconds).
+ */
+export function setFrameHold(ids, { on = true, at = 'in', time = null } = {}) {
+  const sq = seq();
+  const clips = ids.map((id) => sq.clips[id]).filter((c) => c?.kind === 'video' && !isLocked(c.trackId));
+  if (!clips.length) return 0;
+  store.transact(on ? '프레임 고정 옵션' : '프레임 고정 해제', () => {
+    for (const c of clips) {
+      if (!on) {
+        c.hold = false;
+        delete c.holdTime;
+        continue;
+      }
+      const m = media(c.mediaId);
+      let frame;
+      if (at === 'source') frame = Math.max(0, time ?? 0);
+      else {
+        const st = at === 'out' ? clipEnd(c) - fd() : at === 'playhead' || at === 'sequence' ? (at === 'sequence' ? time ?? c.start : store.ui.playhead) : c.start;
+        frame = liveMediaTime(c, clamp(st, c.start, clipEnd(c) - fd()));
+      }
+      if (m && Number.isFinite(m.duration)) frame = clamp(frame, 0, Math.max(0, m.duration - 1 / Math.max(1, m.fps || sq.fps)));
+      c.hold = true;
+      c.holdTime = frame;
+    }
+  });
+  return clips.length;
 }
 
 /** Normalize clip volume so the loudest peak in the used range hits targetDb. */
@@ -780,8 +938,7 @@ export function rawSetParam(clip, fx, key, value, { direct = false } = {}) {
   const keyable = AUTO_KEY_FX.has(fx.type) && typeof value === 'number' && typeof p.value === 'number';
   // recording on: every change keys (Effect Controls too)
   if (keyable && store.ui.autoKey && !isAnimated(p)) {
-    const ease = keyframeDefaults.ease;
-    p.kf = t > fd() / 2 ? [{ t: 0, v: p.value, ease }, { t, v: value, ease }] : [{ t, v: value, ease }];
+    p.kf = t > fd() / 2 ? [newKey(0, p.value), newKey(t, value)] : [newKey(t, value)];
     p.value = value;
     return undefined;
   }
@@ -885,28 +1042,85 @@ export function applyEffectPreset(clipIds, preset) {
   return n;
 }
 
-/** Copy effects from one clip to others (Paste Attributes). */
-export function pasteAttributes(sourceClip, targetIds) {
+/** Fixed effects that 특성 붙여넣기 / 특성 제거 offer as attributes (others carry content, e.g. text). */
+export const ATTRIBUTE_FIXED = ['motion', 'opacity', 'timeRemap', 'volume', 'channelVolume', 'panner'];
+
+/**
+ * 특성 붙여넣기 (Paste Attributes). sources: copied clips (the one of the target's family is used, so
+ * copying a linked video+audio pair pastes video attributes onto video and audio onto audio).
+ * opts: { attrs: Set of fixed types to paste (default all), effects: Set of source effect ids to paste
+ * (default all added effects), scaleTimes: 특성 시간 비율 조정 — fit keyframe times to each target's length }.
+ */
+export function pasteAttributes(sources, targetIds, opts = {}) {
   const s = seq();
-  // fixed effects that carry "look" rather than content are replaced; added effects are appended
-  const REPLACEABLE = new Set(['motion', 'opacity', 'timeRemap', 'volume', 'panner']);
+  const list = (Array.isArray(sources) ? sources : [sources]).filter(Boolean);
+  const attrs = opts.attrs || new Set(ATTRIBUTE_FIXED);
+  let n = 0;
   store.transact('특성 붙여넣기', () => {
     for (const id of targetIds) {
       const c = s.clips[id];
-      if (!c || id === sourceClip.id || (c.kind === 'audio') !== (sourceClip.kind === 'audio')) continue;
-      const src = deepClone(sourceClip.effects);
+      if (!c || isLocked(c.trackId)) continue;
+      const sourceClip = list.find((x) => (x.kind === 'audio') === (c.kind === 'audio'));
+      if (!sourceClip || sourceClip.id === id) continue;
+      const k = opts.scaleTimes && sourceClip.duration > EPS ? c.duration / sourceClip.duration : 1;
+      const prep = (e) => {
+        const copy = deepClone(e);
+        if (k !== 1) {
+          for (const p of Object.values(copy.params)) {
+            for (const kf of p.kf || []) {
+              kf.t *= k;
+              if (kf.inSpeed != null) kf.inSpeed /= k;
+              if (kf.outSpeed != null) kf.outSpeed /= k;
+            }
+          }
+        }
+        return copy;
+      };
+      let changed = false;
       c.effects = c.effects.map((e) => {
-        if (!REPLACEABLE.has(e.type)) return e;
-        const m = src.find((x) => x.type === e.type);
-        return m ? { ...m, id: e.id } : e;
+        if (!EFFECTS[e.type]?.fixed || !attrs.has(e.type)) return e;
+        const m = sourceClip.effects.find((x) => x.type === e.type);
+        if (!m) return e;
+        changed = true;
+        return { ...prep(m), id: e.id };
       });
-      for (const e of src) {
+      for (const e of sourceClip.effects) {
         if (EFFECTS[e.type]?.fixed || !effectFitsClip(e.type, c.kind)) continue;
-        c.effects.push({ ...e, id: uid('fx') });
+        if (opts.effects && !opts.effects.has(e.id)) continue;
+        c.effects.push({ ...prep(e), id: uid('fx') });
+        changed = true;
       }
-      rawSyncLinkedRemap(c.id);
+      if (attrs.has('timeRemap')) rawSyncLinkedRemap(c.id);
+      if (changed) n++;
     }
   });
+  return n;
+}
+
+/**
+ * 특성 제거 (Remove Attributes): reset the chosen fixed attributes to their defaults and remove the
+ * chosen added effects. opts: { attrs: Set of fixed types, effectTypes: Set of effect types }.
+ */
+export function removeAttributes(ids, { attrs = new Set(), effectTypes = new Set() } = {}) {
+  const s = seq();
+  let n = 0;
+  store.transact('특성 제거', () => {
+    for (const id of ids) {
+      const c = s.clips[id];
+      if (!c || isLocked(c.trackId)) continue;
+      const before = JSON.stringify(c.effects);
+      c.effects = c.effects.filter((e) => EFFECTS[e.type]?.fixed || !effectTypes.has(e.type));
+      for (const e of c.effects) {
+        if (!EFFECTS[e.type]?.fixed || !attrs.has(e.type)) continue;
+        const fresh = createEffect(e.type, s);
+        e.params = fresh.params;
+        e.enabled = true;
+      }
+      if (attrs.has('timeRemap')) rawSyncLinkedRemap(c.id);
+      if (JSON.stringify(c.effects) !== before) n++;
+    }
+  });
+  return n;
 }
 
 // ---------------------------------------------------------------- clipboard
@@ -935,6 +1149,7 @@ export function paste({ insert = false } = {}) {
   const minA = Math.min(...cb.clips.filter((c) => c.kind === 'audio').map((c) => audioTracks(s).findIndex((x) => x.id === c.trackId)).filter((i) => i >= 0), Infinity);
   store.transact(insert ? '삽입하며 붙여넣기' : '붙여넣기', () => {
     const linkMap = new Map();
+    const groupMap = new Map();
     const created = [];
     const span = Math.max(...cb.clips.map((c) => clipEnd(c))) - cb.base;
     if (insert) {
@@ -946,6 +1161,10 @@ export function paste({ insert = false } = {}) {
       if (src.linkId) {
         if (!linkMap.has(src.linkId)) linkMap.set(src.linkId, uid('link'));
         c.linkId = linkMap.get(src.linkId);
+      }
+      if (src.groupId) {
+        if (!groupMap.has(src.groupId)) groupMap.set(src.groupId, uid('grp'));
+        c.groupId = groupMap.get(src.groupId);
       }
       const list = c.kind === 'audio' ? audioTracks(s) : videoTracks(s);
       const srcIdx = list.findIndex((x) => x.id === src.trackId);
@@ -1103,6 +1322,49 @@ export function addTrack(kind) {
   });
 }
 
+/**
+ * 트랙 추가…: add `video` / `audio` tracks in one step. where: 'first' (before the first track of
+ * the kind) or 'last' (after the last one, the default).
+ */
+export function addTracks({ video = 0, audio = 0, videoWhere = 'last', audioWhere = 'last' } = {}) {
+  const s = seq();
+  if (video <= 0 && audio <= 0) return;
+  store.transact('트랙 추가', () => {
+    for (let i = 0; i < video; i++) {
+      const t = createTrack('video', 0);
+      if (videoWhere === 'first') s.tracks.splice(s.tracks.findIndex((x) => x.kind === 'video'), 0, t);
+      else s.tracks.splice(s.tracks.findLastIndex((x) => x.kind === 'video') + 1, 0, t);
+    }
+    for (let i = 0; i < audio; i++) {
+      const t = createTrack('audio', 0);
+      if (audioWhere === 'first') s.tracks.splice(s.tracks.findIndex((x) => x.kind === 'audio'), 0, t);
+      else s.tracks.push(t);
+    }
+    renameTracks(s);
+  });
+}
+
+/** 트랙 삭제… ▸ 모든 빈 트랙: remove empty unlocked tracks of a kind (one of each kind always stays). */
+export function deleteEmptyTracks(kinds = ['video', 'audio']) {
+  const s = seq();
+  let n = 0;
+  store.transact('빈 트랙 삭제', () => {
+    for (const kind of kinds) {
+      const list = s.tracks.filter((t) => t.kind === kind);
+      let left = list.length;
+      for (const t of list.slice().reverse()) {
+        if (left <= 1) break;
+        if (t.locked || clipsOnTrack(s, t.id).length) continue;
+        s.tracks = s.tracks.filter((x) => x.id !== t.id);
+        left--;
+        n++;
+      }
+    }
+    renameTracks(s);
+  });
+  return n;
+}
+
 export function deleteTrack(trackId) {
   const s = seq();
   const tr = getTrack(s, trackId);
@@ -1133,19 +1395,80 @@ export function setTrackValue(trackId, key, value) {
 
 // ---------------------------------------------------------------- markers / in-out
 
+function makeMarker(t, props, n) {
+  return {
+    id: uid('mk'), time: t, duration: Math.max(0, props.duration || 0), name: props.name ?? `마커 ${n + 1}`,
+    color: props.color || '#4ade80', comment: props.comment || '', type: props.type || 'comment',
+  };
+}
+
+/** Add a sequence marker (M). Returns its id, or null when one already sits on that frame. */
 export function addMarker(t = store.ui.playhead, props = {}) {
   const s = seq();
-  t = q(t);
-  if (s.markers.some((m) => Math.abs(m.time - t) < EPS)) return;
-  store.transact('마커 추가', () => {
-    s.markers.push({ id: uid('mk'), time: t, name: props.name || `마커 ${s.markers.length + 1}`, color: props.color || '#4ade80', comment: props.comment || '' });
+  t = q(Math.max(0, t));
+  if (s.markers.some((m) => Math.abs(m.time - t) < EPS)) return null;
+  let id = null;
+  store.transact(props.type === 'chapter' ? '챕터 마커 추가' : '마커 추가', () => {
+    const mk = makeMarker(t, props, s.markers.length);
+    s.markers.push(mk);
     s.markers.sort((a, b) => a.time - b.time);
+    id = mk.id;
+  });
+  return id;
+}
+
+/** Add a clip marker at sequence time t on each clip (it moves with the clip). Returns the ids. */
+export function addClipMarker(clipIds, t = store.ui.playhead, props = {}) {
+  const s = seq();
+  const out = [];
+  store.transact('클립 마커 추가', () => {
+    for (const id of clipIds) {
+      const c = s.clips[id];
+      if (!c || t < c.start - EPS || t > clipEnd(c) + EPS) continue;
+      c.markers = c.markers || [];
+      const tl = clamp(q(t) - c.start, 0, c.duration);
+      if (c.markers.some((m) => Math.abs(m.time - tl) < EPS)) continue;
+      const mk = makeMarker(tl, props, c.markers.length);
+      c.markers.push(mk);
+      c.markers.sort((a, b) => a.time - b.time);
+      out.push(mk.id);
+    }
+  });
+  return out;
+}
+
+/** Find a marker by id: { marker, clip } (clip is null for sequence markers). */
+export function findMarker(id) {
+  const s = seq();
+  const mk = s.markers.find((m) => m.id === id);
+  if (mk) return { marker: mk, clip: null };
+  for (const c of Object.values(s.clips)) {
+    const cm = c.markers?.find((m) => m.id === id);
+    if (cm) return { marker: cm, clip: c };
+  }
+  return null;
+}
+
+/**
+ * Change a marker (마커 편집). props: name, comment, color, type, duration (seconds), time (sequence
+ * seconds, also for clip markers).
+ */
+export function updateMarker(id, props) {
+  store.transact('마커 편집', () => {
+    const f = findMarker(id);
+    if (!f) return;
+    const { marker: m, clip } = f;
+    for (const k of ['name', 'comment', 'color', 'type']) if (props[k] != null) m[k] = props[k];
+    if (props.duration != null) m.duration = Math.max(0, q(props.duration));
+    if (props.time != null) m.time = clip ? clamp(q(props.time) - clip.start, 0, clip.duration) : Math.max(0, q(props.time));
+    (clip ? clip.markers : seq().markers).sort((a, b) => a.time - b.time);
   });
 }
 
 export function removeMarker(id) {
   store.transact('마커 삭제', () => {
     seq().markers = seq().markers.filter((m) => m.id !== id);
+    for (const c of Object.values(seq().clips)) if (c.markers?.some((m) => m.id === id)) c.markers = c.markers.filter((m) => m.id !== id);
   });
 }
 
@@ -1166,7 +1489,8 @@ export function markClip() {
   const s = seq();
   const t = store.ui.playhead;
   const tracks = s.tracks.filter((tr) => tr.targeted).map((tr) => tr.id);
-  const c = store.selectedClips()[0] || Object.values(s.clips).find((x) => tracks.includes(x.trackId) && x.start <= t && clipEnd(x) > t);
+  // Premiere's 클립 표시 (X) marks the clip under the playhead on the targeted tracks; the selection is the fallback
+  const c = Object.values(s.clips).find((x) => tracks.includes(x.trackId) && x.start <= t + EPS && clipEnd(x) > t + EPS) || store.selectedClips()[0];
   if (!c) return;
   store.transact('클립 범위 표시', () => {
     s.inPoint = c.start;
@@ -1199,24 +1523,34 @@ export function updateSequenceSettings({ width, height, fps, name }) {
     for (const c of Object.values(s.clips)) {
       const motion = c.effects.find((e) => e.type === 'motion');
       if (!motion) continue;
-      const px = motion.params.posX;
-      const py = motion.params.posY;
-      px.value *= sx;
-      py.value *= sy;
-      if (px.kf) for (const k of px.kf) k.v *= sx;
-      if (py.kf) for (const k of py.kf) k.v *= sy;
+      scaleParamValues(motion.params.posX, sx);
+      scaleParamValues(motion.params.posY, sy);
     }
   });
 }
 
+/**
+ * 빈 공간 닫기: pull every clip left over the gaps before it. Linked clips (video + its sound) move as
+ * one so they stay in sync; clips on locked tracks stay put.
+ */
 export function closeAllGaps() {
   const s = seq();
-  store.transact('빈자리 닫기', () => {
-    for (const tr of s.tracks.filter((t) => !t.locked)) {
-      let cursor = 0;
-      for (const c of clipsOnTrack(s, tr.id)) {
-        if (c.start > cursor + EPS) c.start = cursor;
-        cursor = clipEnd(c);
+  store.transact('빈 공간 닫기', () => {
+    const cursor = new Map(s.tracks.map((t) => [t.id, 0]));
+    const done = new Set();
+    const order = Object.values(s.clips).sort((a, b) => a.start - b.start);
+    for (const c of order) {
+      if (done.has(c.id)) continue;
+      const group = c.linkId ? linkedClips(s, c).filter((x) => !done.has(x.id)) : [c];
+      for (const g of group) done.add(g.id);
+      const g0 = Math.min(...group.map((g) => g.start));
+      let shift = Infinity;
+      for (const g of group) shift = Math.min(shift, g.start - (cursor.get(g.trackId) ?? 0));
+      if (group.some((g) => isLocked(g.trackId))) shift = 0;
+      shift = Math.max(0, Math.min(shift, g0));
+      for (const g of group) {
+        g.start -= shift;
+        cursor.set(g.trackId, Math.max(cursor.get(g.trackId) ?? 0, clipEnd(g)));
       }
     }
   });
@@ -1382,11 +1716,307 @@ export function autoReframe(width, height, name) {
         const fit = Math.min(width / m.width, height / m.height);
         const fill = Math.max(width / m.width, height / m.height);
         const factor = fill / fit;
-        const p = motion.params.scale;
-        p.value = Math.round(p.value * factor * 10) / 10;
-        if (p.kf) for (const k of p.kf) k.v = Math.round(k.v * factor * 10) / 10;
+        scaleParamValues(motion.params.scale, factor);
       }
     }
   });
   return newId;
+}
+
+// ---------------------------------------------------------------- groups
+
+/** 그룹 (Ctrl+G): grouped clips are selected and moved together, across tracks. */
+export function groupClips(ids) {
+  const s = seq();
+  const clips = [...withLinked(ids)].map((id) => s.clips[id]).filter(Boolean);
+  if (clips.length < 2) {
+    store.toast('그룹으로 묶을 클립을 두 개 이상 선택하세요');
+    return null;
+  }
+  const g = uid('grp');
+  store.transact('그룹', () => {
+    for (const c of clips) c.groupId = g;
+  });
+  return g;
+}
+
+/** 그룹 해제 (Ctrl+Shift+G). */
+export function ungroupClips(ids) {
+  const s = seq();
+  const groups = new Set(ids.map((id) => s.clips[id]?.groupId).filter(Boolean));
+  if (!groups.size) {
+    store.toast('선택한 클립은 그룹이 아닙니다');
+    return;
+  }
+  store.transact('그룹 해제', () => {
+    for (const c of Object.values(s.clips)) if (groups.has(c.groupId)) delete c.groupId;
+  });
+}
+
+/** Ids expanded by their groups (selection helper; Alt+click picks one clip of a group). */
+export function withGroups(ids) {
+  const s = seq();
+  const out = new Set(ids);
+  const groups = new Set([...out].map((id) => s.clips[id]?.groupId).filter(Boolean));
+  if (groups.size) for (const c of Object.values(s.clips)) if (groups.has(c.groupId)) out.add(c.id);
+  return out;
+}
+
+/** Ids expanded by groups and (with linked selection on) links, until nothing more joins. */
+export function withGroupsAndLinks(ids) {
+  let cur = new Set(ids);
+  for (let i = 0; i < 6; i++) {
+    const next = withLinked(withGroups(cur));
+    if (next.size === cur.size) return next;
+    cur = next;
+  }
+  return cur;
+}
+
+/** Track Select Backward (Shift+A): everything that starts before t on one track (or on all tracks). */
+export function selectBackward(t, trackId = null) {
+  const ids = Object.values(seq().clips).filter((c) => c.start < t - EPS && (!trackId || c.trackId === trackId)).map((c) => c.id);
+  store.selectClips([...withLinked(ids)]);
+}
+
+// ---------------------------------------------------------------- replace edit
+
+/**
+ * 바꾸기 편집 (Replace Edit): put other media into a clip, keeping its place, length, effects and
+ * transitions. opts.inPoint: source time of the clip's first frame (default the media's In point);
+ * opts.matchAt: { seqTime, srcTime } aligns that source frame with that sequence time (일치하는 프레임).
+ * Linked partners get the matching stream of the new media when it has one.
+ */
+export function replaceClipMedia(clipIds, mediaId, opts = {}) {
+  const s = seq();
+  const m = media(mediaId);
+  if (!m || ['lut', 'font'].includes(m.kind)) return 0;
+  if (m.kind === 'sequence' && sequenceContains(store.project, m.sequenceId, s.id)) {
+    store.toast('시퀀스를 자기 자신 안에 중첩할 수 없습니다');
+    return 0;
+  }
+  const clips = clipIds.map((id) => s.clips[id]).filter((c) => c && !isLocked(c.trackId) && c.mediaId);
+  let n = 0;
+  store.transact('바꾸기 편집', () => {
+    for (const c of clips) {
+      const isAudio = c.kind === 'audio';
+      const hasAudio = m.kind === 'audio' || ((m.kind === 'video' || m.kind === 'sequence') && m.hasAudio);
+      if (isAudio ? !hasAudio : m.kind === 'audio') continue;
+      const newKind = isAudio ? 'audio' : m.kind === 'sequence' ? 'nest' : m.kind;
+      if (!isAudio && !['video', 'image', 'nest', 'color', 'adjustment'].includes(newKind)) continue;
+      const oldKind = c.kind;
+      c.kind = newKind;
+      c.mediaId = m.subclipOf || mediaId; // a subclip (하위 클립) plays its master's file
+      if (m.subclipOf) c.subclip = { id: mediaId, in: m.subIn, out: m.subOut, restrict: m.restrictTrims !== false };
+      else delete c.subclip;
+      c.name = m.name;
+      delete c.multicam;
+      // fixed effects follow the new clip kind (e.g. an image has no time remapping)
+      if (oldKind !== newKind) {
+        const want = fixedEffectsFor(newKind);
+        c.effects = c.effects.filter((e) => !EFFECTS[e.type]?.fixed || want.includes(e.type));
+        want.forEach((type, i) => {
+          if (!c.effects.some((e) => e.type === type)) c.effects.splice(Math.min(i, c.effects.length), 0, createEffect(type, s));
+        });
+        if (newKind !== 'video') {
+          c.hold = false;
+          delete c.holdTime;
+        }
+      }
+      if (newKind === 'color' && m.color) {
+        const fill = c.effects.find((e) => e.type === 'fill');
+        if (fill) fill.params.color.value = m.color;
+      }
+      let inPoint = opts.inPoint ?? m.inPoint ?? 0;
+      if (opts.matchAt) {
+        const off = c.reverse ? 0 : contentTime(c, clamp(opts.matchAt.seqTime - c.start, 0, c.duration));
+        inPoint = opts.matchAt.srcTime - off;
+      }
+      if (isTimed(c) && Number.isFinite(m.duration)) {
+        const need = contentTime(c, c.duration);
+        inPoint = clamp(inPoint, 0, Math.max(0, m.duration - need));
+        c.inPoint = inPoint;
+        // shorter media: the clip ends where the media does
+        const avail = sourceOut(c) - m.duration;
+        if (avail > 1e-6 && !c.hold) c.duration = Math.max(fd(), q(c.duration * (m.duration - inPoint) / Math.max(EPS, need)));
+      } else c.inPoint = isTimed(c) ? Math.max(0, inPoint) : 0;
+      if (c.hold) c.holdTime = c.inPoint;
+      n++;
+    }
+  });
+  if (!n) store.toast('이 클립에는 그 미디어를 넣을 수 없습니다 (영상 클립에는 영상·이미지, 오디오 클립에는 소리가 있는 미디어)');
+  return n;
+}
+
+// ---------------------------------------------------------------- sequences from clips
+
+/** 클립에서 새 시퀀스: a sequence with the media's frame size and rate, holding the media. */
+export function newSequenceFromMedia(mediaId) {
+  const m = media(mediaId);
+  if (!m || ['lut', 'font', 'sequence'].includes(m.kind)) return null;
+  const cur = seq();
+  const even = (v) => Math.max(2, Math.round(v / 2) * 2);
+  const visual = m.kind === 'video' || m.kind === 'image';
+  const sq = createSequence({
+    name: m.name.replace(/\.[^.]+$/, '') || '시퀀스',
+    width: visual && m.width ? even(m.width) : cur.width,
+    height: visual && m.height ? even(m.height) : cur.height,
+    fps: m.kind === 'video' && m.fps ? Math.round(m.fps * 1000) / 1000 : cur.fps,
+  });
+  const mark = store.undoMark();
+  store.transact('클립에서 새 시퀀스', () => addSequenceToProject(store.project, sq));
+  store.openSequence(sq.id);
+  placeMedia(mediaId, { mode: 'overwrite', start: 0, checkMismatch: false });
+  store.squashSince(mark, '클립에서 새 시퀀스');
+  store.setPlayhead(0);
+  return sq.id;
+}
+
+/** Change the active sequence to the media's frame size and rate (클립 불일치 경고 ▸ 시퀀스 설정 변경). */
+export function matchSequenceToMedia(mediaId) {
+  const m = media(mediaId);
+  if (!m?.width || !m?.height) return;
+  const even = (v) => Math.max(2, Math.round(v / 2) * 2);
+  updateSequenceSettings({ width: even(m.width), height: even(m.height), fps: m.fps ? Math.round(m.fps * 1000) / 1000 : seq().fps });
+}
+
+/**
+ * 프레임 크기로 설정 / 프레임 크기로 비율 조정: fit the clip's picture inside the frame. Pictures are
+ * fitted to the frame at 100 %, so this resets the size (and its keyframes) to 100 %.
+ */
+export function setClipsToFrameSize(ids, label = '프레임 크기로 설정') {
+  const s = seq();
+  let n = 0;
+  store.transact(label, () => {
+    for (const id of ids) {
+      const c = s.clips[id];
+      const motion = c?.effects.find((e) => e.type === 'motion');
+      if (!motion || isLocked(c.trackId)) continue;
+      motion.params.scale.value = 100;
+      motion.params.scale.kf = null;
+      n++;
+    }
+  });
+  return n;
+}
+
+// ---------------------------------------------------------------- slide & rate stretch
+
+/**
+ * Limits for sliding clip c (밀기 도구): the clip keeps its content and length and moves; the clip
+ * before it gets longer/shorter at its end and the clip after it at its start. Returns { min, max, prev, next }.
+ */
+export function slideLimits(c) {
+  const s = seq();
+  const prev = prevAdjacent(s, c);
+  const next = nextAdjacent(s, c);
+  let min = -c.start;
+  let max = Infinity;
+  if (prev) {
+    const lp = trimLimits(prev, 'out', { rolling: true });
+    min = Math.max(min, lp.min);
+    max = Math.min(max, lp.max);
+  } else {
+    const before = clipsOnTrack(s, c.trackId).filter((x) => x.id !== c.id && clipEnd(x) <= c.start + EPS).pop();
+    if (before) min = Math.max(min, clipEnd(before) - c.start);
+  }
+  if (next) {
+    const ln = trimLimits(next, 'in', { rolling: true });
+    min = Math.max(min, ln.min);
+    max = Math.min(max, ln.max);
+  } else {
+    const after = clipsOnTrack(s, c.trackId).find((x) => x.id !== c.id && x.start >= clipEnd(c) - EPS);
+    if (after) max = Math.min(max, after.start - clipEnd(c));
+  }
+  if (min > max) min = max = 0;
+  return { min, max, prev, next };
+}
+
+/** Raw: round clip starts and lengths that drifted off the frame grid during a drag back onto it. */
+export function rawTidyTimes(ids) {
+  const s = seq();
+  const near = (v) => Math.abs(v - q(v)) < 1e-6;
+  for (const id of ids) {
+    const c = s.clips[id];
+    if (!c) continue;
+    if (near(c.start)) c.start = q(c.start);
+    if (near(c.duration)) c.duration = Math.max(fd(), q(c.duration));
+  }
+}
+
+/** Raw: slide clip c by delta seconds (see slideLimits; the caller clamps). */
+export function rawSlide(c, delta, prev, next) {
+  if (Math.abs(delta) < EPS) return;
+  if (prev) rawTrimEdge(prev, 'out', delta);
+  if (next) rawTrimEdge(next, 'in', delta);
+  c.start += delta;
+}
+
+/**
+ * Limits for the rate stretch tool (속도 조정 도구) on an edge: new duration range so the clip keeps its
+ * content (0.01× .. 100× speed) and does not run into its neighbours. Returns { min, max } of the delta.
+ */
+export function rateStretchLimits(c, edge) {
+  const s = seq();
+  const f = fd();
+  const content = c.duration * c.speed;
+  const minDur = Math.max(f, content / 100);
+  const maxDur = content / 0.01;
+  if (edge === 'out') {
+    const next = clipsOnTrack(s, c.trackId).find((x) => x.id !== c.id && x.start >= clipEnd(c) - EPS);
+    const room = next ? next.start - c.start : Infinity;
+    return { min: minDur - c.duration, max: Math.min(maxDur, room) - c.duration };
+  }
+  const prev = clipsOnTrack(s, c.trackId).filter((x) => x.id !== c.id && clipEnd(x) <= c.start + EPS).pop();
+  const room = clipEnd(c) - (prev ? clipEnd(prev) : 0);
+  // delta > 0 moves the head right (shorter)
+  return { min: c.duration - Math.min(maxDur, room), max: c.duration - minDur };
+}
+
+/** Raw: change the clip's length by stretching its speed; edge 'in' moves the start, 'out' the end. */
+export function rawRateStretch(c, edge, newDuration) {
+  if (!Number.isFinite(newDuration) || !(c.duration > 0)) return;
+  const d = Math.max(fd() / 4, newDuration);
+  const factor = d / c.duration;
+  if (Math.abs(factor - 1) < 1e-9) return;
+  const content = c.duration * c.speed;
+  if (edge === 'in') c.start = clipEnd(c) - d;
+  if (isTimed(c) && !c.hold) {
+    scaleClipKeyframes(c, factor);
+    c.speed = content / d;
+  } else scaleClipKeyframes(c, factor);
+  c.duration = d;
+  if (c.transIn) c.transIn.duration = Math.min(c.transIn.duration, c.duration);
+  if (c.transOut) c.transOut.duration = Math.min(c.transOut.duration, c.duration);
+}
+
+/**
+ * 선택한 편집점을 재생 헤드로 확장 (E): the nearer edge of each selected clip moves to the playhead
+ * (a normal trim, limited by the media and the neighbouring clips).
+ */
+export function extendToPlayhead() {
+  const t = q(store.ui.playhead);
+  const s = seq();
+  // a selected edit point (a clip edge clicked in the timeline, store.ui.editPoint) wins, as in Premiere
+  const ep = store.ui.editPoint;
+  const fromPoint = ep?.ids?.length && ep.ids.every((id) => s.clips[id]) ? ep : null;
+  const clips = (fromPoint ? fromPoint.ids.map((id) => s.clips[id]) : store.selectedClips()).filter((c) => !isLocked(c.trackId));
+  if (!clips.length) {
+    store.toast('늘리거나 줄일 클립이나 편집점을 먼저 선택하세요');
+    return 0;
+  }
+  let n = 0;
+  store.transact('편집점을 재생 헤드로 확장', () => {
+    for (const c of clips) {
+      const end = clipEnd(c);
+      const edge = fromPoint ? fromPoint.edge : t <= c.start || (t < end && t - c.start < end - t) ? 'in' : 'out';
+      const want = edge === 'in' ? t - c.start : t - end;
+      const lim = trimLimits(c, edge);
+      const d = clamp(want, lim.min, lim.max);
+      if (Math.abs(d) < EPS) continue;
+      rawTrimEdge(c, edge, d);
+      n++;
+    }
+  });
+  return n;
 }

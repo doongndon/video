@@ -25,24 +25,27 @@ import {
 } from './ui/dialogs.js';
 import { quickApi } from './ui/quick-panel.js';
 import { aiApi } from './ui/ai-panel.js';
+import {
+  openPasteAttributesDialog, openRemoveAttributesDialog, openFrameHoldOptionsDialog, openMarkerEditor, openAddTracksDialog, openDeleteTracksDialog,
+} from './ui/timeline-dialogs.js';
 
 const inSource = () => store.ui.focusPanel === 'source' && sourceApi.hasMedia?.();
 const seq = () => store.seq;
 const sel = () => store.selectedClips();
 const selIds = () => [...store.selection.clips];
 
-function seekEdit(dir) {
+function seekEdit(dir, allTracks = false) {
   playback.stop();
   const t = store.ui.playhead;
   const targeted = seq().tracks.filter((tr) => tr.targeted).map((tr) => tr.id);
-  const pts = editPoints(seq(), targeted.length ? targeted : null);
+  const pts = editPoints(seq(), targeted.length && !allTracks ? targeted : null);
   const target = dir < 0 ? pts.filter((p) => p < t - EPS).pop() : pts.find((p) => p > t + EPS);
   if (target != null) store.setPlayhead(target);
 }
 
 function seekMarker(dir) {
   const t = store.ui.playhead;
-  const list = seq().markers.map((m) => m.time);
+  const list = seq().markers.map((m) => m.time).sort((a, b) => a - b);
   const target = dir < 0 ? list.filter((p) => p < t - EPS).pop() : list.find((p) => p > t + EPS);
   if (target != null) store.setPlayhead(target);
 }
@@ -113,6 +116,64 @@ async function linkMedia() {
   toast(n ? `${n}개 항목을 다시 연결했습니다` : '이름이 같은 파일을 찾지 못했습니다');
 }
 
+/** The clip a clip command works on: a selected clip under the playhead, else the first selected one. */
+function clipAtPlayhead(filter = () => true) {
+  const t = store.ui.playhead;
+  const list = sel().filter(filter);
+  return list.find((c) => c.start <= t + EPS && clipEnd(c) > t + EPS) || list[0]
+    || Object.values(seq().clips).find((c) => filter(c) && seq().tracks.find((tr) => tr.id === c.trackId)?.targeted && c.start <= t + EPS && clipEnd(c) > t + EPS) || null;
+}
+
+/** 다음으로 바꾸기 ▸ 소스 모니터 (match: 일치하는 프레임) / 저장소 항목. */
+function replaceWith(from, { match = false } = {}) {
+  const ids = selIds();
+  if (!ids.length) return toast('바꿀 타임라인 클립을 먼저 선택하세요');
+  let mid = null;
+  if (from === 'source') mid = store.ui.sourceMediaId;
+  else mid = [...store.ui.selectedMedia].find((id) => store.project.media[id]);
+  if (!mid) return toast(from === 'source' ? '소스 모니터에 클립을 먼저 여세요' : '프로젝트 패널에서 바꿀 항목을 먼저 선택하세요');
+  const m = store.project.media[mid];
+  const opts = {};
+  if (from === 'source') {
+    opts.inPoint = m.inPoint ?? 0;
+    if (match) {
+      const srcTime = sourceApi.currentTime?.();
+      if (srcTime == null) return toast('소스 모니터 위치를 알 수 없습니다');
+      opts.matchAt = { seqTime: store.ui.playhead, srcTime };
+    }
+  }
+  edit.replaceClipMedia([...edit.withLinked(ids)], mid, opts);
+}
+
+/** M: a clip marker on the selected clips under the playhead (as in Premiere), otherwise a sequence marker. */
+function addMarkerHere(props = {}) {
+  const t = store.ui.playhead;
+  const onClips = sel().filter((c) => c.start <= t + EPS && clipEnd(c) >= t - EPS).map((c) => c.id);
+  if (onClips.length && !props.type) {
+    const ids = edit.addClipMarker(onClips, t, props);
+    if (ids.length) toast('선택한 클립에 클립 마커를 넣었습니다 (시퀀스 마커: 선택 해제 후 M)');
+    return;
+  }
+  const id = edit.addMarker(t, props);
+  if (!id && props.type) toast('이 위치에는 이미 마커가 있습니다');
+  return id;
+}
+
+/** Marker at the playhead: sequence markers first, then clip markers of clips there. */
+function markerAtPlayhead() {
+  const s = seq();
+  const t = store.ui.playhead;
+  const tol = 0.5 / s.fps;
+  const mk = s.markers.find((m) => Math.abs(m.time - t) < tol || (m.duration > 0 && t >= m.time - tol && t <= m.time + m.duration + tol));
+  if (mk) return mk.id;
+  for (const c of Object.values(s.clips)) {
+    // clip markers a trim has hidden (outside the clip) do not count
+    const cm = c.markers?.find((m) => m.time >= -tol && m.time <= c.duration + tol && Math.abs(c.start + m.time - t) < tol);
+    if (cm) return cm.id;
+  }
+  return null;
+}
+
 export const commands = {
   // ---- file
   newProject,
@@ -160,7 +221,11 @@ export const commands = {
   pasteAttributes: () => {
     const cb = store.ui.clipboard;
     if (!cb?.clips.length || !sel().length) return toast('먼저 클립을 복사하고, 붙여 넣을 클립을 선택하세요');
-    edit.pasteAttributes(cb.clips[0], selIds());
+    openPasteAttributesDialog(cb.clips, selIds());
+  },
+  removeAttributes: () => {
+    if (!sel().length) return toast('클립을 먼저 선택하세요');
+    openRemoveAttributesDialog(selIds());
   },
   clear: () => edit.deleteSelection(),
   rippleDelete: () => edit.deleteSelection({ ripple: true }),
@@ -177,9 +242,45 @@ export const commands = {
     else edit.linkClips(selIds());
   },
   frameHold: () => {
-    const c = sel().find((x) => x.kind === 'video');
-    if (c) edit.addFrameHold(c);
-    else toast('영상 클립을 선택하세요');
+    const t = store.ui.playhead;
+    const c = clipAtPlayhead((x) => x.kind === 'video');
+    if (!c) return toast('영상 클립을 선택하세요');
+    // the frame under the playhead is held, so the playhead has to be over the clip (as in Premiere)
+    if (t < c.start - EPS || t >= clipEnd(c) - EPS) return toast('재생헤드를 고정할 프레임(영상 클립 위)에 두세요');
+    edit.addFrameHold(c);
+  },
+  frameHoldSegment: () => {
+    const t = store.ui.playhead;
+    const c = clipAtPlayhead((x) => x.kind === 'video');
+    if (!c || t < c.start - EPS || t > clipEnd(c) + EPS) return toast('재생헤드를 영상 클립 위에 두고 클립을 선택하세요');
+    edit.insertFrameHoldSegment(c, t, 2);
+  },
+  frameHoldOptions: () => {
+    const ids = sel().filter((x) => x.kind === 'video').map((x) => x.id);
+    if (!ids.length) return toast('영상 클립을 선택하세요');
+    openFrameHoldOptionsDialog(ids);
+  },
+  extendEdit: () => edit.extendToPlayhead(),
+  group: () => edit.groupClips(selIds()),
+  ungroup: () => edit.ungroupClips(selIds()),
+  replaceFromSource: () => replaceWith('source'),
+  replaceFromSourceMatch: () => replaceWith('source', { match: true }),
+  replaceFromBin: () => replaceWith('bin'),
+  newSequenceFromClip: () => {
+    const mid = [...store.ui.selectedMedia].find((id) => store.project.media[id] && !['sequence', 'lut', 'font'].includes(store.project.media[id].kind))
+      || sel().find((c) => c.mediaId && !['sequence', 'lut', 'font'].includes(store.project.media[c.mediaId]?.kind))?.mediaId;
+    if (!mid) return toast('프로젝트 패널이나 타임라인에서 클립을 먼저 선택하세요');
+    edit.newSequenceFromMedia(mid);
+  },
+  setToFrameSize: () => {
+    const ids = sel().filter((c) => c.effects.some((e) => e.type === 'motion')).map((c) => c.id);
+    if (!ids.length) return toast('영상·이미지 클립을 선택하세요');
+    edit.setClipsToFrameSize(ids, '프레임 크기로 설정');
+  },
+  scaleToFrameSize: () => {
+    const ids = sel().filter((c) => c.effects.some((e) => e.type === 'motion')).map((c) => c.id);
+    if (!ids.length) return toast('영상·이미지 클립을 선택하세요');
+    edit.setClipsToFrameSize(ids, '프레임 크기로 비율 조정');
   },
   reverse: () => edit.toggleReverse(selIds()),
   insert: () => sourceApi.insert?.(),
@@ -248,6 +349,8 @@ export const commands = {
     toast(`연결된 선택 ${store.ui.linkedSelection ? '켬' : '끔'}`);
     store.changed();
   },
+  addTracks: () => openAddTracksDialog(),
+  deleteTracks: () => openDeleteTracksDialog(),
   addVideoTrack: () => edit.addTrack('video'),
   addAudioTrack: () => edit.addTrack('audio'),
   zoomIn: () => timelineApi.zoomIn?.(),
@@ -264,12 +367,29 @@ export const commands = {
   clearIn: () => (inSource() ? sourceApi.clearIn() : edit.setSequenceInOut('in', null)),
   clearOut: () => (inSource() ? sourceApi.clearOut() : edit.setSequenceInOut('out', null)),
   clearInOut: () => (inSource() ? sourceApi.clearInOut() : store.transact('시작/끝 지우기', () => { seq().inPoint = null; seq().outPoint = null; })),
-  addMarker: () => edit.addMarker(),
+  addMarker: () => addMarkerHere(),
+  addChapterMarker: () => {
+    const id = addMarkerHere({ type: 'chapter', name: '챕터', color: '#f87171' });
+    if (id) openMarkerEditor(id);
+  },
+  clearSelectedMarker: () => {
+    const id = markerAtPlayhead();
+    if (id) edit.removeMarker(id);
+    else toast('재생헤드 위치에 마커가 없습니다');
+  },
+  markSelection: () => {
+    const list = sel();
+    if (!list.length) return toast('클립을 먼저 선택하세요');
+    store.transact('선택 항목 표시', () => {
+      seq().inPoint = Math.min(...list.map((c) => c.start));
+      seq().outPoint = Math.max(...list.map((c) => clipEnd(c)));
+    });
+  },
   nextMarker: () => seekMarker(1),
   prevMarker: () => seekMarker(-1),
   editMarker: () => {
-    const mk = seq().markers.find((m) => Math.abs(m.time - store.ui.playhead) < 0.5 / seq().fps);
-    if (mk) openMarkerDialog(mk.id);
+    const id = markerAtPlayhead();
+    if (id) openMarkerEditor(id);
     else toast('재생헤드 위치에 마커가 없습니다');
   },
   clearMarkers: () => store.transact('마커 모두 지우기', () => { seq().markers = []; }),
@@ -297,6 +417,10 @@ export const commands = {
   stepForward5: () => (inSource() ? sourceApi.step(5) : playback.step(5)),
   prevEdit: () => seekEdit(-1),
   nextEdit: () => seekEdit(1),
+  prevEditAll: () => seekEdit(-1, true),
+  nextEditAll: () => seekEdit(1, true),
+  setTool: (id) => store.setTool(id),
+  trackHeights: (which, dir) => timelineApi.trackHeights?.(which, dir),
   goStart: () => (inSource() ? sourceApi.goStart() : (playback.stop(), store.setPlayhead(0))),
   goEnd: () => (inSource() ? sourceApi.goEnd() : (playback.stop(), store.setPlayhead(sequenceDuration(seq())))),
   playInToOut: () => playback.playInToOut(),

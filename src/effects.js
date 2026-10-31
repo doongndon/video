@@ -1,5 +1,9 @@
 // Declarative definitions of every effect and transition. Rendering lives in compositor.js
 // (video) and playback.js / export.js / audio-fx.js (audio); this file only describes parameters.
+// The Premiere Pro style additions (Distort, Generate, Keying, Lumetri …) come from fx-defs.js.
+
+import { MORE_EFFECTS, MORE_TRANSITIONS, LUMETRI_PARAMS } from './fx-defs.js';
+import { LOOKS } from './looks.js';
 
 export const BLEND_MODES = [
   ['source-over', '표준'],
@@ -31,6 +35,10 @@ const pct = (key, label, def, opts = {}) => num(key, label, def, { min: 0, max: 
 export const DYNAMIC_OPTIONS = {
   videoTracks: (project, seq) => seq.tracks.filter((t) => t.kind === 'video').map((t) => [t.id, t.name]),
   luts: (project) => [['', '(LUT 없음)'], ...project.mediaOrder.map((id) => project.media[id]).filter((m) => m?.kind === 'lut').map((m) => [m.id, m.name])],
+  /** Lumetri 크리에이티브 ▸ Look: built-in looks, then imported .cube files. */
+  looks: (project) => [['', '없음'], ...LOOKS.map(([id, name]) => [id, name]), ...project.mediaOrder.map((id) => project.media[id]).filter((m) => m?.kind === 'lut').map((m) => [m.id, `LUT: ${m.name}`])],
+  /** 그레이디언트 지우기 ▸ 그레이디언트 레이어: the clip's own brightness or another video track. */
+  gradientLayers: (project, seq) => [['', '(이 클립의 밝기)'], ...seq.tracks.filter((t) => t.kind === 'video').map((t) => [t.id, `비디오 트랙 ${t.name}`])],
 };
 
 /**
@@ -44,7 +52,9 @@ export const EFFECTS = {
     params: [
       num('posX', '위치 X', (seq) => seq.width / 2, { unit: 'px' }),
       num('posY', '위치 Y', (seq) => seq.height / 2, { unit: 'px' }),
-      num('scale', '비율', 100, { min: 0, max: 2000, unit: '%' }),
+      num('scale', '비율', 100, { min: 0, max: 2000, unit: '%', hint: '균일 비율을 끄면 세로 비율(비율 높이)이 됩니다' }),
+      num('scaleW', '비율 폭', 100, { min: 0, max: 2000, unit: '%', hint: '균일 비율을 끄면 쓰입니다' }),
+      { key: 'uniform', label: '균일 비율', type: 'bool', default: true },
       num('rotation', '회전', 0, { unit: '°' }),
       num('anchorX', '기준점 X', 0, { unit: 'px', hint: '클립 중심에서의 거리' }),
       num('anchorY', '기준점 Y', 0, { unit: 'px' }),
@@ -73,13 +83,36 @@ export const EFFECTS = {
       num('lineHeight', '행간', 120, { min: 50, max: 400, unit: '%' }),
       num('tracking', '자간', 0, { min: -50, max: 200, unit: 'px' }),
       pct('reveal', '나타내기 (타자기)', 100, { hint: '0 → 100으로 키프레임을 주면 글자가 한 자씩 나타납니다' }),
-      { key: 'color', label: '글자 색', type: 'color', default: '#ffffff' },
-      { key: 'strokeColor', label: '외곽선 색', type: 'color', default: '#000000' },
-      num('strokeWidth', '외곽선 두께', 0, { min: 0, max: 100, unit: 'px' }),
-      { key: 'background', label: '배경 상자', type: 'bool', default: false },
-      { key: 'bgColor', label: '배경 색', type: 'color', default: '#000000' },
-      pct('bgOpacity', '배경 불투명도', 60),
-      num('bgPadding', '배경 여백', 24, { min: 0, max: 400, unit: 'px' }),
+      // 모양 ▸ 칠 (fill): solid or gradient
+      { key: 'fillOn', label: '칠', type: 'bool', default: true, group: '모양' },
+      { key: 'fillType', label: '칠 유형', type: 'select', default: 'solid', options: [['solid', '단색'], ['linear', '선형 그레이디언트'], ['radial', '방사형 그레이디언트']], group: '모양' },
+      { key: 'color', label: '글자 색', type: 'color', default: '#ffffff', group: '모양' },
+      { key: 'color2', label: '그레이디언트 끝 색', type: 'color', default: '#ffcc33', group: '모양' },
+      num('gradAngle', '그레이디언트 각도', 90, { unit: '°', group: '모양' }),
+      // 모양 ▸ 선 (strokes, outside the glyphs; each further stroke wraps the previous one)
+      { key: 'strokeColor', label: '외곽선 색', type: 'color', default: '#000000', group: '모양' },
+      num('strokeWidth', '외곽선 두께', 0, { min: 0, max: 100, unit: 'px', group: '모양' }),
+      { key: 'stroke2Color', label: '외곽선 2 색', type: 'color', default: '#ffffff', group: '모양' },
+      num('stroke2Width', '외곽선 2 두께', 0, { min: 0, max: 100, unit: 'px', group: '모양' }),
+      { key: 'stroke3Color', label: '외곽선 3 색', type: 'color', default: '#ff3b6b', group: '모양' },
+      num('stroke3Width', '외곽선 3 두께', 0, { min: 0, max: 100, unit: 'px', group: '모양' }),
+      // 모양 ▸ 배경
+      { key: 'background', label: '배경 상자', type: 'bool', default: false, group: '모양' },
+      { key: 'bgColor', label: '배경 색', type: 'color', default: '#000000', group: '모양' },
+      pct('bgOpacity', '배경 불투명도', 60, { group: '모양' }),
+      num('bgPadding', '배경 크기 (여백)', 24, { min: 0, max: 400, unit: 'px', group: '모양' }),
+      num('bgRadius', '배경 모서리 반경', 12, { min: 0, max: 400, unit: 'px', group: '모양' }),
+      // 모양 ▸ 어두운 영역 (drop shadow)
+      { key: 'shadowOn', label: '그림자', type: 'bool', default: false, group: '모양' },
+      { key: 'shadowColor', label: '그림자 색', type: 'color', default: '#000000', group: '모양' },
+      pct('shadowOpacity', '그림자 불투명도', 75, { group: '모양' }),
+      num('shadowAngle', '그림자 각도', 135, { unit: '°', group: '모양' }),
+      num('shadowDistance', '그림자 거리', 8, { min: 0, max: 400, unit: 'px', group: '모양' }),
+      num('shadowSize', '그림자 크기', 0, { min: 0, max: 100, unit: 'px', group: '모양' }),
+      num('shadowBlur', '그림자 흐림', 12, { min: 0, max: 200, unit: 'px', group: '모양' }),
+      // 텍스트로 마스크: the glyphs become a window onto the tracks below
+      { key: 'textMask', label: '텍스트로 마스크', type: 'bool', default: false, group: '모양', hint: '글자 모양으로 아래 트랙의 영상이 보이고 나머지는 가려집니다' },
+      { key: 'maskInvert', label: '마스크 반전', type: 'bool', default: false, group: '모양', hint: '글자 부분만 뚫어서 아래 트랙을 가립니다' },
     ],
   },
   fill: {
@@ -105,11 +138,11 @@ export const EFFECTS = {
 
   // ---- user video effects ----
   brightnessContrast: {
-    name: '밝기 및 대비', kind: 'video', category: '조정',
+    name: '밝기 및 대비', kind: 'video', category: '색상 교정',
     params: [num('brightness', '밝기', 0, { min: -100, max: 100 }), num('contrast', '대비', 0, { min: -100, max: 100 })],
   },
   basicColor: {
-    name: '기본 색상 보정', kind: 'video', category: '색상 보정',
+    name: '기본 색상 보정', kind: 'video', category: '색상 교정',
     params: [
       num('exposure', '노출', 0, { min: -100, max: 100 }),
       num('contrast', '대비', 0, { min: -100, max: 100 }),
@@ -118,38 +151,24 @@ export const EFFECTS = {
       num('tint', '색조(틴트)', 0, { min: -100, max: 100 }),
     ],
   },
+  // Lumetri 색상: 기본 교정 · 크리에이티브 · 곡선 · 색상 휠 및 일치 · HSL 보조 · 비네팅 (see fx-defs.js)
   lumetri: {
-    name: '고급 색상 보정 (커브·휠)', kind: 'video', category: '색상 보정',
-    params: [
-      num('exposure', '노출', 0, { min: -5, max: 5, step: 0.05, unit: '스톱' }),
-      num('contrast', '대비', 0, { min: -100, max: 100 }),
-      num('highlights', '밝은 영역', 0, { min: -100, max: 100 }),
-      num('shadows', '어두운 영역', 0, { min: -100, max: 100 }),
-      num('whites', '흰색 계열', 0, { min: -100, max: 100 }),
-      num('blacks', '검정 계열', 0, { min: -100, max: 100 }),
-      num('temperature', '색온도', 0, { min: -100, max: 100 }),
-      num('tint', '색조(틴트)', 0, { min: -100, max: 100 }),
-      num('saturation', '채도', 100, { min: 0, max: 200, unit: '%' }),
-      num('vibrance', '생동감', 0, { min: -100, max: 100 }),
-      { key: 'shadowsWheel', label: '어두운 영역 색상 휠', type: 'wheel', default: { x: 0, y: 0 } },
-      { key: 'midsWheel', label: '중간 영역 색상 휠', type: 'wheel', default: { x: 0, y: 0 } },
-      { key: 'highlightsWheel', label: '밝은 영역 색상 휠', type: 'wheel', default: { x: 0, y: 0 } },
-      { key: 'curves', label: 'RGB 커브', type: 'curves', default: { master: [[0, 0], [1, 1]], r: [[0, 0], [1, 1]], g: [[0, 0], [1, 1]], b: [[0, 0], [1, 1]] } },
-    ],
+    name: 'Lumetri 색상', kind: 'video', category: '색상 교정',
+    params: LUMETRI_PARAMS,
   },
   lut: {
-    name: 'LUT 적용 (.cube)', kind: 'video', category: '색상 보정',
+    name: 'LUT 적용 (.cube)', kind: 'video', category: '색상 교정',
     params: [
       { key: 'lutId', label: 'LUT', type: 'select', default: '', options: 'luts', hint: '.cube 파일을 가져오기 하면 목록에 나타납니다' },
       pct('intensity', '강도', 100),
     ],
   },
   hueShift: {
-    name: '색조 회전', kind: 'video', category: '색상 보정',
+    name: '색조 회전', kind: 'video', category: '색상 교정',
     params: [num('hue', '색조', 0, { min: -180, max: 180, unit: '°' })],
   },
   tint: {
-    name: '틴트 (두 색 매핑)', kind: 'video', category: '색상 보정',
+    name: '틴트 (두 색 매핑)', kind: 'video', category: '색상 교정',
     params: [
       { key: 'black', label: '검정을 이 색으로', type: 'color', default: '#1a1a40' },
       { key: 'white', label: '흰색을 이 색으로', type: 'color', default: '#ffe8b0' },
@@ -158,7 +177,11 @@ export const EFFECTS = {
   },
   gaussianBlur: {
     name: '가우시안 흐림', kind: 'video', category: '흐림 및 선명',
-    params: [num('blurriness', '흐림 정도', 10, { min: 0, max: 300, unit: 'px', step: 0.5 })],
+    params: [
+      num('blurriness', '흐림 정도', 10, { min: 0, max: 300, unit: 'px', step: 0.5 }),
+      { key: 'dims', label: '흐림 차원', type: 'select', default: 'both', options: [['both', '가로 및 세로'], ['h', '가로'], ['v', '세로']] },
+      { key: 'repeatEdges', label: '가장자리 픽셀 반복', type: 'bool', default: false, hint: '켜면 화면 가장자리가 투명하게 번지지 않습니다' },
+    ],
   },
   sharpen: {
     name: '선명하게', kind: 'video', category: '흐림 및 선명',
@@ -179,9 +202,9 @@ export const EFFECTS = {
   },
   blackWhite: { name: '흑백', kind: 'video', category: '이미지 컨트롤', params: [] },
   sepia: { name: '세피아', kind: 'video', category: '이미지 컨트롤', params: [pct('amount', '양', 100)] },
-  invert: { name: '반전', kind: 'video', category: '이미지 컨트롤', params: [pct('amount', '양', 100)] },
+  invert: { name: '반전', kind: 'video', category: '채널', params: [pct('amount', '양', 100)] },
   colorKey: {
-    name: '크로마 키 (색상 키)', kind: 'video', category: '키잉 및 합성',
+    name: '크로마 키 (색상 키)', kind: 'video', category: '키잉',
     params: [
       { key: 'keyColor', label: '키 색상', type: 'color', default: '#00ff00' },
       pct('tolerance', '허용치', 30),
@@ -190,7 +213,7 @@ export const EFFECTS = {
     ],
   },
   mask: {
-    name: '마스크', kind: 'video', category: '키잉 및 합성',
+    name: '마스크', kind: 'video', category: '키잉',
     params: [
       { key: 'shape', label: '모양', type: 'select', default: 'ellipse', options: [['ellipse', '타원'], ['rectangle', '사각형'], ['polygon', '다각형 (펜)']] },
       pct('cx', '중심 X', 50),
@@ -206,7 +229,7 @@ export const EFFECTS = {
     ],
   },
   trackMatte: {
-    name: '트랙 매트 키', kind: 'video', category: '키잉 및 합성',
+    name: '트랙 매트 키', kind: 'video', category: '키잉',
     params: [
       { key: 'track', label: '매트 트랙', type: 'select', default: '', options: 'videoTracks', hint: '이 트랙의 내용 모양대로 클립이 보입니다' },
       { key: 'mode', label: '합성 방식', type: 'select', default: 'alpha', options: [['alpha', '알파 매트'], ['luma', '루마 매트']] },
@@ -247,7 +270,11 @@ export const EFFECTS = {
   },
   crop: {
     name: '자르기', kind: 'video', category: '변형',
-    params: [pct('left', '왼쪽', 0), pct('top', '위쪽', 0), pct('right', '오른쪽', 0), pct('bottom', '아래쪽', 0)],
+    params: [
+      pct('left', '왼쪽', 0), pct('top', '위쪽', 0), pct('right', '오른쪽', 0), pct('bottom', '아래쪽', 0),
+      { key: 'zoom', label: '확대/축소', type: 'bool', default: false, hint: '남은 부분을 원래 크기로 늘립니다' },
+      num('feather', '가장자리 페더', 0, { min: 0, max: 500, unit: 'px' }),
+    ],
   },
   blurFill: {
     name: '배경 채우기 (흐림·단색)', kind: 'video', category: '변형',
@@ -272,7 +299,7 @@ export const EFFECTS = {
     params: [num('amount', '세기', 20, { min: 0, max: 400, unit: 'px' }), num('speed', '빠르기', 8, { min: 0.1, max: 60, unit: 'Hz', step: 0.1 }), num('rotation', '회전 흔들림', 1, { min: 0, max: 45, unit: '°', step: 0.1 })],
   },
   stabilize: {
-    name: '손떨림 보정', kind: 'video', category: '왜곡',
+    name: '워프 안정기 (손떨림 보정)', kind: 'video', category: '왜곡',
     params: [
       { key: 'analyze', label: '분석', type: 'action', default: null, hint: '클립을 분석해 흔들림을 계산합니다' },
       pct('smoothness', '부드러움', 50),
@@ -362,23 +389,49 @@ export const EFFECTS = {
   },
 };
 
+Object.assign(EFFECTS, MORE_EFFECTS);
+
+/** Re-insert an object's keys in a stable order of rank(def) (the effects panel lists folders in key order). */
+function reorder(table, rank) {
+  const keys = Object.keys(table).map((k, i) => [k, rank(table[k]), i]).sort((a, b) => a[1] - b[1] || a[2] - b[2]);
+  for (const [k] of keys) {
+    const d = table[k];
+    delete table[k];
+    table[k] = d;
+  }
+}
+
+// Premiere's video effect folders, in its order (fixed effects first, audio last)
+const EFFECT_ORDER = ['조정', '흐림 및 선명', '채널', '색상 교정', '왜곡', '생성', '이미지 컨트롤', '키잉', '노이즈 및 그레인', '원근', '스타일화', '시간', '변형', '전환', '유틸리티', '비디오'];
+reorder(EFFECTS, (d) => {
+  if (d.fixed) return -1;
+  if (d.kind === 'audio') return 100;
+  const i = EFFECT_ORDER.indexOf(d.category);
+  return i < 0 ? 50 : i;
+});
+
 export const TRANSITIONS = {
   crossDissolve: { name: '교차 디졸브', kind: 'video', category: '디졸브' },
   additiveDissolve: { name: '가산 디졸브', kind: 'video', category: '디졸브' },
   blurDissolve: { name: '흐림 디졸브', kind: 'video', category: '디졸브' },
   dipToBlack: { name: '검정으로 물들이기', kind: 'video', category: '디졸브' },
   dipToWhite: { name: '흰색으로 물들이기', kind: 'video', category: '디졸브' },
-  wipe: { name: '와이프', kind: 'video', category: '와이프', directional: true },
-  barnDoor: { name: '반 도어 (가운데서 열기)', kind: 'video', category: '와이프' },
-  clockWipe: { name: '시계 방향 와이프', kind: 'video', category: '와이프' },
+  wipe: { name: '지우기', kind: 'video', category: '지우기', directional: true },
+  barnDoor: { name: '반 도어 (가운데서 열기)', kind: 'video', category: '지우기' },
+  clockWipe: { name: '시계 방향 지우기', kind: 'video', category: '지우기' },
   push: { name: '밀기', kind: 'video', category: '슬라이드', directional: true },
-  slide: { name: '슬라이드 (덮기)', kind: 'video', category: '슬라이드', directional: true },
+  slide: { name: '슬라이드', kind: 'video', category: '슬라이드', directional: true },
   whip: { name: '휙 넘기기 (위프)', kind: 'video', category: '슬라이드', directional: true },
-  irisRound: { name: '원형 아이리스', kind: 'video', category: '아이리스' },
-  crossZoom: { name: '교차 확대', kind: 'video', category: '확대/축소' },
-  constantPower: { name: '지속 가속 (자연스러운 페이드)', kind: 'audio', category: '크로스페이드' },
+  irisRound: { name: '조리개 원형', kind: 'video', category: '조리개' },
+  crossZoom: { name: '교차 확대/축소', kind: 'video', category: '확대/축소' },
+  ...MORE_TRANSITIONS,
+  constantPower: { name: '지속 가감속 (자연스러운 페이드)', kind: 'audio', category: '크로스페이드' },
   constantGain: { name: '지속 게인 (직선 페이드)', kind: 'audio', category: '크로스페이드' },
 };
+
+// Premiere's video transition folders, in its order
+const TRANSITION_ORDER = ['3D 동작', '디졸브', '조리개', '페이지 벗기기', '슬라이드', '지우기', '확대/축소', '스타일'];
+reorder(TRANSITIONS, (d) => (d.kind === 'audio' ? 99 : TRANSITION_ORDER.indexOf(d.category)));
 
 export const TRANSITION_DIRECTIONS = DIRECTIONS;
 export const DEFAULT_VIDEO_TRANSITION = 'crossDissolve';

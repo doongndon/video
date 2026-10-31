@@ -1,11 +1,11 @@
 // Autosave to IndexedDB (project JSON + imported media files) and project file open/save.
 
 import { store } from './store.js';
-import { runtime, getRuntime, attachFile, mediaEvents } from './media.js';
+import { runtime, getRuntime, attachFile, mediaEvents, analysisCache } from './media.js';
 import { debounce, downloadBlob } from './util.js';
 
 const DB_NAME = 'montage-editor';
-const DB_VERSION = 1;
+const DB_VERSION = 2; // 2: 'analysis' (cached waveforms and filmstrips)
 let dbPromise = null;
 const savedFiles = new Set();
 let enabled = true;
@@ -18,6 +18,7 @@ function db() {
         const d = req.result;
         if (!d.objectStoreNames.contains('kv')) d.createObjectStore('kv');
         if (!d.objectStoreNames.contains('files')) d.createObjectStore('files');
+        if (!d.objectStoreNames.contains('analysis')) d.createObjectStore('analysis');
       };
       req.onsuccess = () => resolve(req.result);
       req.onerror = () => reject(req.error);
@@ -36,6 +37,32 @@ async function tx(storeName, mode, fn) {
     t.onerror = () => reject(t.error);
     t.onabort = () => reject(t.error);
   });
+}
+
+// ---- cached analysis (waveform peaks, filmstrip thumbnails) by file signature
+const ANALYSIS_MAX_AGE = 90 * 24 * 3600 * 1000;
+analysisCache.get = (key) => tx('analysis', 'readonly', (s) => s.get(key));
+analysisCache.put = (key, value) => tx('analysis', 'readwrite', (s) => s.put(value, key));
+
+/** Forget cached analysis of files not used for a long time (once per session). */
+async function pruneAnalysis() {
+  try {
+    const d = await db();
+    await new Promise((resolve) => {
+      const t = d.transaction('analysis', 'readwrite');
+      const req = t.objectStore('analysis').openCursor();
+      const now = Date.now();
+      req.onsuccess = () => {
+        const cur = req.result;
+        if (!cur) return;
+        if (!(now - (cur.value?.used || 0) < ANALYSIS_MAX_AGE)) cur.delete();
+        cur.continue();
+      };
+      t.oncomplete = resolve;
+      t.onerror = resolve;
+      t.onabort = resolve;
+    });
+  } catch { /* storage unavailable */ }
 }
 
 export async function saveProjectNow() {
@@ -70,6 +97,7 @@ export async function saveProjectNow() {
 const scheduleSave = debounce(saveProjectNow, 1000);
 
 export function initAutosave() {
+  setTimeout(pruneAnalysis, 15000);
   store.on('change', () => scheduleSave());
   mediaEvents.on('updated', () => scheduleSave());
   window.addEventListener('beforeunload', () => scheduleSave.flush());

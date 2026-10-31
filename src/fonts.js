@@ -120,10 +120,10 @@ export function fontSheetPending(family) {
   return sheets.get(family)?.state !== 'done';
 }
 
-/** Make sure the stylesheet of a Google family is on the page. Resolves when it has loaded. */
 /** A web font that has to be fetched before it can draw (a Google font). */
 export const isWebFont = (family) => GOOGLE.has(family);
 
+/** Make sure the stylesheet of a Google family is on the page. Resolves when it has loaded. */
 export function ensureFont(family) {
   if (!GOOGLE.has(family) || PRELOADED.has(family) || typeof document === 'undefined') return Promise.resolve();
   let entry = sheets.get(family);
@@ -208,4 +208,26 @@ export function ensureProjectFonts(project) {
       if (fam) ensureFont(fam);
     }
   }
+}
+
+// ---------------------------------------------------------------- recently used fonts
+
+const RECENT_KEY = 'montage.recentFonts';
+const RECENT_MAX = 8;
+
+/** Families picked most recently (newest first), shared by the video and photo editors. */
+export function recentFonts() {
+  try {
+    const list = JSON.parse(localStorage.getItem(RECENT_KEY) || '[]');
+    return Array.isArray(list) ? list.filter((f) => typeof f === 'string' && f) : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Remember that a family was just used. */
+export function noteFontUsed(family) {
+  if (!family) return;
+  const list = [family, ...recentFonts().filter((f) => f !== family)].slice(0, RECENT_MAX);
+  try { localStorage.setItem(RECENT_KEY, JSON.stringify(list)); } catch { /* storage unavailable */ }
 }

@@ -45,15 +45,21 @@ function audioRoles(s) {
   return { speech: linked, music: standalone };
 }
 
-/** The video track holding the most text clips (the caption track), or null. */
+/**
+ * The caption track: the video track with the most text clips that look like captions — many
+ * lines, or a few that sit in the lower part of the picture (titles in the middle are not captions).
+ */
 export function captionTrackId(s) {
   let best = null;
-  let n = 1;
+  let n = 0;
   for (const t of videoTracks(s)) {
-    const k = clipsOnTrack(s, t.id).filter((c) => c.kind === 'text').length;
-    if (k > n) {
+    const texts = clipsOnTrack(s, t.id).filter((c) => c.kind === 'text');
+    if (texts.length < 2) continue;
+    const low = texts.filter((c) => (c.effects.find((e) => e.type === 'motion')?.params.posY?.value ?? 0) >= s.height * 0.6).length;
+    if (texts.length < 4 && low < texts.length * 0.6) continue;
+    if (texts.length > n) {
       best = t.id;
-      n = k;
+      n = texts.length;
     }
   }
   return best;
@@ -182,7 +188,7 @@ export async function runAutoEdit(opts, { onStep = () => {}, signal } = {}) {
           keepTrackIds: musicTracks,
           scenes: hasScenes,
           onStatus: (text) => onStep('ai', 'run', text),
-          onEvent: (ev) => onStep('ai', 'run', `${ev.error ? '✗' : '✓'} ${ev.label}${ev.summary ? ` — ${ev.summary}` : ''}`),
+          onEvent: (ev) => onStep('ai', 'run', ev.error ? `${ev.label} 실패: ${ev.error}` : `${ev.label} 완료${ev.summary ? ` — ${ev.summary}` : ''}`),
         });
         aiText = res.text;
         return `Gemini가 편집 ${res.edits}번을 했습니다`;

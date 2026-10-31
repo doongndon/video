@@ -7,11 +7,13 @@
 //    sharpening, optionally straightening and a crop); they are applied to a new layer. Without a
 //    key the settings come from the picture's own histogram instead.
 //  - Assistant: a request in plain Korean; Gemini edits with the photo editor's tools.
-//  - Generative fill (experimental): an image-capable Gemini model redraws the selected area.
+//  - Generative fill, Generative Expand (crop past the canvas), Generate Image and Generate
+//    Background: an image-capable Gemini model paints, the result comes back as a new layer.
 // Every request is one undo step.
 
 import { h, clamp } from '../util.js';
 import { toast, openModal } from '../ui/common.js';
+import { icon } from '../ui/icons.js';
 import { geminiSettings, saveGeminiSettings, generate, generateWith, listGeminiModels, listAllGeminiModels, API_KEY_PAGE } from '../ai.js';
 import { makeCanvas, newLayer } from './doc.js';
 import { FILTERS, ADJUSTMENTS, applyFilter, applyAdjustment, defaultParams, defaultFilterParams } from './adjust.js';
@@ -55,12 +57,13 @@ async function oneStep(P, label, fn) {
   const doc = P.doc;
   const hist = doc.history;
   const before = doc.capture();
-  const mark = hist.undoStack.length;
+  // the step on top before: a full history drops its oldest steps, so counting would miss some
+  const top = hist.undoStack.at(-1) || null;
   try {
     return await fn();
   } finally {
-    if (P.doc === doc && hist.undoStack.length > mark) {
-      hist.undoStack.splice(mark);
+    if (P.doc === doc && hist.undoStack.at(-1) !== top) {
+      hist.undoStack.splice(top ? hist.undoStack.lastIndexOf(top) + 1 : 0);
       hist.push(label, before);
       doc.saved = false;
       P.afterHistory();
@@ -386,6 +389,8 @@ function makeTools(P) {
           d.selectedIds = [l.id];
           d.selection = SEL.combine(d, m, 'new');
           d.addMask(l, 'white', true);
+          // a subject cut-out: the task bar offers Generate Background for it
+          l.mask.subject = true;
           d.selection = null;
           d.touch(l);
         });
@@ -617,7 +622,7 @@ export async function runPhotoAssistant(P, prompt, { history = [], onEvent = () 
   });
 }
 
-// ---------------------------------------------------------------- generative fill (experimental)
+// ---------------------------------------------------------------- generative fill, expand, image, background
 
 /** The image-capable Gemini model to use, or null. */
 async function imageModel(signal) {
@@ -625,6 +630,52 @@ async function imageModel(signal) {
   const img = ids.filter((id) => /image/.test(id) && !/imagen/.test(id));
   const rank = (id) => (/2\.5-flash-image(?!-preview)/.test(id) ? 4 : /flash-image/.test(id) ? 3 : /image-generation/.test(id) ? 2 : 1);
   return img.sort((a, b) => rank(b) - rank(a))[0] || null;
+}
+const NO_IMAGE_MODEL = '이 API 키로 쓸 수 있는 이미지 생성 Gemini 모델이 없습니다 (예: gemini-2.5-flash-image)';
+const MAGENTA = '#ff00ff';
+
+/** The picture in a Gemini answer as an ImageBitmap. */
+async function imageFrom(d) {
+  const parts = firstCandidate(d).content.parts || [];
+  const imgPart = parts.find((p) => p.inlineData?.data && /^image\//.test(p.inlineData.mimeType || ''));
+  if (!imgPart) throw new Error(`Gemini가 이미지를 돌려주지 않았습니다${textOf({ parts }) ? `: ${textOf({ parts }).slice(0, 120)}` : ''}`);
+  const blob = await (await fetch(`data:${imgPart.inlineData.mimeType};base64,${imgPart.inlineData.data}`)).blob();
+  return createImageBitmap(blob);
+}
+
+/** A canvas as base64 PNG, at most `max` pixels on its long side. */
+function pngB64(c, max = 1024) {
+  const k = Math.min(1, max / Math.max(c.width, c.height));
+  const send = makeCanvas(Math.max(1, Math.round(c.width * k)), Math.max(1, Math.round(c.height * k)));
+  const g = send.getContext('2d');
+  g.imageSmoothingQuality = 'high';
+  g.drawImage(c, 0, 0, send.width, send.height);
+  return send.toDataURL('image/png').split(',')[1];
+}
+
+/** Ask the image model to repaint the magenta part of a picture. */
+async function repaint(model, picture, instruction, signal) {
+  const d = await generateWith(model, {
+    contents: [{ role: 'user', parts: [{ inlineData: { mimeType: 'image/png', data: pngB64(picture) } }, { text: instruction }] }],
+    generationConfig: { responseModalities: ['TEXT', 'IMAGE'] },
+  }, signal);
+  return imageFrom(d);
+}
+
+/** Gemini's supported picture shapes; the closest one to a document's. */
+const ASPECTS = ['1:1', '2:3', '3:2', '3:4', '4:3', '4:5', '5:4', '9:16', '16:9', '21:9'];
+export function nearestAspect(r) {
+  let best = ASPECTS[0];
+  let bd = Infinity;
+  for (const a of ASPECTS) {
+    const [w, hh] = a.split(':').map(Number);
+    const dd = Math.abs(Math.log(w / hh) - Math.log(r));
+    if (dd < bd) {
+      bd = dd;
+      best = a;
+    }
+  }
+  return best;
 }
 
 /**
@@ -637,7 +688,7 @@ export async function generativeFill(P, prompt, signal) {
   const b = SEL.alphaBounds(doc.selection.canvas);
   if (!b) throw new Error('선택 영역이 비어 있습니다');
   const model = await imageModel(signal);
-  if (!model) throw new Error('이 API 키로 쓸 수 있는 이미지 생성 Gemini 모델이 없습니다 (예: gemini-2.5-flash-image)');
+  if (!model) throw new Error(NO_IMAGE_MODEL);
   const pad = Math.max(48, Math.round(Math.max(b.w, b.h) * 0.3));
   const r = { x: Math.max(0, b.x - pad), y: Math.max(0, b.y - pad) };
   r.w = Math.min(doc.width, b.x + b.w + pad) - r.x;
@@ -651,42 +702,228 @@ export async function generativeFill(P, prompt, signal) {
   const mg = mark.getContext('2d');
   mg.drawImage(doc.selection.canvas, -r.x, -r.y);
   mg.globalCompositeOperation = 'source-in';
-  mg.fillStyle = '#ff00ff';
+  mg.fillStyle = MAGENTA;
   mg.fillRect(0, 0, r.w, r.h);
   cg.drawImage(mark, 0, 0);
-  const k = Math.min(1, 1024 / Math.max(r.w, r.h));
-  const send = makeCanvas(Math.round(r.w * k), Math.round(r.h * k));
-  send.getContext('2d').drawImage(crop, 0, 0, send.width, send.height);
+  const sel = doc.selection;
   const what = prompt.trim() || '주변과 자연스럽게 이어지는 배경으로 지워 주세요';
-  const d = await generateWith(model, {
-    contents: [{ role: 'user', parts: [{ inlineData: { mimeType: 'image/png', data: send.toDataURL('image/png').split(',')[1] } }, { text: `이 이미지에서 자홍색(#FF00FF)으로 칠한 부분만 다시 그려 채워 주세요: ${what}. 자홍색 바깥은 그대로 두고, 같은 크기와 같은 구도의 이미지 한 장으로 돌려주세요. 자홍색이 남지 않게 하세요.` }] }],
-    generationConfig: { responseModalities: ['TEXT', 'IMAGE'] },
-  }, signal);
-  const parts = firstCandidate(d).content.parts || [];
-  const imgPart = parts.find((p) => p.inlineData?.data && /^image\//.test(p.inlineData.mimeType || ''));
-  if (!imgPart) throw new Error(`Gemini가 이미지를 돌려주지 않았습니다${textOf({ parts }) ? `: ${textOf({ parts }).slice(0, 120)}` : ''}`);
-  const blob = await (await fetch(`data:${imgPart.inlineData.mimeType};base64,${imgPart.inlineData.data}`)).blob();
-  const bmp = await createImageBitmap(blob);
+  const bmp = await repaint(model, crop, `이 이미지에서 자홍색(#FF00FF)으로 칠한 부분만 다시 그려 채워 주세요: ${what}. 자홍색 바깥은 그대로 두고, 같은 크기와 같은 구도의 이미지 한 장으로 돌려주세요. 자홍색이 남지 않게 하세요.`, signal);
   if (P.doc !== doc) throw new Error(DOC_CHANGED);
   return oneStep(P, `생성형 채우기: ${what.slice(0, 20)}`, () => {
     P.run('생성형 채우기', () => {
       const c = makeCanvas(doc.width, doc.height);
       c.getContext('2d').drawImage(bmp, r.x, r.y, r.w, r.h);
       const l = newLayer('raster', { name: `생성형 채우기: ${what.slice(0, 16)}`, canvas: c });
-      doc.layers.push(l);
-      doc.activeId = l.id;
-      doc.selectedIds = [l.id];
+      P.addLayer(l);
       // only the selected area shows (slightly softened edge)
       const m = makeCanvas(doc.width, doc.height);
       const g = m.getContext('2d');
       g.filter = 'blur(1.5px)';
-      g.drawImage(doc.selection.canvas, 0, 0);
+      g.drawImage(sel.canvas, 0, 0);
       l.mask = { canvas: m, x: 0, y: 0, enabled: true, linked: true };
       doc.selection = null;
       doc.touch(l);
     });
     return { model };
   });
+}
+
+/**
+ * Generative Expand: the crop box `rect` (doc coords) reaches past the canvas; the canvas grows to it
+ * and the new area is painted by the image model to continue the picture (a new masked layer).
+ */
+export async function generativeExpand(P, rect, prompt, signal) {
+  const doc = P.doc;
+  if (!doc) throw new Error('문서가 없습니다');
+  const r = { x: Math.round(rect.x), y: Math.round(rect.y), w: Math.round(rect.w), h: Math.round(rect.h) };
+  const W = doc.width;
+  const H = doc.height;
+  if (!(r.x < 0 || r.y < 0 || r.x + r.w > W || r.y + r.h > H)) throw new Error('자르기 상자를 캔버스 밖으로 넓힌 다음에 생성하세요');
+  if (r.w < 8 || r.h < 8) throw new Error('자르기 상자가 너무 작습니다');
+  if (r.w * r.h > 60e6) throw new Error('결과가 너무 큽니다');
+  const model = await imageModel(signal);
+  if (!model) throw new Error(NO_IMAGE_MODEL);
+  const pic = makeCanvas(r.w, r.h);
+  const g = pic.getContext('2d');
+  g.fillStyle = MAGENTA;
+  g.fillRect(0, 0, r.w, r.h);
+  // inside the old canvas: the picture as it shows (see-through parts on white)
+  g.fillStyle = '#ffffff';
+  g.fillRect(-r.x, -r.y, W, H);
+  g.drawImage(P.composite(), -r.x, -r.y);
+  const what = prompt.trim();
+  const bmp = await repaint(model, pic, `이 이미지의 자홍색(#FF00FF) 부분은 사진이 잘려서 비어 있는 곳입니다. 가운데 사진과 자연스럽게 이어지도록 ${what ? `"${what}"(으)로` : '주변과 어울리게'} 채워 주세요. 자홍색이 아닌 부분은 그대로 두고, 같은 크기와 비율의 이미지 한 장으로 돌려주세요. 자홍색이 남지 않게 하세요.`, signal);
+  if (P.doc !== doc) throw new Error(DOC_CHANGED);
+  return oneStep(P, '생성형 확장', () => {
+    P.cropTo(r, false, '자르기');
+    P.run('생성형 확장', () => {
+      const c = makeCanvas(r.w, r.h);
+      const cg = c.getContext('2d');
+      cg.imageSmoothingQuality = 'high';
+      cg.drawImage(bmp, 0, 0, r.w, r.h);
+      const l = newLayer('raster', { name: `생성형 확장${what ? `: ${what.slice(0, 16)}` : ''}`, canvas: c });
+      // shown in the new area only, blending a few pixels into the old picture's edge
+      const m = makeCanvas(r.w, r.h);
+      const mg = m.getContext('2d');
+      mg.fillStyle = '#000';
+      mg.fillRect(0, 0, r.w, r.h);
+      const f = Math.max(2, Math.round(Math.min(W, H) * 0.008));
+      // the soft band only along the sides that grew (elsewhere the hole runs past the edge)
+      const far = f * 4;
+      const left = r.x < 0 ? -r.x + f : -r.x - far;
+      const top = r.y < 0 ? -r.y + f : -r.y - far;
+      const right = r.x + r.w > W ? -r.x + W - f : -r.x + W + far;
+      const bottom = r.y + r.h > H ? -r.y + H - f : -r.y + H + far;
+      mg.globalCompositeOperation = 'destination-out';
+      mg.filter = `blur(${f / 2}px)`;
+      mg.fillRect(left, top, right - left, bottom - top);
+      l.mask = { canvas: m, x: 0, y: 0, enabled: true, linked: true };
+      doc.layers.push(l);
+      doc.activeId = l.id;
+      doc.selectedIds = [l.id];
+      doc.touch(l);
+    });
+    return { model, width: r.w, height: r.h };
+  });
+}
+
+/** Edit ▸ Generate Image: a picture from a description, as a new layer covering the canvas. */
+export async function generateImage(P, prompt, signal) {
+  const doc = P.doc;
+  if (!doc) throw new Error('먼저 문서를 만드세요');
+  const what = prompt.trim();
+  if (!what) throw new Error('무엇을 그릴지 적어 주세요');
+  const model = await imageModel(signal);
+  if (!model) throw new Error(NO_IMAGE_MODEL);
+  const aspect = nearestAspect(doc.width / doc.height);
+  const body = {
+    contents: [{ role: 'user', parts: [{ text: `${what}\n\n가로:세로가 ${aspect}인 이미지 한 장으로 만들어 주세요.` }] }],
+    generationConfig: { responseModalities: ['TEXT', 'IMAGE'], imageConfig: { aspectRatio: aspect } },
+  };
+  let d;
+  try {
+    d = await generateWith(model, body, signal);
+  } catch (err) {
+    if (err?.name === 'AbortError' || !/imageConfig|aspect|Unknown name|Invalid JSON|400/i.test(String(err?.message))) throw err;
+    // an older image model without the aspect setting
+    delete body.generationConfig.imageConfig;
+    d = await generateWith(model, body, signal);
+  }
+  const bmp = await imageFrom(d);
+  if (P.doc !== doc) throw new Error(DOC_CHANGED);
+  return oneStep(P, `이미지 생성: ${what.slice(0, 20)}`, () => {
+    P.run('이미지 생성', () => {
+      // cover the canvas, centred (the picture keeps its proportions)
+      const c = makeCanvas(doc.width, doc.height);
+      const g = c.getContext('2d');
+      const k = Math.max(doc.width / bmp.width, doc.height / bmp.height);
+      g.imageSmoothingQuality = 'high';
+      g.drawImage(bmp, (doc.width - bmp.width * k) / 2, (doc.height - bmp.height * k) / 2, bmp.width * k, bmp.height * k);
+      P.addLayer(newLayer('raster', { name: `생성된 이미지: ${what.slice(0, 16)}`, canvas: c }));
+    });
+    return { model };
+  });
+}
+
+/** The active layer as it shows (its pixels through its mask), document size. */
+function shownLayer(P, l) {
+  const c = P.layerAsDocCanvas(l);
+  if (l.mask && l.mask.enabled !== false) {
+    const g = c.getContext('2d');
+    g.globalCompositeOperation = 'destination-in';
+    g.drawImage(l.mask.canvas, l.mask.x || 0, l.mask.y || 0);
+  }
+  return c;
+}
+
+/**
+ * Generate Background: the active layer is a cut-out subject (Remove Background); a new background
+ * is painted behind it, as a layer right below it.
+ */
+export async function generateBackground(P, prompt, signal) {
+  const doc = P.doc;
+  const l = doc?.active;
+  if (!l || !['raster', 'smart'].includes(l.kind)) throw new Error('배경을 지운 피사체 레이어를 고르세요 (레이어 ▸ 배경 제거)');
+  const subj = shownLayer(P, l);
+  // how much of the picture is still empty around the subject
+  const t = makeCanvas(64, 64);
+  const tg = t.getContext('2d');
+  tg.drawImage(subj, 0, 0, 64, 64);
+  const a = tg.getImageData(0, 0, 64, 64).data;
+  let clear = 0;
+  for (let i = 3; i < a.length; i += 4) if (a[i] < 128) clear++;
+  if (clear < 64 * 64 * 0.03) throw new Error('이 레이어에는 비어 있는 배경이 없습니다. 먼저 레이어 ▸ 배경 제거(또는 마스크)로 배경을 지우세요.');
+  if (clear > 64 * 64 * 0.995) throw new Error('이 레이어가 비어 있습니다. 피사체가 있는 레이어를 고르세요.');
+  const model = await imageModel(signal);
+  if (!model) throw new Error(NO_IMAGE_MODEL);
+  const pic = makeCanvas(doc.width, doc.height);
+  const g = pic.getContext('2d');
+  g.fillStyle = MAGENTA;
+  g.fillRect(0, 0, pic.width, pic.height);
+  g.drawImage(subj, 0, 0);
+  const what = prompt.trim() || '피사체에 어울리는 자연스러운 배경';
+  const bmp = await repaint(model, pic, `이 이미지에서 자홍색(#FF00FF) 부분은 비어 있는 배경입니다. 그 부분을 "${what}"(으)로 채워 주세요. 피사체는 모양과 색을 바꾸지 말고 그대로 두고, 빛과 그림자가 피사체와 어울리게 하세요. 같은 크기와 구도의 이미지 한 장으로 돌려주세요. 자홍색이 남지 않게 하세요.`, signal);
+  if (P.doc !== doc || !doc.layer(l.id)) throw new Error(DOC_CHANGED);
+  return oneStep(P, `배경 생성: ${what.slice(0, 20)}`, () => {
+    P.run('배경 생성', () => {
+      const c = makeCanvas(doc.width, doc.height);
+      const cg = c.getContext('2d');
+      cg.imageSmoothingQuality = 'high';
+      cg.drawImage(bmp, 0, 0, doc.width, doc.height);
+      const bgl = newLayer('raster', { name: `생성된 배경: ${what.slice(0, 16)}`, canvas: c, parent: l.parent || null });
+      // right below the subject, in the same group
+      doc.layers.splice(doc.index(l.id), 0, bgl);
+      doc.touch(bgl);
+    });
+    return { model };
+  });
+}
+
+/**
+ * A small window for a generative request: a description, a Generate button, the status while
+ * Gemini works (it can take a while) and Cancel. run(prompt, signal) does the work.
+ */
+export function generativeDialog(P, { title, label = '무엇을 만들까요?', placeholder = '', note = '', optional = false, run }) {
+  if (!geminiSettings.key) {
+    toast('Gemini API 키가 필요합니다 (AI 패널 ▸ 설정)');
+    P.showPanel('ai');
+    return;
+  }
+  const input = h('input', { type: 'text', placeholder, 'aria-label': label, style: { width: '100%' } });
+  const status = h('div.note', note);
+  let ctrl = null;
+  const m = openModal({
+    title,
+    width: '460px',
+    body: [h('div.form-row', h('label', label), input), status, h('div.note', '키가 있는 Gemini 이미지 모델로 그립니다. 결과는 새 레이어로 들어가고, 실행 취소 한 번으로 되돌릴 수 있어요.')],
+    buttons: [{ label: '취소', action: () => { ctrl?.abort(); } }, {
+      label: '생성', primary: true, action: async () => {
+        if (ctrl) return false;
+        if (!optional && !input.value.trim()) {
+          status.textContent = '설명을 적어 주세요';
+          input.focus();
+          return false;
+        }
+        ctrl = new AbortController();
+        status.textContent = 'Gemini가 그리는 중… (수십 초 걸릴 수 있어요)';
+        for (const b of m.footer.querySelectorAll('button.primary')) b.disabled = true;
+        try {
+          await run(input.value, ctrl.signal);
+          toast(`${title}: 새 레이어로 넣었습니다`);
+          return undefined;
+        } catch (err) {
+          if (err?.name === 'AbortError') return undefined;
+          status.textContent = String(err?.message || err);
+          return false;
+        } finally {
+          ctrl = null;
+          for (const b of m.footer.querySelectorAll('button.primary')) b.disabled = false;
+        }
+      },
+    }],
+    onClose: () => ctrl?.abort(),
+  });
+  setTimeout(() => input.focus(), 30);
 }
 
 // ---------------------------------------------------------------- panel
@@ -697,7 +934,7 @@ export function buildAiPanel(P) {
   const log = h('div.ph-ailog', { 'aria-live': 'polite' });
   const history = [];
   const say = (who, text, cls = '') => {
-    log.append(h(`div.ph-aimsg.${who}${cls ? `.${cls}` : ''}`, text));
+    log.append(h(`div.ph-aimsg.${who}${cls ? `.${cls}` : ''}`, ...[text].flat()));
     log.scrollTop = log.scrollHeight;
   };
   const status = h('p.ph-aistatus');
@@ -734,6 +971,8 @@ export function buildAiPanel(P) {
   };
   fillModels(geminiSettings.models || []);
   modelSel.addEventListener('change', () => saveGeminiSettings({ model: modelSel.value }));
+  // shown only while a key is saved (renderKey keeps it in step)
+  const clearKey = h('button.small', { onclick: () => { saveGeminiSettings({ key: '', remember: false }); renderKey(); } }, '키 지우기');
   const keyForm = h('div.ph-aikey', { hidden: true },
     h('p.ph-ainote', '영상 편집의 AI 탭과 같은 키를 씁니다. ', h('a', { href: API_KEY_PAGE, target: '_blank', rel: 'noopener' }, 'Google AI Studio에서 키 받기')),
     keyIn,
@@ -752,10 +991,11 @@ export function buildAiPanel(P) {
           }
         },
       }, '저장'),
-      geminiSettings.key ? h('button.small', { onclick: () => { saveGeminiSettings({ key: '', remember: false }); renderKey(); } }, '키 지우기') : null),
+      clearKey),
     h('label.ph-airow', h('span', '모델'), modelSel));
   const keyState = h('div.ph-airow.ph-aikeystate');
   const renderKey = () => {
+    clearKey.hidden = !geminiSettings.key;
     keyState.replaceChildren(
       h('span', geminiSettings.key ? 'Gemini 연결됨' : 'Gemini 키 없음 (키 없이도 자동 보정은 됩니다)'),
       h('button.small', { onclick: () => { keyForm.hidden = !keyForm.hidden; } }, '설정'));
@@ -817,7 +1057,7 @@ export function buildAiPanel(P) {
       const r = await runPhotoAssistant(P, q, {
         history,
         signal: ctrl.signal,
-        onEvent: (e) => say('tool', `${e.error ? '✗' : '✓'} ${e.label}${e.error ? `: ${e.error}` : ''}`, e.error ? 'err' : ''),
+        onEvent: (e) => say('tool', [icon(e.error ? 'close' : 'check', 12), ` ${e.label}${e.error ? `: ${e.error}` : ''}`], e.error ? 'err' : ''),
       });
       say('ai', r.text);
       history.push({ role: 'user', text: q }, { role: 'model', text: r.text });
@@ -836,16 +1076,20 @@ export function buildAiPanel(P) {
   });
   const quick = [['배경 지우기', '배경을 지워서 피사체만 남겨 줘'], ['배경 흐리게', '피사체는 그대로 두고 배경만 흐리게 해 줘'], ['인스타 정사각형', '피사체가 가운데 오게 1:1로 잘라 줘'], ['감성 보정', '따뜻하고 부드러운 감성 사진처럼 보정해 줘'], ['흑백 고대비', '대비가 강한 흑백 사진으로 만들어 줘'], ['제목 넣기', '사진에 어울리는 짧은 제목을 위쪽에 넣어 줘']];
 
-  // generative fill
-  const genIn = h('input', { type: 'text', placeholder: '무엇으로 채울까요? (비우면 주변처럼 지우기)', 'aria-label': '생성형 채우기 설명' });
+  // generative fill / expand / image / background
+  const genIn = h('input', { type: 'text', placeholder: '무엇을 그릴까요? (채우기는 비우면 주변처럼 지우기)', 'aria-label': '생성형 AI 설명' });
   genIn.addEventListener('keydown', (e) => e.stopPropagation());
-  const runGen = async () => {
+  const runGen = async (kind) => {
     if (!needDoc() || !needKey() || busy) return;
     const ctrl = new AbortController();
     setBusy(ctrl, 'Gemini 이미지 모델이 그리는 중… (수십 초 걸릴 수 있어요)');
     try {
-      const r = await generativeFill(P, genIn.value, ctrl.signal);
-      toast(`생성형 채우기를 새 레이어로 넣었습니다 (${r.model})`);
+      const crop = P.cropExtent?.();
+      const r = kind === 'fill' ? await generativeFill(P, genIn.value, ctrl.signal)
+        : kind === 'expand' ? await generativeExpand(P, crop || expandBox(P.doc), genIn.value, ctrl.signal)
+          : kind === 'image' ? await generateImage(P, genIn.value, ctrl.signal)
+            : await generateBackground(P, genIn.value, ctrl.signal);
+      toast(`${{ fill: '생성형 채우기', expand: '생성형 확장', image: '이미지 생성', background: '배경 생성' }[kind]}: 새 레이어로 넣었습니다 (${r.model})`);
     } catch (err) {
       if (err?.name !== 'AbortError') toast(String(err.message || err));
     } finally {
@@ -861,7 +1105,7 @@ export function buildAiPanel(P) {
     h('label.ph-aichk', asLayer, ' 새 레이어로 (원본 보존)'),
     h('label.ph-aichk', allowStraighten, ' 기울어진 수평 바로잡기'),
     h('label.ph-aichk', allowCrop, ' 구도에 맞게 자르기 (AI)'),
-    h('div.ph-airow', h('button.primary.small', { 'data-ai': '1', onclick: () => runEnhance(true) }, '✦ AI 자동 보정'), h('button.small', { 'data-ai': '1', onclick: () => runEnhance(false), title: 'Gemini 없이 사진의 히스토그램으로 계산' }, '키 없이 자동 보정')),
+    h('div.ph-airow', h('button.primary.small', { 'data-ai': '1', onclick: () => runEnhance(true) }, icon('ai', 13), ' AI 자동 보정'), h('button.small', { 'data-ai': '1', onclick: () => runEnhance(false), title: 'Gemini 없이 사진의 히스토그램으로 계산' }, '키 없이 자동 보정')),
     result,
     h('h4.ph-aih', 'AI 편집 도우미'),
     log,
@@ -869,15 +1113,22 @@ export function buildAiPanel(P) {
     ask,
     h('div.ph-airow', h('button.primary.small', { 'data-ai': '1', onclick: () => send() }, '보내기'), stopBtn),
     status,
-    h('h4.ph-aih', '생성형 채우기 (실험적)'),
-    h('p.ph-ainote', '선택한 곳을 Gemini 이미지 모델로 다시 그려 새 레이어로 넣어요. 키에 이미지 생성 모델이 있어야 하고, 실제 서버로는 시험하지 못했어요.'),
+    h('h4.ph-aih', '생성형 AI (Gemini 이미지 모델)'),
+    h('p.ph-ainote', '채우기: 선택한 곳을 다시 그림 · 확장: 자르기 도구(C)로 상자를 캔버스 밖까지 넓힌 만큼 그림을 이어 그림 (상자가 없으면 사방 25%) · 이미지: 설명으로 새 그림 · 배경: 배경을 지운 피사체 레이어 뒤에 새 배경. 키에 이미지 생성 모델이 있어야 하고, 실제 서버로는 시험하지 못했어요.'),
     genIn,
-    h('div.ph-airow', h('button.small', { 'data-ai': '1', onclick: runGen }, '생성')),
-    h('p.ph-ainote', '보내는 것: 작게 줄인 사진(최대 768px, 생성형 채우기는 선택 주변 최대 1024px)과 레이어 이름 목록. 모든 AI 편집은 실행 취소 한 번으로 되돌릴 수 있어요.'));
+    h('div.ph-airow',
+      h('button.small', { 'data-ai': '1', onclick: () => runGen('fill'), title: '선택 영역을 다시 그립니다' }, '생성형 채우기'),
+      h('button.small', { 'data-ai': '1', onclick: () => runGen('expand'), title: '캔버스를 넓히고 새 부분을 그립니다' }, '생성형 확장'),
+      h('button.small', { 'data-ai': '1', onclick: () => runGen('image'), title: '설명으로 새 그림을 새 레이어로' }, '이미지 생성'),
+      h('button.small', { 'data-ai': '1', onclick: () => runGen('background'), title: '피사체 레이어 뒤에 새 배경' }, '배경 생성')),
+    h('p.ph-ainote', '보내는 것: 작게 줄인 사진(최대 768px, 생성형 기능은 최대 1024px PNG)과 레이어 이름 목록. 모든 AI 편집은 실행 취소 한 번으로 되돌릴 수 있어요.'));
   return el;
 }
 
 // ---------------------------------------------------------------- install
+
+/** Generative Expand without a crop box: a quarter more on every side. */
+const expandBox = (doc) => ({ x: -Math.round(doc.width * 0.25), y: -Math.round(doc.height * 0.25), w: Math.round(doc.width * 1.5), h: Math.round(doc.height * 1.5) });
 
 export function installPhotoAI(P) {
   const C = P.cmd;
@@ -887,14 +1138,68 @@ export function installPhotoAI(P) {
     const set = cleanSettings(heuristicSettings(P.composite(), style), strength);
     await oneStep(P, '자동 보정', () => applyEnhance(P, set, { label: '자동 보정' }));
   };
-  P.photoAI = { runPhotoAssistant: (q, o) => runPhotoAssistant(P, q, o), generativeFill: (q, s) => generativeFill(P, q, s), heuristicSettings, cleanSettings };
+  const needDoc = () => {
+    if (!P.doc) toast('먼저 사진을 열거나 새 문서를 만드세요');
+    return !!P.doc;
+  };
+  /** Edit ▸ Generative Fill… (a selection to repaint). */
+  C.generativeFill = (prompt) => {
+    if (!needDoc()) return;
+    if (!P.doc.selection) return void toast('먼저 다시 그릴 곳을 선택하세요');
+    if (typeof prompt === 'string') return generativeFill(P, prompt);
+    generativeDialog(P, { title: '생성형 채우기', label: '무엇으로 채울까요? (비우면 주변처럼 지우기)', placeholder: '예: 해변의 야자수', optional: true, run: (q, signal) => generativeFill(P, q, signal) });
+    return undefined;
+  };
+  /** Generative Expand: the crop box past the canvas (or a quarter more on every side). */
+  C.generativeExpand = (rect, prompt) => {
+    if (!needDoc()) return;
+    const r = rect || P.cropExtent?.() || expandBox(P.doc);
+    if (typeof prompt === 'string') return generativeExpand(P, r, prompt);
+    generativeDialog(P, { title: '생성형 확장', label: '넓힌 곳에 무엇을 그릴까요? (비우면 이어지게)', placeholder: '예: 노을 지는 하늘', optional: true, note: `캔버스를 ${r.w} × ${r.h} px로 넓히고 새 부분을 그립니다.`, run: (q, signal) => generativeExpand(P, r, q, signal) });
+    return undefined;
+  };
+  /** Edit ▸ Generate Image… */
+  C.generateImage = (prompt) => {
+    if (!needDoc()) return;
+    if (typeof prompt === 'string') return generateImage(P, prompt);
+    generativeDialog(P, { title: '이미지 생성', label: '무엇을 그릴까요?', placeholder: '예: 안개 낀 아침의 산과 호수, 사진처럼', run: (q, signal) => generateImage(P, q, signal) });
+    return undefined;
+  };
+  /** Generate Background behind a cut-out subject (after Remove Background). */
+  C.generateBackground = (prompt) => {
+    if (!needDoc()) return;
+    if (typeof prompt === 'string') return generateBackground(P, prompt);
+    generativeDialog(P, { title: '배경 생성', label: '어떤 배경을 만들까요?', placeholder: '예: 햇살 비치는 카페 창가', optional: true, run: (q, signal) => generateBackground(P, q, signal) });
+    return undefined;
+  };
+  P.photoAI = {
+    runPhotoAssistant: (q, o) => runPhotoAssistant(P, q, o), generativeFill: (q, s) => generativeFill(P, q, s), generativeExpand: (r, q, s) => generativeExpand(P, r, q, s),
+    generateImage: (q, s) => generateImage(P, q, s), generateBackground: (q, s) => generateBackground(P, q, s), heuristicSettings, cleanSettings, hasKey: () => !!geminiSettings.key,
+  };
   P.aiMenu = () => [
     { label: 'AI 자동 보정…', disabled: !P.doc, action: () => P.showPanel('ai') },
     { label: '자동 보정 (키 없이, 히스토그램)', disabled: !P.doc, action: () => C.autoEnhanceOffline() },
     { label: 'AI 편집 도우미…', disabled: !P.doc, action: () => P.showPanel('ai') },
-    { label: '생성형 채우기 (실험적)…', disabled: !P.doc?.selection, action: () => P.showPanel('ai') },
+    '-',
+    { label: '생성형 채우기…', disabled: !P.doc?.selection, action: () => C.generativeFill() },
+    { label: '생성형 확장… (자르기 상자 또는 사방 25%)', disabled: !P.doc, action: () => C.generativeExpand() },
+    { label: '이미지 생성…', disabled: !P.doc, action: () => C.generateImage() },
+    { label: '배경 생성… (배경을 지운 레이어 뒤에)', disabled: !P.doc, action: () => C.generateBackground() },
     '-',
     { label: 'AI 설정 (Gemini 키)…', action: () => P.showPanel('ai') },
-    { label: 'AI가 보내는 정보', action: () => openModal({ title: '사진 AI가 보내는 정보', body: h('div', h('p', 'AI 자동 보정과 AI 편집 도우미는 지금 사진을 최대 768px JPEG로 줄여 Google Gemini로 보내고, 도우미는 레이어 이름과 종류 목록도 함께 보냅니다. 생성형 채우기는 선택 영역 주변을 최대 1024px PNG로 보냅니다.'), h('p', '키는 이 브라우저에만 저장되며(기억하기를 끄면 탭을 닫을 때까지만), Montage 서버는 없습니다. "키 없이 자동 보정"은 아무것도 보내지 않습니다.')) }) },
+    { label: 'AI가 보내는 정보', action: () => openModal({ title: '사진 AI가 보내는 정보', body: h('div', h('p', 'AI 자동 보정과 AI 편집 도우미는 지금 사진을 최대 768px JPEG로 줄여 Google Gemini로 보내고, 도우미는 레이어 이름과 종류 목록도 함께 보냅니다. 생성형 채우기·확장·배경 생성은 그릴 곳 주변 사진을 최대 1024px PNG로, 이미지 생성은 설명 글만 보냅니다.'), h('p', '키는 이 브라우저에만 저장되며(기억하기를 끄면 탭을 닫을 때까지만), Montage 서버는 없습니다. "키 없이 자동 보정"은 아무것도 보내지 않습니다.')) }) },
   ];
+  // Photoshop's Edit menu has Generative Fill (after Content-Aware Fill) and Generate Image
+  P.extendMenus = [...(P.extendMenus || []), () => {
+    const orig = P.menus['편집'];
+    if (!orig) return;
+    P.menus['편집'] = () => {
+      const items = orig();
+      const i = items.findIndex((x) => typeof x === 'object' && x?.label?.startsWith('내용 인식 채우기'));
+      const add = [{ label: '생성형 채우기…', disabled: !P.doc?.selection, action: () => C.generativeFill() }, { label: '이미지 생성…', disabled: !P.doc, action: () => C.generateImage() }];
+      if (i >= 0) items.splice(i + 1, 0, ...add);
+      else items.push('-', ...add);
+      return items;
+    };
+  }];
 }

@@ -1,18 +1,70 @@
-// Project panel: imported media with bins (folders), label colours, list/icon views, search,
-// hover scrub and drag to the timeline.
+// Project panel: imported media with bins (folders), label colours, list view with sortable
+// columns (이름, 프레임 속도, 미디어 시작/끝, 지속 시간, 비디오 정보, 레이블), icon view with hover
+// scrub and poster frames, search, subclips, new items (새 항목) and drag to the timeline.
 
 import { store } from '../store.js';
-import { runtime, mediaEvents, importFiles, createSyntheticMedia, removeMedia, attachFile, mediaStatus } from '../media.js';
+import { runtime, mediaEvents, importFiles, createSyntheticMedia, removeMedia, attachFile, mediaStatus, mediaUrl } from '../media.js';
 import * as edit from '../edit.js';
 import { relinkFromFiles } from '../persist.js';
-import { LABEL_COLORS } from '../model.js';
-import { h, uid, formatTimecode, formatShort, formatBytes, modKey } from '../util.js';
-import { showMenu, openModal, promptDialog, confirmDialog, loadPref, savePref, toast, dnd } from './common.js';
+import { LABEL_COLORS, DEFAULT_STILL_DURATION } from '../model.js';
+import { h, uid, clamp, once, formatTimecode, formatShort, formatBytes, modKey } from '../util.js';
+import { showMenu, openModal, promptDialog, confirmDialog, loadPref, savePref, toast, dnd, showPanel } from './common.js';
 import { icon, iconButton } from './icons.js';
-import { openColorMatteDialog, openMulticamDialog, openExtractAudioDialog } from './dialogs.js';
+import { extendMenu } from './menubar.js';
+import { injectStyle } from './style-inject.js';
+import {
+  openColorMatteDialog, openMulticamDialog, openExtractAudioDialog, openNewSequenceDialog, openBarsToneDialog, openCountingLeaderDialog,
+  openSubclipDialog, openEditSubclipDialog,
+} from './dialogs.js';
+import { createTransparentVideo } from '../generated-media.js';
+import { noteFontUsed } from '../fonts.js';
+import { isSubclip, fileIdOf, itemRange, subclipsOf } from '../subclips.js';
 
 const KIND_NAMES = { video: '영상', audio: '오디오', image: '이미지', color: '색상 매트', adjustment: '조정 레이어', sequence: '시퀀스', lut: 'LUT', font: '글꼴' };
 const KIND_ICONS = { video: 'film', audio: 'audio', image: 'image', adjustment: 'wand', sequence: 'sequence', lut: 'grid', color: 'image', font: 'type' };
+const CHECKER = 'repeating-conic-gradient(#8a8a8a 0% 25%, #c8c8c8 0% 50%) 0 0 / 10px 10px';
+const isTransparentColor = (c) => /^(transparent|rgba\([^)]*,\s*0\s*\)|#[0-9a-f]{6}00)$/i.test(String(c || '').trim());
+
+/** 목록 보기 columns: [key, header, width]. */
+const COLUMNS = [
+  ['name', '이름', 'minmax(150px, 2fr)'],
+  ['fps', '프레임 속도', '84px'],
+  ['start', '미디어 시작', '96px'],
+  ['end', '미디어 끝', '96px'],
+  ['dur', '미디어 지속 시간', '104px'],
+  ['video', '비디오 정보', '112px'],
+  ['label', '레이블', '72px'],
+];
+const GRID_COLS = `40px ${COLUMNS.map((c) => c[2]).join(' ')}`;
+
+injectStyle('pp-style', `
+.project-list.cols { overflow: auto; }
+.pp-head, .project-list.cols .media-item:not(.bin) { display: grid; grid-template-columns: ${GRID_COLS}; gap: 0 8px; min-width: 860px; }
+.pp-head { position: sticky; top: 0; z-index: 2; background: var(--bg-3, #23262c); border-bottom: 1px solid var(--line); padding: 0 10px; }
+.pp-head button { min-height: 0; height: calc(24px * var(--ui-scale)); padding: 0 2px; border: 0; background: none; color: var(--text-dim); font-size: var(--fs-xs); text-align: left; justify-content: flex-start; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pp-head button.on { color: var(--value); }
+.pp-head button .ico { margin-left: 2px; }
+.project-list.cols .media-item { padding: 3px 10px; min-width: 860px; box-sizing: border-box; }
+.project-list.cols .media-item .thumb { width: 40px; height: 24px; }
+.project-list.cols .media-item .col { color: var(--text-dim); font-size: var(--fs-xs); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+.project-list.cols .media-item .col.lbl { display: flex; align-items: center; gap: 4px; }
+.project-list.cols .media-item.bin { min-width: 860px; box-sizing: border-box; }
+.project-list.cols .media-item.in-bin { padding-left: 30px; }
+.media-item .sub-tag { font-size: 10px; border: 1px solid var(--line-2); border-radius: 3px; padding: 0 3px; color: var(--text-dim); flex-shrink: 0; }
+.media-item.flash { animation: pp-flash 1.2s ease-out; }
+@keyframes pp-flash { 0% { box-shadow: inset 0 0 0 2px var(--value); } 100% { box-shadow: inset 0 0 0 2px transparent; } }
+.media-item .thumb.poster { position: relative; }
+.media-item.bin .twisty { display: grid; place-items: center; }
+.project-list.grid .media-item .meta { overflow: hidden; text-overflow: ellipsis; }
+.project-list.cols .media-item:not(.bin) > .thumb, .project-list.cols .media-item:not(.bin) > .name, .pp-head > span:first-child, .pp-head > button:nth-child(2) { position: sticky; z-index: 1; background: var(--bg-3); }
+.project-list.cols .media-item:not(.bin) > .thumb, .pp-head > span:first-child { left: 0; }
+.project-list.cols .media-item:not(.bin) > .name, .pp-head > button:nth-child(2) { left: 48px; box-shadow: 6px 0 6px -6px rgba(0,0,0,.6); }
+.project-list.cols .media-item:hover > .thumb, .project-list.cols .media-item:hover > .name { background: var(--bg-4); }
+.project-list.cols .media-item.selected > .thumb, .project-list.cols .media-item.selected > .name { background: var(--sel); }
+.project-list.cols .media-item.in-bin > .name { left: 48px; }
+`);
+
+export const projectApi = {};
 
 export function pickFiles({ accept = 'video/*,audio/*,image/*,.cube,.ttf,.otf,.woff,.woff2', multiple = true } = {}) {
   return new Promise((resolve) => {
@@ -27,11 +79,112 @@ export async function importDialog() {
   if (files.length) await importFiles(files);
 }
 
+// ---------------------------------------------------------------- item details (columns)
+
+const fpsOf = (m) => (m.kind === 'sequence' ? store.project.sequences[m.sequenceId]?.fps : m.fps) || null;
+const isTimedItem = (m) => ['video', 'audio', 'sequence'].includes(m.kind) && Number.isFinite(m.duration);
+const isStill = (m) => ['image', 'color', 'adjustment'].includes(m.kind);
+
+/** Duration shown for an item (subclips: their range; stills: the default still duration). */
+export function itemDuration(m) {
+  if (isSubclip(m)) return (m.subOut ?? 0) - (m.subIn ?? 0);
+  if (isTimedItem(m)) return m.duration;
+  if (isStill(m)) return DEFAULT_STILL_DURATION;
+  return null;
+}
+
+function mediaStartOf(m) {
+  if (isSubclip(m)) return m.subIn ?? 0;
+  return isTimedItem(m) || isStill(m) ? 0 : null;
+}
+
+/** Media End is the last frame (inclusive), like Premiere. */
+function mediaEndOf(m) {
+  const d = itemDuration(m);
+  const s = mediaStartOf(m);
+  if (d == null || s == null) return null;
+  const fps = fpsOf(m) || store.seq.fps;
+  return Math.max(s, s + d - 1 / fps);
+}
+
+const labelIndex = (m) => Math.max(0, LABEL_COLORS.findIndex(([c]) => c === (m.label || '')));
+const labelName = (m) => LABEL_COLORS.find(([c]) => c === (m.label || ''))?.[1] || '';
+
+function columnText(m, key) {
+  const fps = fpsOf(m) || store.seq.fps;
+  const tc = (t) => (t == null ? '' : formatTimecode(t, fps));
+  switch (key) {
+    case 'fps': return fpsOf(m) ? `${Math.round(fpsOf(m) * 1000) / 1000} fps` : '';
+    case 'start': return tc(mediaStartOf(m));
+    case 'end': return tc(mediaEndOf(m));
+    case 'dur': return tc(itemDuration(m));
+    case 'video': return m.width && m.height && !['audio', 'lut', 'font', 'adjustment'].includes(m.kind) ? `${m.width} × ${m.height}` : m.kind === 'audio' ? '오디오만' : '';
+    default: return '';
+  }
+}
+
+const SORTERS = {
+  name: (a, b) => a.name.localeCompare(b.name, 'ko', { numeric: true }),
+  fps: (a, b) => (fpsOf(a) || 0) - (fpsOf(b) || 0),
+  start: (a, b) => (mediaStartOf(a) ?? -1) - (mediaStartOf(b) ?? -1),
+  end: (a, b) => (mediaEndOf(a) ?? -1) - (mediaEndOf(b) ?? -1),
+  dur: (a, b) => (itemDuration(a) ?? -1) - (itemDuration(b) ?? -1),
+  video: (a, b) => (a.width || 0) * (a.height || 0) - (b.width || 0) * (b.height || 0),
+  label: (a, b) => labelIndex(a) - labelIndex(b),
+};
+
+// ---------------------------------------------------------------- poster frames (exact frame grabs)
+
+const posterCache = new Map(); // `${fileId}@${t}` -> canvas | 'pending' | 'failed'
+let posterQueue = Promise.resolve();
+let onPosterReady = () => {};
+
+async function grabFrame(fileId, t) {
+  const url = mediaUrl(fileId);
+  if (!url) return null;
+  const v = document.createElement('video');
+  v.muted = true;
+  v.preload = 'auto';
+  v.src = url;
+  try {
+    if (!(await once(v, 'loadeddata', 10000))) return null;
+    v.currentTime = clamp(t, 0, Math.max(0, (v.duration || 0) - 0.02));
+    if (!(await once(v, 'seeked', 10000))) return null;
+    const c = document.createElement('canvas');
+    c.width = 160;
+    c.height = Math.max(1, Math.round((160 * (v.videoHeight || 9)) / (v.videoWidth || 16)));
+    c.getContext('2d').drawImage(v, 0, 0, c.width, c.height);
+    return c;
+  } finally {
+    v.removeAttribute('src');
+    v.load();
+  }
+}
+
+/** The thumbnail at media time t of an item's file (null until grabbed; re-renders when ready). */
+function frameThumb(fileId, t) {
+  const key = `${fileId}@${t.toFixed(3)}`;
+  const hit = posterCache.get(key);
+  if (hit instanceof HTMLCanvasElement) return hit;
+  if (hit) return null;
+  if (mediaStatus(fileId) !== 'ready') return null;
+  posterCache.set(key, 'pending');
+  posterQueue = posterQueue.then(() => grabFrame(fileId, t)).then((c) => {
+    posterCache.set(key, c || 'failed');
+    if (c) onPosterReady();
+  }).catch(() => posterCache.set(key, 'failed'));
+  return null;
+}
+
+// ---------------------------------------------------------------- panel
+
 export function createProjectPanel() {
   let mode = loadPref('project.view', 'list');
   let filter = '';
   let anchor = null;
+  let sort = loadPref('project.sort', { key: 'none', dir: 1 });
   const closedBins = new Set(loadPref('bins.closed', []));
+  const hoverT = new Map(); // id -> media time last hover-scrubbed in icon view
 
   const search = h('input', { type: 'search', placeholder: '이름 검색', style: { width: '130px' }, 'aria-label': '미디어 검색' });
   const viewBtn = iconButton(mode === 'list' ? 'grid' : 'list', mode === 'list' ? '아이콘 보기로 바꾸기' : '목록 보기로 바꾸기', () => {
@@ -41,13 +194,17 @@ export function createProjectPanel() {
     savePref('project.view', mode);
     render();
   });
+  const sortBtn = iconButton('sliders', '정렬', (e) => {
+    const r = e.currentTarget.getBoundingClientRect();
+    showMenu(sortMenu(), r.left, r.bottom + 2);
+  });
   const importBtn = iconButton('import', '파일 가져오기 (Ctrl+I)', () => importDialog(), { label: '가져오기', cls: 'boxed' });
   const binBtn = iconButton('folderPlus', '새 저장소(폴더) 만들기', () => newBin());
-  const newBtn = iconButton('plus', '새 항목 (색상 매트, 조정 레이어, 시퀀스…)', (e) => {
+  const newBtn = iconButton('plus', '새 항목 (시퀀스, 조정 레이어, 바 및 톤, 블랙 비디오, 색상 매트, 카운트다운 리더, 투명 비디오)', (e) => {
     const r = e.currentTarget.getBoundingClientRect();
     showMenu(newItemMenu(), r.left, r.bottom + 2);
   }, { label: '새 항목', cls: 'boxed' });
-  const toolbar = h('div.panel-toolbar', importBtn, newBtn, binBtn, h('span.grow'), search, viewBtn);
+  const toolbar = h('div.panel-toolbar', importBtn, newBtn, binBtn, h('span.grow'), search, sortBtn, viewBtn);
   const list = h('div.project-list', { tabindex: 0, 'aria-label': '프로젝트 미디어 목록' });
   const footer = h('div.panel-footer');
   const body = h('div', toolbar, list, footer);
@@ -74,6 +231,7 @@ export function createProjectPanel() {
     importFiles([...e.dataTransfer.files]);
   });
   list.addEventListener('pointerdown', (e) => {
+    store.setFocus('project');
     if (e.target === list) {
       store.ui.selectedMedia.clear();
       render();
@@ -82,7 +240,7 @@ export function createProjectPanel() {
   list.addEventListener('contextmenu', (e) => {
     if (e.target !== list) return;
     e.preventDefault();
-    showMenu([{ label: '가져오기…', key: 'Ctrl+I', action: importDialog }, { label: '새 저장소(폴더)…', action: newBin }, '-', ...newItemMenu()], e.clientX, e.clientY);
+    showMenu([{ label: '가져오기…', key: 'Ctrl+I', action: importDialog }, { label: '새 저장소(폴더)…', action: newBin }, { label: '새 항목', submenu: newItemMenu }, '-', ...sortMenu()], e.clientX, e.clientY);
   });
   list.addEventListener('keydown', (e) => {
     if ((e.key === 'Delete' || e.key === 'Backspace') && store.ui.selectedMedia.size) {
@@ -95,15 +253,39 @@ export function createProjectPanel() {
 
   function newItemMenu() {
     return [
-      { label: '색상 매트 (단색 배경)…', action: openColorMatteDialog },
-      { label: '검정 화면', action: () => createSyntheticMedia('color', { name: '검정 화면', color: '#000000' }) },
-      { label: '조정 레이어 (아래 트랙 전체에 효과)', action: () => createSyntheticMedia('adjustment', { name: '조정 레이어' }) },
-      { label: '새 시퀀스', action: () => edit.newSequence() },
+      { label: '시퀀스…', action: openNewSequenceDialog },
+      { label: '조정 레이어', action: () => select(createSyntheticMedia('adjustment', { name: '조정 레이어' })) },
+      { label: '바 및 톤…', action: openBarsToneDialog },
+      { label: '블랙 비디오', action: () => select(createSyntheticMedia('color', { name: '블랙 비디오', color: '#000000' })) },
+      { label: '색상 매트…', action: openColorMatteDialog },
+      { label: '범용 카운트다운 리더…', action: openCountingLeaderDialog },
+      { label: '투명 비디오', action: () => select(createTransparentVideo()) },
       '-',
-      { label: '텍스트 (재생헤드 위치)', action: () => edit.addTextClip() },
-      { label: '사각형 (재생헤드 위치)', action: () => edit.addShapeClip('rectangle') },
-      { label: '원 (재생헤드 위치)', action: () => edit.addShapeClip('ellipse') },
+      { group: '그래픽 (재생헤드 위치)' },
+      { label: '텍스트', action: () => edit.addTextClip() },
+      { label: '사각형', action: () => edit.addShapeClip('rectangle') },
+      { label: '원', action: () => edit.addShapeClip('ellipse') },
     ];
+  }
+
+  function sortMenu() {
+    return [
+      { group: '정렬' },
+      { label: '가져온 순서', checked: sort.key === 'none', action: () => setSort('none') },
+      ...COLUMNS.map(([k, label]) => ({ label: `${label}${sort.key === k ? (sort.dir > 0 ? ' (오름차순)' : ' (내림차순)') : ''}`, checked: sort.key === k, action: () => setSort(k, sort.key === k ? -sort.dir : 1) })),
+    ];
+  }
+
+  function setSort(key, dir = 1) {
+    sort = { key, dir };
+    savePref('project.sort', sort);
+    render();
+  }
+
+  function select(id) {
+    if (!id) return;
+    store.ui.selectedMedia = new Set([id]);
+    reveal(id);
   }
 
   // ---- bins
@@ -142,9 +324,15 @@ export function createProjectPanel() {
   }
 
   async function clearSelected() {
-    const ids = [...store.ui.selectedMedia];
+    let ids = [...store.ui.selectedMedia].filter((id) => store.project.media[id]);
+    // a master's subclips share its file: they go with it
+    const subs = ids.flatMap((id) => subclipsOf(id)).filter((id) => !ids.includes(id));
+    ids = [...ids, ...subs];
     const used = Object.values(store.project.sequences).flatMap((sq) => Object.values(sq.clips)).filter((c) => ids.includes(c.mediaId)).length;
-    if (used && !(await confirmDialog('미디어 지우기', `이 미디어를 쓰는 클립 ${used}개도 시퀀스에서 함께 지워집니다. 계속할까요?`))) return;
+    const parts = [];
+    if (used) parts.push(`이 미디어를 쓰는 클립 ${used}개도 시퀀스에서 함께 지워집니다.`);
+    if (subs.length) parts.push(`이 파일로 만든 하위 클립 ${subs.length}개도 함께 지워집니다.`);
+    if (parts.length && !(await confirmDialog('미디어 지우기', `${parts.join(' ')} 계속할까요?`))) return;
     removeMedia(ids);
     store.ui.selectedMedia.clear();
   }
@@ -171,6 +359,7 @@ export function createProjectPanel() {
     store.ui.sourceMediaId = id;
     store.ui.sourceSeek = null;
     store.emit('source');
+    showPanel('source', { quiet: true });
   }
 
   function applyFont(id) {
@@ -184,9 +373,13 @@ export function createProjectPanel() {
     store.transact('글꼴 적용', () => {
       for (const cid of ids) {
         const fx = store.seq.clips[cid]?.effects.find((e) => e.type === 'text');
-        if (fx) fx.params.font.value = family;
+        if (fx) {
+          fx.params.font.value = family;
+          fx.params.font.kf = null;
+        }
       }
     });
+    noteFontUsed(family);
     store.emit('reveal-effect-controls');
   }
 
@@ -196,20 +389,32 @@ export function createProjectPanel() {
       toast('타임라인에서 LUT를 적용할 클립을 먼저 선택하세요');
       return;
     }
+    // one undo step: adding the effect and choosing the LUT
+    const mark = store.undoMark();
+    for (const cid of ids) {
+      const c = store.seq.clips[cid];
+      if (c && !c.effects.some((e) => e.type === 'lut')) edit.addEffect([cid], 'lut');
+    }
     store.transact('LUT 적용', () => {
       for (const cid of ids) {
-        const c = store.seq.clips[cid];
-        if (!c) continue;
-        let fx = c.effects.find((e) => e.type === 'lut');
-        if (!fx) {
-          edit.addEffect([cid], 'lut');
-          fx = store.seq.clips[cid].effects.filter((e) => e.type === 'lut').pop();
-        }
+        const fx = store.seq.clips[cid]?.effects.filter((e) => e.type === 'lut').pop();
         if (fx) fx.params.lutId.value = id;
       }
     });
+    store.squashSince(mark, 'LUT 적용');
     store.emit('reveal-effect-controls');
   }
+
+  // ---- poster frames
+
+  function setPoster(id, t) {
+    store.transact('포스터 프레임 설정', () => {
+      const m = store.project.media[id];
+      if (m) m.posterTime = Math.round(t * 1000) / 1000;
+    });
+  }
+
+  // ---- rendering
 
   let lastSig = '';
   let queued = false;
@@ -220,34 +425,58 @@ export function createProjectPanel() {
     requestAnimationFrame(() => {
       queued = false;
       const proj = store.project;
-      const sig = [mode, filter, [...store.ui.selectedMedia].join(','), JSON.stringify(proj.bins || {}), ...proj.mediaOrder.map((id) => {
+      const mobile = document.body.classList.contains('mobile');
+      const sig = [mode, filter, mobile, JSON.stringify(sort), [...store.ui.selectedMedia].join(','), JSON.stringify(proj.bins || {}), ...proj.mediaOrder.map((id) => {
         const m = proj.media[id];
-        const rt = runtime.get(id);
-        return m ? `${id}:${m.name}:${m.duration}:${m.width}:${m.color}:${m.bin}:${m.label}:${mediaStatus(id)}:${rt?.thumb ? 1 : 0}:${rt?.filmstrip?.length || 0}` : id;
+        const rt = runtime.get(fileIdOf(id));
+        return m ? `${id}:${m.name}:${m.duration}:${m.width}:${m.fps}:${m.color}:${m.bin}:${m.label}:${m.posterTime}:${m.subIn}:${m.subOut}:${mediaStatus(id)}:${rt?.thumb ? 1 : 0}:${rt?.filmstrip?.length || 0}` : id;
       })].join('|');
       if (sig === lastSig) return;
       lastSig = sig;
       render();
     });
   }
+  onPosterReady = () => scheduleRender(true);
+
+  const useColumns = () => mode === 'list' && !document.body.classList.contains('mobile');
+
+  function sorted(ids) {
+    if (sort.key === 'none' || !SORTERS[sort.key]) return ids;
+    const p = store.project;
+    return [...ids].sort((a, b) => SORTERS[sort.key](p.media[a], p.media[b]) * sort.dir || SORTERS.name(p.media[a], p.media[b]));
+  }
+
+  function headerRow() {
+    const cells = COLUMNS.map(([k, label]) => {
+      const on = sort.key === k;
+      return h(`button${on ? '.on' : ''}`, { title: `${label} 기준 정렬`, onclick: () => setSort(k, on ? -sort.dir : 1) },
+        label, on ? icon(sort.dir > 0 ? 'up' : 'down', 12) : null);
+    });
+    return h('div.pp-head', h('span'), cells);
+  }
 
   function render() {
     const proj = store.project;
     const bins = proj.bins || {};
-    list.className = `project-list ${mode === 'grid' ? 'grid' : ''}`;
+    const cols = useColumns();
+    list.className = `project-list${mode === 'grid' ? ' grid' : ''}${cols ? ' cols' : ''}`;
+    const scroll = [list.scrollLeft, list.scrollTop];
     list.replaceChildren();
     const visible = (id) => proj.media[id] && (!filter || proj.media[id].name.toLowerCase().includes(filter));
     if (!proj.mediaOrder.length) {
       list.append(h('div.empty-hint', h('b', '여기에 영상·소리·사진 파일을 끌어다 놓으세요'), h('br'), '또는 위의 "가져오기" 버튼 / Ctrl+I'));
-    }
-    for (const bin of Object.values(bins)) {
+    } else if (cols) list.append(headerRow());
+    const binList = Object.values(bins);
+    if (sort.key === 'name') binList.sort((a, b) => a.name.localeCompare(b.name, 'ko', { numeric: true }) * sort.dir);
+    for (const bin of binList) {
       const inBin = proj.mediaOrder.filter((id) => proj.media[id]?.bin === bin.id);
-      const shown = inBin.filter(visible);
+      const shown = sorted(inBin.filter(visible));
       if (filter && !shown.length) continue;
       list.append(renderBin(bin, inBin.length));
       if (!closedBins.has(bin.id) || filter) for (const id of shown) list.append(renderItem(id, true));
     }
-    for (const id of proj.mediaOrder.filter((x) => visible(x) && !(proj.media[x].bin && bins[proj.media[x].bin]))) list.append(renderItem(id, false));
+    for (const id of sorted(proj.mediaOrder.filter((x) => visible(x) && !(proj.media[x].bin && bins[proj.media[x].bin])))) list.append(renderItem(id, false));
+    [list.scrollLeft, list.scrollTop] = scroll;
     const offline = proj.mediaOrder.filter((id) => ['offline', 'error'].includes(mediaStatus(id))).length;
     const nSel = store.ui.selectedMedia.size;
     footer.replaceChildren(...[
@@ -260,7 +489,7 @@ export function createProjectPanel() {
 
   function renderBin(bin, count) {
     const closed = closedBins.has(bin.id) && !filter;
-    const twisty = h('span.twisty', closed ? '▸' : '▾');
+    const twisty = h('span.twisty', icon(closed ? 'chevronRight' : 'chevronDown', 14));
     const el = h('div.media-item.bin', { title: `${bin.name} — 항목을 끌어다 놓아 넣기` }, twisty, h('div.name', icon('folder'), bin.name), h('div.meta', `${count}개`));
     const toggle = () => {
       if (closedBins.has(bin.id)) closedBins.delete(bin.id);
@@ -296,36 +525,56 @@ export function createProjectPanel() {
     return el;
   }
 
-  function renderItem(id, inBin) {
-    const m = store.project.media[id];
-    const rt = runtime.get(id);
-    const st = mediaStatus(id);
+  /** The thumbnail element of an item (poster frame, subclip start frame, colour swatch or icon). */
+  function thumbFor(id, m, st) {
+    const file = fileIdOf(id);
+    const rt = runtime.get(file);
     const thumb = h('div.thumb');
-    if (rt?.thumb) {
+    let still = null;
+    if (m.kind === 'video' && st === 'ready') {
+      const t = m.posterTime ?? (isSubclip(m) ? m.subIn : null);
+      if (t != null) still = frameThumb(file, t);
+    }
+    const base = still || rt?.thumb;
+    if (base) {
       const c = document.createElement('canvas');
-      c.width = rt.thumb.width;
-      c.height = rt.thumb.height;
-      c.getContext('2d').drawImage(rt.thumb, 0, 0);
+      c.width = base.width;
+      c.height = base.height;
+      c.getContext('2d').drawImage(base, 0, 0);
       thumb.append(c);
-      // hover scrub in icon view
-      if (mode === 'grid' && rt.filmstrip?.length) {
+      // hover scrub in icon view (within a subclip's range); remembers the spot for 포스터 프레임 설정
+      if (mode === 'grid' && rt?.filmstrip?.length && m.kind === 'video') {
+        const [lo, hi] = itemRange(m);
+        const n = rt.filmstrip.length;
+        const dur = store.project.media[file]?.duration || hi || 1;
         thumb.addEventListener('pointermove', (e) => {
           const r = thumb.getBoundingClientRect();
-          const f = rt.filmstrip[Math.min(rt.filmstrip.length - 1, Math.floor(((e.clientX - r.left) / r.width) * rt.filmstrip.length))];
+          const t = lo + clamp((e.clientX - r.left) / r.width, 0, 1) * (hi - lo);
+          hoverT.set(id, t);
+          const f = rt.filmstrip[clamp(Math.floor((t / dur) * n), 0, n - 1)];
           c.getContext('2d').drawImage(f.canvas, 0, 0, c.width, c.height);
         });
-        thumb.addEventListener('pointerleave', () => c.getContext('2d').drawImage(rt.thumb, 0, 0, c.width, c.height));
+        thumb.addEventListener('pointerleave', () => c.getContext('2d').drawImage(base, 0, 0, c.width, c.height));
       }
     } else if (m.kind === 'color') {
-      thumb.style.background = m.color;
+      thumb.style.background = isTransparentColor(m.color) ? CHECKER : m.color;
     } else {
-      thumb.append(icon(KIND_ICONS[m.kind] || 'film', 20));
+      thumb.append(icon(KIND_ICONS[m.kind] || 'film', mode === 'list' && useColumns() ? 16 : 20));
       if (m.kind === 'sequence') thumb.style.background = '#33421a';
       if (m.kind === 'lut') thumb.style.background = 'linear-gradient(135deg,#2b4a7a,#7a2b5c,#7a6a2b)';
     }
-    const badge = st === 'offline' || st === 'error' ? h('span.badge.offline', st === 'error' ? '오류' : '오프라인') : st === 'loading' ? h('span.badge.loading', '불러오는 중…') : null;
-    const metaParts = [KIND_NAMES[m.kind] || m.kind];
-    if (Number.isFinite(m.duration)) metaParts.push(formatShort(m.duration));
+    return thumb;
+  }
+
+  function renderItem(id, inBin) {
+    const m = store.project.media[id];
+    const st = mediaStatus(id);
+    const thumb = thumbFor(id, m, st);
+    const badge = st === 'offline' || st === 'error' ? h('span.badge.offline', st === 'error' ? '오류' : '오프라인') : st === 'loading' ? h('span.badge.loading', '불러오는 중…') : st === 'missing' ? h('span.badge.offline', '원본 없음') : null;
+    const subTag = isSubclip(m) ? h('span.sub-tag', { title: `하위 클립 · ${store.project.media[m.subclipOf]?.name || ''}` }, '하위') : null;
+    const metaParts = [isSubclip(m) ? '하위 클립' : KIND_NAMES[m.kind] || m.kind];
+    const dur = itemDuration(m);
+    if (dur != null && !isStill(m)) metaParts.push(formatShort(dur));
     if (m.width && !['audio', 'adjustment', 'lut', 'font'].includes(m.kind)) metaParts.push(`${m.width}×${m.height}`);
     if (m.kind === 'font' && m.fontFamily) metaParts.push(m.fontFamily);
     if (m.fps) metaParts.push(`${Math.round(m.fps * 100) / 100}fps`);
@@ -340,16 +589,28 @@ export function createProjectPanel() {
         if (ids.length) toast(`${m.name}을(를) 넣었습니다`);
       },
     }, '넣기') : null;
-    const el = h(`div.media-item${store.ui.selectedMedia.has(id) ? '.selected' : ''}${inBin ? '.in-bin' : ''}`, { draggable: true, title: m.name },
-      thumb,
-      h('div.name', m.label ? h('span.label-dot', { style: { background: m.label } }) : null, h('span', m.name), badge),
-      h('div.meta', metaParts.join(' · '), addBtn));
+    const cls = `div.media-item${store.ui.selectedMedia.has(id) ? '.selected' : ''}${inBin ? '.in-bin' : ''}`;
+    let el;
+    if (useColumns()) {
+      el = h(cls, { draggable: true, title: m.name, dataset: { id } },
+        thumb,
+        h('div.name', h('span', m.name), subTag, badge),
+        ...COLUMNS.slice(1).map(([k]) => (k === 'label'
+          ? h('div.col.lbl', m.label ? h('span.label-dot', { style: { background: m.label } }) : null, labelName(m) && m.label ? labelName(m) : '')
+          : h('div.col', columnText(m, k)))));
+    } else {
+      el = h(cls, { draggable: true, title: m.name, dataset: { id } },
+        thumb,
+        h('div.name', m.label ? h('span.label-dot', { style: { background: m.label } }) : null, h('span', m.name), subTag, badge),
+        h('div.meta', metaParts.join(' · '), addBtn));
+    }
     el.addEventListener('click', (e) => {
       const sel = store.ui.selectedMedia;
       if (e.shiftKey && anchor) {
-        const order = store.project.mediaOrder;
+        const order = [...list.querySelectorAll('.media-item:not(.bin)')].map((x) => x.dataset.id);
         const [a, b] = [order.indexOf(anchor), order.indexOf(id)].sort((x, y) => x - y);
-        for (let i = a; i <= b; i++) sel.add(order[i]);
+        if (a >= 0) for (let i = a; i <= b; i++) sel.add(order[i]);
+        else sel.add(id);
       } else if (modKey(e)) {
         if (sel.has(id)) sel.delete(id);
         else sel.add(id);
@@ -365,7 +626,7 @@ export function createProjectPanel() {
     el.addEventListener('dblclick', () => {
       if (m.kind === 'sequence') return store.openSequence(m.sequenceId);
       if (m.kind === 'color' || m.kind === 'adjustment') return;
-      if (st === 'offline' || st === 'error') return relinkOne(id);
+      if (st === 'offline' || st === 'error') return relinkOne(fileIdOf(id));
       openInSource(id);
     });
     el.addEventListener('dragstart', (e) => {
@@ -387,79 +648,95 @@ export function createProjectPanel() {
         store.ui.selectedMedia.add(id);
         render();
       }
-      const selIds = [...store.ui.selectedMedia];
-      const bins = Object.values(store.project.bins || {});
-      const common = [
-        { label: '레이블 색상', submenu: LABEL_COLORS.map(([c, n]) => ({ label: n, swatch: c || 'transparent', checked: (m.label || '') === c, action: () => setMediaLabel(selIds, c) })) },
-        { label: '저장소로 옮기기', submenu: [
-          { label: '(맨 위 — 저장소 밖)', checked: !m.bin, action: () => moveToBin(selIds, null) },
-          ...bins.map((b) => ({ label: b.name, checked: m.bin === b.id, action: () => moveToBin(selIds, b.id) })),
-          '-',
-          { label: '새 저장소 만들어 옮기기…', action: newBin },
-        ] },
-      ];
-      if (m.kind === 'sequence') {
-        showMenu([
-          { label: '타임라인에서 열기', action: () => store.openSequence(m.sequenceId) },
-          { label: '재생헤드에 삽입', disabled: m.sequenceId === store.seq.id, action: () => edit.placeMedia(id, { mode: 'insert' }) },
-          { label: '재생헤드에 덮어쓰기 (중첩)', disabled: m.sequenceId === store.seq.id, action: () => edit.placeMedia(id, { mode: 'overwrite' }) },
-          '-',
-          { label: '이름 바꾸기…', action: async () => {
-            const n = await promptDialog('시퀀스 이름 바꾸기', '이름', m.name);
-            if (n) store.transact('시퀀스 이름 바꾸기', () => { store.project.sequences[m.sequenceId].name = n; });
-          } },
-          { label: '복제', action: () => edit.duplicateSequence(m.sequenceId) },
-          { label: '시퀀스 삭제', action: () => edit.deleteSequence(m.sequenceId) },
-          '-',
-          ...common,
-        ], e.clientX, e.clientY);
-        return;
-      }
-      if (m.kind === 'font') {
-        showMenu([
-          { label: '선택한 텍스트 클립에 이 글꼴 적용', action: () => applyFont(id) },
-          { label: '이름 바꾸기…', action: () => rename(id) },
-          '-',
-          ...common,
-          '-',
-          { label: '지우기', key: 'Del', action: clearSelected },
-        ], e.clientX, e.clientY);
-        return;
-      }
-      if (m.kind === 'lut') {
-        showMenu([
-          { label: '선택한 클립에 LUT 적용', action: () => applyLut(id) },
-          { label: '이름 바꾸기…', action: () => rename(id) },
-          '-',
-          ...common,
-          '-',
-          { label: '지우기', key: 'Del', action: clearSelected },
-        ], e.clientX, e.clientY);
-        return;
-      }
-      const real = m.kind !== 'color' && m.kind !== 'adjustment';
-      const videos = selIds.filter((x) => store.project.media[x]?.kind === 'video');
-      showMenu([
-        { label: '소스 모니터에서 열기', disabled: !real || st !== 'ready', action: () => openInSource(id) },
-        m.kind === 'image' ? { label: '사진 편집에서 열기 (레이어·보정·PSD)', disabled: st !== 'ready', action: () => openImageInPhoto(id) } : null,
-        { label: '재생헤드에 삽입', key: ',', disabled: st !== 'ready', action: () => edit.placeMedia(id, { mode: 'insert' }) },
-        { label: '재생헤드에 덮어쓰기', key: '.', disabled: st !== 'ready', action: () => edit.placeMedia(id, { mode: 'overwrite' }) },
-        { label: '시퀀스 끝에 이어 붙이기', disabled: st !== 'ready', action: () => appendToEnd(selIds) },
+      showMenu(itemMenu(id), e.clientX, e.clientY);
+    });
+    return el;
+  }
+
+  function itemMenu(id) {
+    const m = store.project.media[id];
+    const st = mediaStatus(id);
+    const selIds = [...store.ui.selectedMedia];
+    const bins = Object.values(store.project.bins || {});
+    const common = [
+      { label: '레이블 색상', submenu: LABEL_COLORS.map(([c, n]) => ({ label: n, swatch: c || 'transparent', checked: (m.label || '') === c, action: () => setMediaLabel(selIds, c) })) },
+      { label: '저장소로 옮기기', submenu: [
+        { label: '(맨 위 — 저장소 밖)', checked: !m.bin, action: () => moveToBin(selIds, null) },
+        ...bins.map((b) => ({ label: b.name, checked: m.bin === b.id, action: () => moveToBin(selIds, b.id) })),
         '-',
-        { label: '오디오 추출 (소리만 따로 만들기)…', disabled: !['video', 'audio'].includes(m.kind) || !m.hasAudio || st !== 'ready', action: () => openExtractAudioDialog({ mediaId: id }) },
-        { label: `멀티캠 소스 시퀀스 만들기… (${videos.length}개 선택)`, disabled: videos.length < 2, action: openMulticamDialog },
-        { label: '이 클립에 맞춰 시퀀스 설정 바꾸기', disabled: !(m.width && m.kind === 'video') && m.kind !== 'image', action: () => matchSequence(m) },
-        m.kind === 'color' ? { label: '색상 바꾸기…', action: () => changeColor(id) } : null,
+        { label: '새 저장소 만들어 옮기기…', action: newBin },
+      ] },
+    ];
+    if (m.kind === 'sequence') {
+      return [
+        { label: '타임라인에서 열기', action: () => store.openSequence(m.sequenceId) },
+        { label: '재생헤드에 삽입', disabled: m.sequenceId === store.seq.id, action: () => edit.placeMedia(id, { mode: 'insert' }) },
+        { label: '재생헤드에 덮어쓰기 (중첩)', disabled: m.sequenceId === store.seq.id, action: () => edit.placeMedia(id, { mode: 'overwrite' }) },
+        '-',
+        { label: '이름 바꾸기…', action: async () => {
+          const n = await promptDialog('시퀀스 이름 바꾸기', '이름', m.name);
+          if (n) store.transact('시퀀스 이름 바꾸기', () => { store.project.sequences[m.sequenceId].name = n; });
+        } },
+        { label: '복제', action: () => edit.duplicateSequence(m.sequenceId) },
+        { label: '시퀀스 삭제', action: () => edit.deleteSequence(m.sequenceId) },
+        '-',
+        ...common,
+      ];
+    }
+    if (m.kind === 'font' || m.kind === 'lut') {
+      return [
+        m.kind === 'font' ? { label: '선택한 텍스트 클립에 이 글꼴 적용', action: () => applyFont(id) } : { label: '선택한 클립에 LUT 적용', action: () => applyLut(id) },
         { label: '이름 바꾸기…', action: () => rename(id) },
-        { label: real ? (st === 'ready' ? '다른 파일로 바꾸기…' : '미디어 다시 연결…') : '다른 파일로 바꾸기…', disabled: !real, action: () => relinkOne(id) },
-        { label: '속성…', action: () => showProperties(id) },
         '-',
         ...common,
         '-',
         { label: '지우기', key: 'Del', action: clearSelected },
-      ], e.clientX, e.clientY);
-    });
-    return el;
+      ];
+    }
+    const real = m.kind !== 'color' && m.kind !== 'adjustment';
+    const sub = isSubclip(m);
+    const timed = ['video', 'audio'].includes(m.kind);
+    const videos = selIds.filter((x) => store.project.media[x]?.kind === 'video');
+    const posterT = hoverT.get(id);
+    return [
+      { label: '소스 모니터에서 열기', disabled: !real || st !== 'ready', action: () => openInSource(id) },
+      m.kind === 'image' ? { label: '사진 편집에서 열기 (레이어·보정·PSD)', disabled: st !== 'ready', action: () => openImageInPhoto(id) } : null,
+      { label: '재생헤드에 삽입', key: ',', disabled: st !== 'ready', action: () => edit.placeMedia(id, { mode: 'insert' }) },
+      { label: '재생헤드에 덮어쓰기', key: '.', disabled: st !== 'ready', action: () => edit.placeMedia(id, { mode: 'overwrite' }) },
+      { label: '시퀀스 끝에 이어 붙이기', disabled: st !== 'ready', action: () => appendToEnd(selIds) },
+      typeof edit.newSequenceFromMedia === 'function' ? { label: '클립에서 새 시퀀스', disabled: st !== 'ready', action: () => edit.newSequenceFromMedia(id) } : null,
+      '-',
+      { label: '하위 클립 만들기…', key: 'Ctrl+U', disabled: !timed || st !== 'ready', action: () => {
+        const [lo, hi] = itemRange(m);
+        openSubclipDialog(id, { inPoint: m.inPoint ?? lo, outPoint: m.outPoint ?? hi });
+      } },
+      sub ? { label: '하위 클립 편집…', action: () => openEditSubclipDialog(id) } : null,
+      sub ? { label: '마스터 클립 표시', disabled: !store.project.media[m.subclipOf], action: () => reveal(m.subclipOf, { select: true }) } : null,
+      m.kind === 'video' ? { label: posterT != null ? `포스터 프레임 설정 (${formatTimecode(posterT, m.fps || store.seq.fps)})` : '포스터 프레임 설정', disabled: st !== 'ready', action: () => posterFromMenu(id) } : null,
+      m.kind === 'video' && m.posterTime != null ? { label: '포스터 프레임 지우기', action: () => store.transact('포스터 프레임 지우기', () => { const x = store.project.media[id]; if (x) delete x.posterTime; }) } : null,
+      '-',
+      { label: '오디오 추출 (소리만 따로 만들기)…', disabled: sub || !timed || !m.hasAudio || st !== 'ready', action: () => openExtractAudioDialog({ mediaId: id }) },
+      { label: `멀티캠 소스 시퀀스 만들기… (${videos.length}개 선택)`, disabled: videos.length < 2, action: openMulticamDialog },
+      { label: '이 클립에 맞춰 시퀀스 설정 바꾸기', disabled: !(m.width && m.kind === 'video') && m.kind !== 'image', action: () => matchSequence(m) },
+      m.kind === 'color' ? { label: '색상 바꾸기…', action: () => changeColor(id) } : null,
+      { label: '이름 바꾸기…', action: () => rename(id) },
+      { label: real ? (st === 'ready' ? '다른 파일로 바꾸기…' : '미디어 다시 연결…') : '다른 파일로 바꾸기…', disabled: !real || sub, action: () => relinkOne(id) },
+      { label: '속성…', action: () => showProperties(id) },
+      '-',
+      ...common,
+      '-',
+      { label: '지우기', key: 'Del', action: clearSelected },
+    ];
+  }
+
+  /** 포스터 프레임 설정 from the menu: the hover-scrubbed spot (icon view) or the Source monitor's frame. */
+  async function posterFromMenu(id) {
+    const m = store.project.media[id];
+    if (hoverT.has(id)) return setPoster(id, hoverT.get(id));
+    const { sourceApi } = await import('./source-monitor.js');
+    if (sourceApi.mediaId?.() === id && sourceApi.currentTime?.() != null) return setPoster(id, sourceApi.currentTime());
+    openInSource(id);
+    toast(`${m?.name || '항목'}: 소스 모니터에서 원하는 프레임으로 옮긴 뒤 Shift+P를 누르세요 (아이콘 보기에서는 썸네일 위를 훑은 자리로 정해집니다)`);
   }
 
   async function rename(id) {
@@ -469,12 +746,14 @@ export function createProjectPanel() {
   }
 
   function appendToEnd(ids) {
+    const mark = store.undoMark();
     for (const id of ids) {
       if (mediaStatus(id) !== 'ready' || ['lut', 'font'].includes(store.project.media[id]?.kind)) continue;
       let end = 0;
       for (const c of Object.values(store.seq.clips)) end = Math.max(end, c.start + c.duration);
       edit.placeMedia(id, { mode: 'overwrite', start: end });
     }
+    store.squashSince(mark, '시퀀스 끝에 이어 붙이기');
   }
 
   function matchSequence(m) {
@@ -483,7 +762,8 @@ export function createProjectPanel() {
   }
 
   function changeColor(id) {
-    const input = h('input', { type: 'color', value: store.project.media[id].color || '#000000' });
+    const cur = store.project.media[id].color;
+    const input = h('input', { type: 'color', value: /^#[0-9a-f]{6}$/i.test(cur || '') ? cur : '#000000' });
     openModal({
       title: '색상 매트 색 바꾸기',
       body: input,
@@ -521,21 +801,81 @@ export function createProjectPanel() {
 
   function showProperties(id) {
     const m = store.project.media[id];
-    const rt = runtime.get(id);
+    const rt = runtime.get(fileIdOf(id));
     const statusName = { ready: '사용 가능', loading: '불러오는 중', offline: '오프라인 (파일 연결 필요)', error: '오류', missing: '없음' }[mediaStatus(id)] || mediaStatus(id);
-    const used = Object.values(store.project.sequences).reduce((n, sq) => n + Object.values(sq.clips).filter((c) => c.mediaId === id).length, 0);
+    const used = Object.values(store.project.sequences).reduce((n, sq) => n + Object.values(sq.clips).filter((c) => c.mediaId === id || c.subclip?.id === id).length, 0);
+    const fps = fpsOf(m) || store.seq.fps;
+    const dur = itemDuration(m);
     const rows = [
-      ['이름', m.name], ['종류', KIND_NAMES[m.kind] || m.kind], ['상태', statusName], ['길이', Number.isFinite(m.duration) ? formatTimecode(m.duration, m.fps || store.seq.fps) : '정지 화면'],
+      ['이름', m.name], ['종류', isSubclip(m) ? `하위 클립 (${store.project.media[m.subclipOf]?.name || '마스터 없음'})` : KIND_NAMES[m.kind] || m.kind], ['상태', statusName],
+      ['길이', dur != null ? formatTimecode(dur, fps) : '—'],
+      isSubclip(m) ? ['하위 클립 구간', `${formatTimecode(m.subIn, fps)} ~ ${formatTimecode(m.subOut, fps)}${m.restrictTrims === false ? '' : ' (트리밍 제한)'}`] : null,
       ['화면 크기', m.width ? `${m.width} × ${m.height}` : '—'], ['프레임 속도', m.fps ? `${m.fps} fps` : '—'], ['소리', m.hasAudio ? '있음' : '없음'],
       ['파일 크기', m.size ? formatBytes(m.size) : '—'], ['파일 형식', m.mime || '—'], ['오류 내용', rt?.error || '—'],
+      m.posterTime != null ? ['포스터 프레임', formatTimecode(m.posterTime, fps)] : null,
       ['사용 중인 클립', `${used}개 (모든 시퀀스)`],
-    ];
+    ].filter(Boolean);
     openModal({ title: '속성', body: h('div.kbd-table', rows.flatMap(([a, b]) => [h('span', a), h('span', String(b))])) });
   }
 
+  /** 프로젝트에서 표시: show the panel, open the item's bin, select, scroll to and flash it. */
+  function reveal(id, { select: sel = true } = {}) {
+    let m = store.project.media[id];
+    if (!m) return;
+    // a timeline clip from a subclip points at the master: reveal the subclip it came from
+    const fromSub = store.selectedClips().find((c) => c.mediaId === id && c.subclip?.id && store.project.media[c.subclip.id]);
+    if (fromSub) {
+      id = fromSub.subclip.id;
+      m = store.project.media[id];
+    }
+    showPanel('project');
+    if (filter && !m.name.toLowerCase().includes(filter)) {
+      filter = '';
+      search.value = '';
+    }
+    if (m.bin && closedBins.has(m.bin)) {
+      closedBins.delete(m.bin);
+      savePref('bins.closed', [...closedBins]);
+    }
+    if (sel) store.ui.selectedMedia = new Set([id]);
+    anchor = id;
+    render();
+    lastSig = '';
+    const el = [...list.querySelectorAll('.media-item')].find((x) => x.dataset.id === id);
+    if (el) {
+      el.scrollIntoView({ block: 'nearest' });
+      el.classList.remove('flash');
+      void el.offsetWidth;
+      el.classList.add('flash');
+    }
+  }
+
+  Object.assign(projectApi, { newBin, reveal, newItemMenu, render: () => scheduleRender(true) });
+
   store.on('change', () => scheduleRender());
-  store.on('reveal-media', () => scheduleRender(true));
+  store.on('reveal-media', (id) => (id ? reveal(id) : scheduleRender(true)));
   mediaEvents.on('updated', () => scheduleRender());
+  window.addEventListener('resize', () => scheduleRender());
   render();
   return body;
 }
+
+// 파일 ▸ 새로 만들기 (Premiere's File ▸ New)
+extendMenu('파일', (items) => {
+  const sub = {
+    label: '새로 만들기',
+    submenu: () => [
+      { label: '시퀀스…', action: openNewSequenceDialog },
+      { label: '저장소', action: () => projectApi.newBin?.() },
+      '-',
+      { label: '조정 레이어', action: () => projectApi.reveal?.(createSyntheticMedia('adjustment', { name: '조정 레이어' })) },
+      { label: '바 및 톤…', action: openBarsToneDialog },
+      { label: '블랙 비디오', action: () => projectApi.reveal?.(createSyntheticMedia('color', { name: '블랙 비디오', color: '#000000' })) },
+      { label: '색상 매트…', action: openColorMatteDialog },
+      { label: '범용 카운트다운 리더…', action: openCountingLeaderDialog },
+      { label: '투명 비디오', action: () => projectApi.reveal?.(createTransparentVideo()) },
+    ],
+  };
+  const at = items.findIndex((it) => it && it.label === '새 프로젝트');
+  return at < 0 ? [sub, ...items] : [...items.slice(0, at + 1), sub, ...items.slice(at + 1)];
+});

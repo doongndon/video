@@ -6,11 +6,25 @@ import { toast, promptDialog, loadPref, savePref } from '../ui/common.js';
 import { makeCanvas } from './doc.js';
 import { TOOLS, TOOL_BY_ID, TOOL_GROUPS, Stroke, brushOpts, needRaster } from './tools.js';
 import { GRADIENTS, GRADIENT_STYLES, paintGradient, gradientLut, gradientSwatch, listPatterns, patternCanvas, definePattern, paintPattern, userPatterns } from './resources.js';
+import { colorPickerDialog } from './colorpicker.js';
+import { gradientEditorDialog, importGradientFiles } from './gradedit.js';
+import { keepImportedPatterns } from './resources.js';
 
 const patternList = () => listPatterns().map((p) => [p.id, p.name]);
 
 export function installPaint2(P) {
   const C = P.cmd;
+
+  // ---- Photoshop's Color Picker for the foreground / background colour (the toolbar swatches)
+  P.colorPicker = (which = 'fg') => colorPickerDialog({
+    title: which === 'bg' ? '색상 피커 (배경색)' : '색상 피커 (전경색)',
+    value: which === 'bg' ? P.bg : P.fg,
+    onOk: (hex) => P.setColor(hex, which === 'bg'),
+    onAddSwatch: P.addSwatch ? (hex) => {
+      P.addSwatch(hex);
+      toast('견본 패널의 "내 견본"에 추가했습니다');
+    } : null,
+  });
 
   // ---- gradient tool
   const GR_LIST = [...GRADIENTS.map((g) => [g.id, g.name]), ['custom', '사용자 정의 (편집으로 만들기)']];
@@ -29,13 +43,10 @@ export function installPaint2(P) {
     sw.style.cssText = 'display:block;border-radius:3px';
     return [h('button.small.ph-gradbtn', {
       title: '그레이디언트 편집',
-      onclick: async () => {
-        const D = await import('./pdialogs.js');
-        D.gradientEditor(P, current(o), (g) => {
-          P.setOpt('gradient', 'custom', g);
-          P.setOpt('gradient', 'preset', 'custom');
-        });
-      },
+      onclick: () => P.gradientEditor(current(o), (g) => {
+        P.setOpt('gradient', 'custom', g);
+        P.setOpt('gradient', 'preset', 'custom');
+      }),
     }, sw), h('span.ph-opt.ph-hint', 'Shift: 45° 단위')];
   };
   let preview = null;
@@ -116,6 +127,75 @@ export function installPaint2(P) {
     return gMove.call(this, E, p, e);
   };
 
+  // ---- the Gradient Editor (gradedit.js) for every gradient in the app (pdialogs.js hands over to it)
+  P.gradientEditor = (gr, onApply) => gradientEditorDialog(P, gr, onApply);
+
+  // ---- Photoshop gradient (.grd) and pattern (.pat) files
+  C.importGradients = async (files = null) => {
+    if (!files) {
+      const { pickFiles } = await import('../ui/project-panel.js');
+      files = await pickFiles({ accept: '.grd', multiple: true });
+    }
+    const n = await importGradientFiles(P, files);
+    if (n) P.showPanel('gradients');
+    return n;
+  };
+  C.importPatterns = async (files = null) => {
+    if (!files) {
+      const { pickFiles } = await import('../ui/project-panel.js');
+      files = await pickFiles({ accept: '.pat', multiple: true });
+    }
+    const { parsePat } = await import('./psdres.js');
+    let total = 0;
+    for (const f of files) {
+      try {
+        const list = parsePat(await f.arrayBuffer()).map((p) => {
+          const c = makeCanvas(p.w, p.h);
+          c.getContext('2d').putImageData(new ImageData(Uint8ClampedArray.from(p.rgba), p.w, p.h), 0, 0);
+          return { canvas: c, name: p.name || f.name.replace(/\.[^.]+$/, '') };
+        });
+        keepImportedPatterns(list);
+        total += list.length;
+        toast(list.length ? `${f.name}: 패턴 ${list.length}개를 가져왔습니다 (패턴 패널)` : `${f.name}: 가져올 패턴이 없습니다`);
+      } catch (err) {
+        toast(`${f.name}: 패턴 파일을 읽을 수 없습니다 (${err.message || err})`);
+      }
+    }
+    if (total) {
+      P.emit('patterns');
+      P.emit('opts');
+      P.showPanel('patterns');
+    }
+    return total;
+  };
+  // opened or dropped .grd / .pat files go into the gradient and pattern lists, like Photoshop
+  const openFiles = P.openFiles;
+  P.openFiles = async (files) => {
+    const list = [...files];
+    const grd = list.filter((f) => /\.grd$/i.test(f.name));
+    const pat = list.filter((f) => /\.pat$/i.test(f.name));
+    if (grd.length) await C.importGradients(grd);
+    if (pat.length) await C.importPatterns(pat);
+    const rest = list.filter((f) => !grd.includes(f) && !pat.includes(f));
+    return rest.length ? openFiles(rest) : undefined;
+  };
+  // Edit ▸ Presets: import brushes, patterns and gradients
+  P.extendMenus = [...(P.extendMenus || []), () => {
+    const orig = P.menus['편집'];
+    if (!orig) return;
+    P.menus['편집'] = () => {
+      const items = orig();
+      const at = items.findIndex((it) => typeof it === 'object' && /^패턴 정의/.test(it?.label || ''));
+      const add = { label: '사전 설정', submenu: [
+        { label: '브러시 가져오기… (.abr)', action: () => C.importBrushes?.() },
+        { label: '패턴 가져오기… (.pat)', action: () => C.importPatterns() },
+        { label: '그레이디언트 가져오기… (.grd)', action: () => C.importGradients() },
+      ] };
+      if (at < 0) return [...items, '-', add];
+      return [...items.slice(0, at + 1), add, ...items.slice(at + 1)];
+    };
+  }];
+
   // ---- paint bucket: colour or pattern
   const bucket = TOOL_BY_ID.bucket;
   bucket.options = [['fill', '칠', 'select', null, null, 'fg', [['fg', '전경색'], ['pattern', '패턴']]], ['pattern', '패턴', 'select', null, null, 'checker', patternList], ...bucket.options];
@@ -124,7 +204,10 @@ export function installPaint2(P) {
   // ---- pattern stamp
   const stamp = {
     id: 'patternStamp', name: '패턴 도장', key: 'S', icon: 'patternStamp', group: 'retouch', cursor: 'brush',
-    options: [['size', '크기', 'range', 1, 500, 60], ['hardness', '경도', 'range', 0, 100, 60, '%'], ['opacity', '불투명도', 'range', 1, 100, 100, '%'], ['flow', '흐름', 'range', 1, 100, 100, '%'], ['pattern', '패턴', 'select', null, null, 'checker', patternList], ['scale', '패턴 크기 (%)', 'range', 10, 400, 100]],
+    options: [['size', '크기', 'range', 1, 1000, 60, 'px'], ['hardness', '경도', 'range', 0, 100, 60, '%'], ['opacity', '불투명도', 'range', 1, 100, 100, '%'], ['flow', '흐름', 'range', 1, 100, 100, '%'], ['airbrush', '에어브러시', 'bool', null, null, false], ['pattern', '패턴', 'select', null, null, 'checker', patternList], ['scale', '패턴 크기 (%)', 'range', 10, 400, 100], ['pressureSize', '압력: 크기', 'bool', null, null, false]],
+    leadButtons() {
+      return P.brushOptionButtons?.('patternStamp') || [];
+    },
     down(E, p, e) {
       if (!needRaster(E, '패턴 도장')) return;
       if (E.maskTarget?.()) return void toast('패턴 도장은 레이어 내용에만 칠합니다');
@@ -132,8 +215,12 @@ export function installPaint2(P) {
       const bo = brushOpts(o, E, { label: '패턴 도장' });
       bo.srcCanvas = paintPattern(E.doc.width, E.doc.height, o.pattern, o.scale);
       bo.cloneOffset = { x: 0, y: 0 };
+      // brush tips and brush settings (brushengine.js) paint the pattern through
+      bo.cloneSrc = bo.srcCanvas;
+      bo.cloneXf = new DOMMatrix();
+      bo.engine = E.brushEngine?.('patternStamp', o, bo, 'clone') || null;
       this.st = new Stroke(E, 'clone', bo);
-      this.st.to(p, e.pressure || 1);
+      this.st.to(p, e.pointerType === 'pen' ? e.pressure || 1 : 1);
       this.st.flush();
     },
     move(E, p, e) {

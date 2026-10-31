@@ -2,15 +2,16 @@
 // expand / contract, the quick selection brush, object selection / select subject / sky, the
 // magnetic lasso's live wire, and Select and Mask's edge refinement.
 //
-// None of this is machine learning: object selection, subject and sky are colour-model heuristics
-// (an iterated, GrabCut-like colour clustering with neighbour smoothing), so they work on clear
-// subjects against plain backgrounds and miss on busy photos.
+// None of this is machine learning: object selection and subject use GrabCut (colour mixtures and a
+// graph cut, selcut.js) started from saliency and the drawn box, and sky is a colour heuristic, so
+// they work on clear subjects and can miss on busy photos.
 //
 // Selections here are alpha arrays (Float32Array, 0..1) or doc-size canvases whose alpha is the
 // selection amount.
 
 import { makeCanvas } from './doc.js';
 import { blurArray, distanceTo } from './styles.js';
+import * as SC from './selcut.js';
 
 const clamp01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v);
 
@@ -175,7 +176,7 @@ export function gradientOf(px, w, h) {
 // ---------------------------------------------------------------- colour range
 
 export const COLOR_RANGE_PRESETS = [
-  ['sampled', '샘플 색상'], ['reds', '빨강 계열'], ['yellows', '노랑 계열'], ['greens', '초록 계열'], ['cyans', '녹청 계열'],
+  ['sampled', '샘플 색상'], ['reds', '빨강 계열'], ['yellows', '노랑 계열'], ['greens', '녹색 계열'], ['cyans', '녹청 계열'],
   ['blues', '파랑 계열'], ['magentas', '마젠타 계열'], ['highlights', '밝은 영역'], ['midtones', '중간 영역'], ['shadows', '어두운 영역'], ['skin', '피부 톤'],
 ];
 const HUE_OF = { reds: 0, yellows: 60, greens: 120, cyans: 180, blues: 240, magentas: 300 };
@@ -334,16 +335,19 @@ export function similarSelect(px, w, h, selA, tolerance = 32, contiguous = true)
 
 // ---------------------------------------------------------------- modify
 
-/** Expand (n > 0) or contract (n < 0) by n pixels, round corners, antialiased. */
+/**
+ * Expand (n > 0) or contract (n < 0) by n pixels, round corners, antialiased. Distances run between
+ * pixel centres, so a straight edge moves by exactly n whole pixels (no half-selected row).
+ */
 export function expandAlpha(a, w, h, n) {
   const out = new Float32Array(a.length);
   if (n > 0) {
     const d = distanceTo(a, w, h, (v) => v >= 0.5);
-    for (let i = 0; i < a.length; i++) out[i] = Math.max(a[i], clamp01(n + 0.5 - d[i]));
+    for (let i = 0; i < a.length; i++) out[i] = Math.max(a[i], clamp01(n + 1 - d[i]));
   } else {
     const m = -n;
     const d = distanceTo(a, w, h, (v) => v < 0.5);
-    for (let i = 0; i < a.length; i++) out[i] = Math.min(a[i], clamp01(d[i] - m + 0.5));
+    for (let i = 0; i < a.length; i++) out[i] = Math.min(a[i], clamp01(d[i] - m));
   }
   return out;
 }
@@ -435,7 +439,8 @@ export class QuickSelector {
     if (!this.grad) this.grad = gradientOf(px, w, h);
     const G = this.grad;
     r = Math.max(1, r);
-    const R = r * 3;
+    // the flood reaches a few brush sizes out (to the object's edges), more for small brushes
+    const R = Math.min(r * 5, r * 3 + 150);
     const x0 = Math.max(0, Math.floor(cx - R));
     const y0 = Math.max(0, Math.floor(cy - R));
     const x1 = Math.min(w - 1, Math.ceil(cx + R));
@@ -488,196 +493,33 @@ export class QuickSelector {
     return { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 };
   }
 
-  /** The stroke so far as a doc-size alpha canvas (optionally with smoothed edges). */
+  /**
+   * The stroke so far as a doc-size alpha canvas. Auto-Enhance (enhance) smooths the blocky outline
+   * and pulls it onto the picture's edges (a guided filter), as Photoshop's option does.
+   */
   canvas(enhance = false) {
-    const { w, h } = this;
+    const { w, h, px } = this;
     let a = new Float32Array(w * h);
     for (let i = 0; i < a.length; i++) a[i] = this.mask[i];
-    if (enhance) a = smoothAlpha(a, w, h, 1.5);
+    if (enhance) {
+      const sub = Math.max(1, Math.round(Math.sqrt((w * h) / 1e6)));
+      const q = SC.guidedFilter(px, w, h, a, 3, 2e-3, sub);
+      for (let i = 0; i < a.length; i++) a[i] = clamp01((q[i] - 0.5) * 2 + 0.5);
+      a = smoothAlpha(a, w, h, 1);
+    }
     return alphaCanvas(a, w, h);
   }
 }
 
 // ---------------------------------------------------------------- object selection / subject / sky
 
-/** k-means colour clusters of the pixels `idx`: {cs: centres, pi: weights, v: mean squared spread}. */
-function kmeans(px, idx, K, iters = 5) {
-  const m = idx.length;
-  if (!m) return null;
-  let cs = [];
-  for (let k = 0; k < K; k++) {
-    const i = idx[Math.floor(((k + 0.5) / K) * m)];
-    cs.push([px[i * 4], px[i * 4 + 1], px[i * 4 + 2]]);
-  }
-  const step = Math.max(1, Math.floor(m / 6000));
-  let acc = null;
-  let sq = 0;
-  let total = 0;
-  for (let it = 0; it < iters; it++) {
-    acc = cs.map(() => [0, 0, 0, 0]);
-    sq = 0;
-    total = 0;
-    for (let s = 0; s < m; s += step) {
-      const i = idx[s] * 4;
-      let best = 0;
-      let bd = Infinity;
-      for (let k = 0; k < cs.length; k++) {
-        const d = (px[i] - cs[k][0]) ** 2 + (px[i + 1] - cs[k][1]) ** 2 + (px[i + 2] - cs[k][2]) ** 2;
-        if (d < bd) {
-          bd = d;
-          best = k;
-        }
-      }
-      const a = acc[best];
-      a[0] += px[i];
-      a[1] += px[i + 1];
-      a[2] += px[i + 2];
-      a[3]++;
-      sq += bd;
-      total++;
-    }
-    cs = cs.map((c, k) => (acc[k][3] ? [acc[k][0] / acc[k][3], acc[k][1] / acc[k][3], acc[k][2] / acc[k][3]] : c));
-  }
-  const keep = cs.map((_, k) => acc[k][3] > 0);
-  return {
-    cs: cs.filter((_, k) => keep[k]),
-    pi: acc.filter((a) => a[3] > 0).map((a) => a[3] / total),
-    v: Math.max(30, sq / Math.max(1, total) / 3),
-  };
-}
-
-/** −log likelihood of a pixel under a colour model (a mixture of round Gaussians). */
-function cost(px, i, M) {
-  // −log Σ πk·N(x; ck, v) via log-sum-exp
-  let mx = -Infinity;
-  const t = M._t || (M._t = new Float64Array(M.cs.length));
-  for (let k = 0; k < M.cs.length; k++) {
-    const c = M.cs[k];
-    const d = (px[i * 4] - c[0]) ** 2 + (px[i * 4 + 1] - c[1]) ** 2 + (px[i * 4 + 2] - c[2]) ** 2;
-    t[k] = Math.log(M.pi[k]) - d / (2 * M.v);
-    if (t[k] > mx) mx = t[k];
-  }
-  let sum = 0;
-  for (let k = 0; k < M.cs.length; k++) sum += Math.exp(t[k] - mx);
-  return -(mx + Math.log(sum)) + 1.5 * Math.log(M.v);
-}
-
 /**
- * Two-colour-model segmentation on a small image: `fixed` pixels are background for sure, `label`
- * holds the starting guess (1 = object). Alternates fitting a colour mixture to each side and
- * relabelling every pixel by the more likely model, with the likelihoods smoothed over neighbours
- * (a cheap stand-in for GrabCut's graph cut). Returns the labels.
+ * Turn labels found on a small copy into a doc-size selection canvas: enlarge smoothly, then snap
+ * the edge to the real picture with a guided filter at full resolution.
  */
-function segment(px, w, h, label, fixed, rounds = 6, prior = null) {
-  const n = w * h;
-  const q = new Float32Array(n);
-  // start from what the background colours explain badly (falls back to the caller's guess)
-  const bgIdx = [];
-  for (let i = 0; i < n; i++) if (!label[i]) bgIdx.push(i);
-  const B0 = kmeans(px, bgIdx, 10);
-  if (B0) {
-    const cb = new Float32Array(n);
-    for (let i = 0; i < n; i++) cb[i] = cost(px, i, B0);
-    const ref = Float32Array.from(bgIdx, (i) => cb[i]).sort();
-    const th = ref[Math.floor(ref.length * 0.98)] + 4;
-    let any = 0;
-    const init = new Uint8Array(n);
-    for (let i = 0; i < n; i++) {
-      init[i] = !fixed[i] && label[i] && cb[i] > th ? 1 : 0;
-      any += init[i];
-    }
-    if (any > n * 0.002) label.set(init);
-  }
-  for (let round = 0; round < rounds; round++) {
-    const fg = [];
-    const bg = [];
-    for (let i = 0; i < n; i++) (label[i] ? fg : bg).push(i);
-    if (!fg.length || !bg.length) break;
-    const F = kmeans(px, fg, 5);
-    const B = kmeans(px, bg, 10);
-    for (let i = 0; i < n; i++) {
-      const dd = cost(px, i, B) - cost(px, i, F) - (prior ? prior[i] : 0);
-      q[i] = 1 / (1 + Math.exp(-Math.max(-30, Math.min(30, dd))));
-    }
-    const sm = blurArray(q, w, h, 1.2);
-    let changed = 0;
-    for (let i = 0; i < n; i++) {
-      const v = fixed[i] ? 0 : sm[i] > 0.5 ? 1 : 0;
-      if (v !== label[i]) changed++;
-      label[i] = v;
-    }
-    if (!changed) break;
-  }
-  return label;
-}
-
-/** Keep the big pieces of the object and fill its holes. */
-function tidyLabels(label, w, h, fixed, { holes = 0.25 } = {}) {
-  const n = w * h;
-  const comp = new Int32Array(n).fill(-1);
-  const sizes = [];
-  const touches = [];
-  const stack = new Int32Array(n);
-  for (let s = 0; s < n; s++) {
-    if (comp[s] >= 0) continue;
-    const v = label[s];
-    const id = sizes.length;
-    let sp = 0;
-    let size = 0;
-    let edge = false;
-    stack[sp++] = s;
-    comp[s] = id;
-    while (sp) {
-      const i = stack[--sp];
-      size++;
-      const x = i % w;
-      const y = (i / w) | 0;
-      if (x === 0 || y === 0 || x === w - 1 || y === h - 1 || fixed[i]) edge = true;
-      const go = (j) => {
-        if (comp[j] < 0 && label[j] === v) {
-          comp[j] = id;
-          stack[sp++] = j;
-        }
-      };
-      if (x > 0) go(i - 1);
-      if (x < w - 1) go(i + 1);
-      if (y > 0) go(i - w);
-      if (y < h - 1) go(i + w);
-    }
-    sizes.push(v ? size : -size);
-    touches.push(edge);
-  }
-  let biggest = 0;
-  for (const s of sizes) if (s > biggest) biggest = s;
-  if (!biggest) return null;
-  let area = 0;
-  for (let i = 0; i < n; i++) {
-    const c = comp[i];
-    const s = sizes[c];
-    if (s > 0) label[i] = s >= biggest * 0.15 ? 1 : 0;
-    else label[i] = !touches[c] && -s < biggest * holes ? 1 : 0; // holes inside the object
-    area += label[i];
-  }
-  return area ? label : null;
-}
-
-/**
- * Turn small labels into a doc-size selection canvas: scale up smoothly, then snap the edge to the
- * real picture with a narrow edge refinement at full resolution.
- */
-function labelsToSelection(src, label, sw, sh, E, s) {
-  const a = new Float32Array(sw * sh);
-  for (let i = 0; i < a.length; i++) a[i] = label[i];
-  const small = alphaCanvas(blurArray(a, sw, sh, 0.7), sw, sh);
-  const big = makeCanvas(E.w, E.h);
-  const bg = big.getContext('2d');
-  bg.imageSmoothingEnabled = true;
-  bg.imageSmoothingQuality = 'high';
-  bg.drawImage(small, 0, 0, E.w, E.h);
-  let A = alphaOf(big);
-  for (let i = 0; i < A.length; i++) A[i] = clamp01((A[i] - 0.5) * 3 + 0.5);
+function labelsToSelection(src, label, sw, sh, E, s, { hard = false } = {}) {
   const px = pixelsOf(src, E.x, E.y, E.w, E.h);
-  A = refineAlpha(px, E.w, E.h, A, { radius: Math.max(2, Math.ceil(1.2 / s)), contrast: 25 }).alpha;
+  const A = SC.snapLabels(px, E.w, E.h, label, sw, sh, s, { hard });
   const out = makeCanvas(src.width, src.height);
   out.getContext('2d').drawImage(alphaCanvas(A, E.w, E.h), E.x, E.y);
   return out;
@@ -696,25 +538,24 @@ function shrinkTo(src, E, max = 256) {
 }
 
 /**
- * Object selection inside a rectangle (or a lasso polygon): returns a doc-size selection canvas or
- * null. `poly` (doc coords) marks everything outside it as background.
+ * Object selection inside a rectangle (or a lasso polygon): GrabCut with the outside as background.
+ * Returns a doc-size selection canvas or null. `poly` (doc coords) marks everything outside it as
+ * background; `hard` gives a hard (not anti-aliased) edge.
  */
-export function objectSelect(src, rect, { poly = null } = {}) {
+export function objectSelect(src, rect, { poly = null, hard = false } = {}) {
   const W = src.width;
   const H = src.height;
   const r = { x: Math.max(0, Math.floor(rect.x)), y: Math.max(0, Math.floor(rect.y)) };
   r.w = Math.min(W, Math.ceil(rect.x + rect.w)) - r.x;
   r.h = Math.min(H, Math.ceil(rect.y + rect.h)) - r.y;
   if (r.w < 4 || r.h < 4) return null;
-  const m = Math.round(Math.max(r.w, r.h) * 0.1) + 2;
+  const m = Math.round(Math.max(r.w, r.h) * 0.15) + 2;
   const E = { x: Math.max(0, r.x - m), y: Math.max(0, r.y - m) };
   E.w = Math.min(W, r.x + r.w + m) - E.x;
   E.h = Math.min(H, r.y + r.h + m) - E.y;
-  const { px, sw, sh, s } = shrinkTo(src, E);
+  const { px, sw, sh, s } = shrinkTo(src, E, 256);
   const n = sw * sh;
-  const fixed = new Uint8Array(n);
-  const label = new Uint8Array(n);
-  const band = Math.max(1, Math.round(Math.min(sw, sh) * 0.03));
+  const inside = new Uint8Array(n);
   let polyMask = null;
   if (poly?.length > 2) {
     const c = makeCanvas(sw, sh);
@@ -728,55 +569,41 @@ export function objectSelect(src, rect, { poly = null } = {}) {
   for (let y = 0; y < sh; y++) {
     for (let x = 0; x < sw; x++) {
       const i = y * sw + x;
-      const dx = x / s + E.x;
-      const dy = y / s + E.y;
+      const dx = (x + 0.5) / s + E.x;
+      const dy = (y + 0.5) / s + E.y;
       const inRect = dx >= r.x && dy >= r.y && dx < r.x + r.w && dy < r.y + r.h;
-      if (!inRect || (polyMask && polyMask[i] < 0.5)) fixed[i] = 1;
-      // start: the inside of the box is the object, its rim the background
-      const rim = Math.min(dx - r.x, dy - r.y, r.x + r.w - dx, r.y + r.h - dy) * s < band;
-      label[i] = fixed[i] || rim ? 0 : 1;
+      inside[i] = inRect && (!polyMask || polyMask[i] >= 0.5) ? 1 : 0;
     }
   }
-  // a box drawn right up to the picture edge has nothing outside: its rim stands in for the background
-  let anyFixed = false;
-  for (let i = 0; i < n && !anyFixed; i++) anyFixed = !!fixed[i];
-  if (!anyFixed) for (let i = 0; i < n; i++) if (!label[i]) fixed[i] = 1;
-  segment(px, sw, sh, label, fixed);
-  if (!tidyLabels(label, sw, sh, fixed)) return null;
-  return labelsToSelection(src, label, sw, sh, E, s);
+  const label = SC.objectLabels(px, sw, sh, inside);
+  if (!label) return null;
+  return labelsToSelection(src, label, sw, sh, E, s, { hard });
 }
 
-/** Select Subject: the main object of the picture, judged against the colours around the edges. */
+/**
+ * Object Finder: the object under (x, y) on a small copy of the picture. `cache` (an object kept by
+ * the caller per picture) holds the small copy and the main subject between calls.
+ * Returns {label, sw, sh, s} or null.
+ */
+export function findObjectAt(src, x, y, cache) {
+  if (!cache.small) cache.small = shrinkTo(src, { x: 0, y: 0, w: src.width, h: src.height }, 200);
+  const { px, sw, sh, s } = cache.small;
+  if (cache.subject === undefined) cache.subject = SC.subjectLabels(px, sw, sh);
+  const label = SC.pointLabels(px, sw, sh, (x + 0.5) * s - 0.5, (y + 0.5) * s - 0.5, cache.subject);
+  return label ? { label, sw, sh, s } : null;
+}
+
+/** An object found by findObjectAt as a doc-size selection canvas. */
+export function foundToSelection(src, f, { hard = false } = {}) {
+  return labelsToSelection(src, f.label, f.sw, f.sh, { x: 0, y: 0, w: src.width, h: src.height }, f.s, { hard });
+}
+
+/** Select Subject: the main object of the picture (see selcut.js). */
 export function selectSubject(src) {
-  const W = src.width;
-  const H = src.height;
-  const E = { x: 0, y: 0, w: W, h: H };
-  const { px, sw, sh, s } = shrinkTo(src, E);
-  const n = sw * sh;
-  const fixed = new Uint8Array(n);
-  const label = new Uint8Array(n);
-  const band = Math.max(2, Math.round(Math.max(sw, sh) * 0.05));
-  const side = Math.max(1, Math.round(sw * 0.025));
-  for (let y = 0; y < sh; y++) {
-    for (let x = 0; x < sw; x++) {
-      const i = y * sw + x;
-      // the top and side edges are background for sure; the bottom only probably (people get cut there)
-      if (x < side || y === 0 || x >= sw - side) fixed[i] = 1;
-      const d = Math.min(x, y, sw - 1 - x, sh - 1 - y);
-      label[i] = d < band ? 0 : 1;
-    }
-  }
-  // subjects sit towards the middle: far from it, a pixel needs more colour evidence
-  const prior = new Float32Array(n);
-  for (let y = 0; y < sh; y++) {
-    for (let x = 0; x < sw; x++) {
-      const dx = (x / sw - 0.5) * 2;
-      const dy = (y / sh - 0.45) * 2;
-      prior[y * sw + x] = 2.5 * (dx * dx + dy * dy);
-    }
-  }
-  segment(px, sw, sh, label, fixed, 6, prior);
-  if (!tidyLabels(label, sw, sh, fixed)) return null;
+  const E = { x: 0, y: 0, w: src.width, h: src.height };
+  const { px, sw, sh, s } = shrinkTo(src, E, 220);
+  const label = SC.subjectLabels(px, sw, sh);
+  if (!label) return null;
   return labelsToSelection(src, label, sw, sh, E, s);
 }
 
@@ -826,8 +653,7 @@ export function selectSky(src) {
   for (let i = 0; i < n; i++) area += label[i];
   if (area < n * 0.02) return null;
   // fill specks (birds, wires) inside the sky, but not things in front of it
-  const fixed = new Uint8Array(n);
-  if (!tidyLabels(label, sw, sh, fixed, { holes: 0.004 })) return null;
+  if (!SC.tidy(label, sw, sh, null, { keep: 0.15, holes: 0.004 })) return null;
   return labelsToSelection(src, label, sw, sh, E, s);
 }
 
@@ -989,38 +815,13 @@ export function polyLength(pts) {
 
 // ---------------------------------------------------------------- Select and Mask
 
-/** Box sums of `src` over a (2k+1)² window (edges clamp the window). */
-function boxSum(src, w, h, k) {
-  const tmp = new Float32Array(src.length);
-  const out = new Float32Array(src.length);
-  for (let y = 0; y < h; y++) {
-    const o = y * w;
-    let acc = 0;
-    for (let x = 0; x <= Math.min(w - 1, k); x++) acc += src[o + x];
-    for (let x = 0; x < w; x++) {
-      tmp[o + x] = acc;
-      if (x + k + 1 < w) acc += src[o + x + k + 1];
-      if (x - k >= 0) acc -= src[o + x - k];
-    }
-  }
-  for (let x = 0; x < w; x++) {
-    let acc = 0;
-    for (let y = 0; y <= Math.min(h - 1, k); y++) acc += tmp[y * w + x];
-    for (let y = 0; y < h; y++) {
-      out[y * w + x] = acc;
-      if (y + k + 1 < h) acc += tmp[(y + k + 1) * w + x];
-      if (y - k >= 0) acc -= tmp[(y - k) * w + x];
-    }
-  }
-  return out;
-}
-
 /**
  * Select and Mask's refinement of a selection alpha `a0` against the picture `px`:
- * o = {radius, smart, brush (Uint8Array: extra areas to refine), smooth 0..100, feather px,
- *      contrast 0..100, shift −100..100, decontaminate 0..100}
- * Within `radius` of the edge (and in brushed areas) the alpha is re-estimated from the nearby sure
- * object and sure background colours (alpha = projection of the pixel onto the line between them).
+ * o = {radius, smart, brush (Uint8Array: extra areas to refine, the refine edge brush and Refine
+ *      Hair), mode 'color' | 'object' (refine mode), smooth 0..100, feather px, contrast 0..100,
+ *      shift −100..100, decontaminate 0..100, scale (preview size / full size)}
+ * Within `radius` of the edge and in brushed areas the alpha is estimated again (selcut.js
+ * matteBand: nearby object and background colours, guided by the picture's structure).
  * Returns {alpha, fg} where fg (RGB per pixel, or null) is the estimated object colour for
  * decontamination.
  */
@@ -1044,7 +845,7 @@ export function refineAlpha(px, w, h, a0, o = {}) {
       for (let i = 0; i < n; i++) b[i] = dil[i] !== ero[i] ? 1 : 0;
       return b;
     };
-    let band = bandOf(radius);
+    const band = bandOf(radius);
     if (o.smart && radius >= 3) {
       // hard edges (strong contrast) keep a narrow band, soft ones (hair, fur) the full radius
       const narrow = bandOf(radius / 3);
@@ -1052,51 +853,25 @@ export function refineAlpha(px, w, h, a0, o = {}) {
       for (let i = 0; i < n; i++) if (band[i] && !narrow[i] && G[i] > 0.12) band[i] = 0;
     }
     if (anyBrush) for (let i = 0; i < n; i++) if (brush[i]) band[i] = 1;
-    // pixels to re-estimate; partial pixels left from feathering only get their colour learnt
-    const est = Uint8Array.from(band);
-    for (let i = 0; i < n; i++) if (a[i] > 0.02 && a[i] < 0.98) band[i] = 1;
-    const idx = [];
-    for (let i = 0; i < n; i++) if (band[i]) idx.push(i);
-    if (idx.length) {
-      let k = Math.ceil(radius * 1.5) + 3;
-      if (anyBrush) k = Math.max(k, 14);
-      const sums = [];
-      const chan = new Float32Array(n);
-      for (const want of [1, 0]) {
-        for (let c = 0; c < 4; c++) {
-          for (let i = 0; i < n; i++) {
-            const sure = !band[i] && hard[i] === want;
-            chan[i] = sure ? (c < 3 ? px[i * 4 + c] : 1) : 0;
-          }
-          const s = boxSum(chan, w, h, k);
-          sums.push(Float32Array.from(idx, (i) => s[i]));
-        }
-      }
-      fg = new Uint8ClampedArray(n * 3);
-      for (let i = 0; i < n; i++) {
-        fg[i * 3] = px[i * 4];
-        fg[i * 3 + 1] = px[i * 4 + 1];
-        fg[i * 3 + 2] = px[i * 4 + 2];
-      }
+    // pixels to estimate again; partial pixels left from feathering only get their colour learnt
+    const learn = Uint8Array.from(band);
+    for (let i = 0; i < n; i++) if (a[i] > 0.02 && a[i] < 0.98) learn[i] = 1;
+    let any = false;
+    for (let i = 0; i < n && !any; i++) any = !!learn[i];
+    if (any) {
       const refine = radius > 0 || anyBrush;
-      for (let j = 0; j < idx.length; j++) {
-        const i = idx[j];
-        const nf = sums[3][j];
-        const nb = sums[7][j];
-        if (nf < 0.5) continue;
-        const F = [sums[0][j] / nf, sums[1][j] / nf, sums[2][j] / nf];
-        fg[i * 3] = F[0];
-        fg[i * 3 + 1] = F[1];
-        fg[i * 3 + 2] = F[2];
-        if (!refine || nb < 0.5 || !est[i]) continue;
-        const B = [sums[4][j] / nb, sums[5][j] / nb, sums[6][j] / nb];
-        const fb = [F[0] - B[0], F[1] - B[1], F[2] - B[2]];
-        const den = fb[0] ** 2 + fb[1] ** 2 + fb[2] ** 2;
-        if (den < 300) continue; // object and background look alike here: keep the old edge
-        const p = i * 4;
-        const v = ((px[p] - B[0]) * fb[0] + (px[p + 1] - B[1]) * fb[1] + (px[p + 2] - B[2]) * fb[2]) / den;
-        a[i] = clamp01(v);
+      const est = refine ? band : new Uint8Array(n);
+      // colours are looked for far enough away to reach past the widest brushed stretch
+      let reach = Math.max(radius, 2);
+      if (anyBrush) {
+        const d = distanceTo(brush, w, h, (v) => !v);
+        let mx = 0;
+        for (let i = 0; i < n; i++) if (brush[i] && d[i] > mx) mx = d[i];
+        reach = Math.max(reach, Math.min(mx * 1.6, 300), 10 * (o.scale || 1));
       }
+      const r = SC.matteBand(px, w, h, a, est, { radius: reach, mode: o.mode, learn });
+      a = r.alpha;
+      fg = r.fg;
     }
   }
   const sc = o.scale || 1; // preview runs at a smaller size
@@ -1121,6 +896,11 @@ export function refineAlpha(px, w, h, a0, o = {}) {
     }
   }
   return { alpha: a, fg };
+}
+
+/** Refine Hair: the edge areas that look like hair or fur, as a brush map (1) for refineAlpha. */
+export function hairAreas(px, w, h, a0, R) {
+  return SC.hairAreas(px, w, h, a0, R);
 }
 
 /**

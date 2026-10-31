@@ -21,12 +21,12 @@ import { appMode, setMode } from '../mode.js';
 const MQ = '(max-width: 760px), (pointer: coarse) and (max-height: 540px)';
 const LAND = '(orientation: landscape)';
 const SHEET_PANELS = {
-  'pg-top-left': ['source', 'effectControls', 'quick', 'ai', 'mixer', 'scopes', 'multicam'],
-  'pg-bottom-left': ['project', 'effects', 'markers', 'history'],
+  'pg-top-left': ['source', 'effectControls', 'quick', 'ai', 'mixer', 'clipMixer', 'scopes', 'multicam'],
+  'pg-bottom-left': ['project', 'effects', 'markers', 'history', 'lumetri'],
 };
 const PANEL_NAMES = {
-  source: '소스', effectControls: '조정 (효과 컨트롤)', quick: '빠른 편집', ai: 'AI 편집 (Gemini)', mixer: '오디오 믹서', scopes: '스코프', multicam: '멀티캠',
-  project: '미디어', effects: '효과', markers: '마커', history: '작업 내역',
+  source: '소스', effectControls: '조정 (효과 컨트롤)', quick: '빠른 편집', ai: 'AI 편집 (Gemini)', mixer: '오디오 트랙 믹서', clipMixer: '오디오 클립 믹서', scopes: 'Lumetri 범위', multicam: '멀티캠',
+  project: '미디어', effects: '효과', markers: '마커', history: '작업 내역', lumetri: 'Lumetri 색상',
 };
 
 export const mobileApi = { active: false };
@@ -123,8 +123,19 @@ export function initMobile() {
   document.getElementById('pg-timeline').append(addBtn);
 
   // ---------------------------------------------------------------- sheets
+  // panels other modules add to these groups open as sheets too
+  const bodyOf = (panelId) => [...document.querySelectorAll('.panel-body')].find((b) => b.dataset.panel === panelId) || null;
   function groupOf(panelId) {
-    return groups.find((g) => SHEET_PANELS[g.id].includes(panelId)) || null;
+    const g = bodyOf(panelId)?.closest('.panel-group');
+    return groups.includes(g) ? g : groups.find((x) => SHEET_PANELS[x.id].includes(panelId)) || null;
+  }
+  function panelName(panelId) {
+    if (PANEL_NAMES[panelId]) return PANEL_NAMES[panelId];
+    const g = groupOf(panelId);
+    if (!g) return '';
+    // tabs and panel bodies are added in the same order (panelGroup in common.js)
+    const i = [...g.querySelectorAll(':scope > .panel-body')].findIndex((b) => b.dataset.panel === panelId);
+    return g.querySelectorAll(':scope > .tabs .tab')[i]?.textContent || '';
   }
 
   let opening = false;
@@ -138,7 +149,7 @@ export function initMobile() {
     for (const x of groups) x.classList.toggle('m-open', x === g);
     openGroup = g;
     placeSheets();
-    heads.get(g).textContent = PANEL_NAMES[panelId] || '';
+    heads.get(g).textContent = panelName(panelId);
     document.body.classList.add('m-sheet-open');
     window.dispatchEvent(new Event('resize'));
   }
@@ -199,7 +210,7 @@ export function initMobile() {
   store.on('focus', () => {
     if (!openGroup) return;
     const id = store.ui.focusPanel;
-    if (SHEET_PANELS[openGroup.id].includes(id)) heads.get(openGroup).textContent = PANEL_NAMES[id] || '';
+    if (groupOf(id) === openGroup) heads.get(openGroup).textContent = panelName(id);
   });
 
   // ---------------------------------------------------------------- menu sheets (full menus, more)
@@ -219,7 +230,7 @@ export function initMobile() {
       }
       const row = h(`button.m-row${it.disabled ? '.disabled' : ''}`, { disabled: !!it.disabled },
         it.swatch ? h('span.swatch', { style: { background: it.swatch } }) : null,
-        h('span.m-row-label', it.label), it.checked ? icon('check', 18) : null, it.submenu ? h('span.m-chev', '›') : null);
+        h('span.m-row-label', it.label, it.hint ? h('small.m-row-hint', it.hint) : null), it.checked ? icon('check', 18) : null, it.submenu ? h('span.m-chev', icon('chevRight', 18)) : null);
       row.addEventListener('click', () => {
         if (it.submenu) {
           const sub = typeof it.submenu === 'function' ? it.submenu() : it.submenu;

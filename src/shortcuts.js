@@ -6,7 +6,14 @@ import { commands as c } from './commands.js';
 import { modKey } from './util.js';
 import { menusOpen } from './ui/common.js';
 
-const TOOL_KEYS = { KeyV: 'select', KeyA: 'track', KeyB: 'ripple', KeyN: 'rolling', KeyC: 'razor', KeyY: 'slip', KeyH: 'hand', KeyZ: 'zoom', KeyT: 'type' };
+// Premiere's tool keys: V 선택, A 앞으로 트랙 선택 (Shift+A 뒤로), B 잔물결, N 롤링, R 속도 조정, C 자르기,
+// Y 밀어넣기 (slip), U 밀기 (slide), P 펜, H 손, Z 확대/축소, T 문자
+const TOOL_KEYS = {
+  KeyV: 'select', KeyA: 'track', KeyB: 'ripple', KeyN: 'rolling', KeyR: 'rate', KeyC: 'razor', KeyY: 'slip', KeyU: 'slide', KeyP: 'pen', KeyH: 'hand', KeyZ: 'zoom', KeyT: 'type',
+};
+
+// K held down: J / L step one frame (Premiere's K+J / K+L)
+let kHeld = false;
 
 function isTyping(target) {
   if (!target) return false;
@@ -18,6 +25,12 @@ function isTyping(target) {
 }
 
 export function installShortcuts() {
+  window.addEventListener('keyup', (e) => {
+    if (e.code === 'KeyK') kHeld = false;
+  });
+  window.addEventListener('blur', () => {
+    kHeld = false;
+  });
   window.addEventListener('keydown', (e) => {
     // the photo editor has its own shortcuts
     if (menusOpen() || document.body.classList.contains('photo-mode')) return;
@@ -31,15 +44,18 @@ export function installShortcuts() {
       case 'Space':
         run = mod && shift ? c.playInToOut : c.playStop;
         break;
-      case 'KeyJ': if (!mod) run = c.shuttleBack; break;
+      case 'KeyJ': if (!mod) run = kHeld ? c.stepBack : shift && c.shuttleSlowBack ? c.shuttleSlowBack : c.shuttleBack; break;
       case 'KeyK':
         if (mod) run = shift ? c.addEditAll : c.addEdit;
-        else run = c.shuttleStop;
+        else {
+          kHeld = true;
+          run = c.shuttleStop;
+        }
         break;
       case 'KeyL':
         if (mod && shift) run = c.toggleLoop;
         else if (mod) run = c.linkToggle;
-        else run = c.shuttleForward;
+        else run = kHeld ? c.stepForward : shift && c.shuttleSlowForward ? c.shuttleSlowForward : c.shuttleForward;
         break;
       case 'ArrowLeft':
         run = alt ? c.nudgeLeft : shift ? c.stepBack5 : c.stepBack;
@@ -47,8 +63,8 @@ export function installShortcuts() {
       case 'ArrowRight':
         run = alt ? c.nudgeRight : shift ? c.stepForward5 : c.stepForward;
         break;
-      case 'ArrowUp': run = c.prevEdit; break;
-      case 'ArrowDown': run = c.nextEdit; break;
+      case 'ArrowUp': run = shift ? c.prevEditAll : c.prevEdit; break;
+      case 'ArrowDown': run = shift ? c.nextEditAll : c.nextEdit; break;
       case 'Home': run = c.goStart; break;
       case 'End': run = c.goEnd; break;
       case 'KeyI':
@@ -67,9 +83,14 @@ export function installShortcuts() {
         else run = c.markClip;
         break;
       case 'KeyM':
-        if (mod && shift) run = c.prevMarker;
+        if (mod && alt) run = shift ? c.clearMarkers : c.clearSelectedMarker;
+        else if (mod && shift) run = c.prevMarker;
         else if (mod) run = c.exportMedia;
         else run = shift ? c.nextMarker : c.addMarker;
+        break;
+      case 'KeyG':
+        if (mod) run = shift ? c.ungroup : c.group;
+        else if (!shift && !alt) run = c.audioGain; // 오디오 게인
         break;
       case 'Comma': if (!mod) run = c.insert; break;
       case 'Period': if (!mod) run = c.overwrite; break;
@@ -93,10 +114,12 @@ export function installShortcuts() {
       case 'KeyE':
         if (mod && shift) run = c.exportFrame;
         else if (shift) run = c.toggleEnable;
+        else if (!mod && !alt) run = c.extendEdit;
         break;
       case 'KeyR': if (mod) run = c.speedDuration; break;
       case 'KeyA':
         if (mod) run = shift ? c.deselectAll : c.selectAll;
+        else if (shift && !alt) run = () => store.setTool('trackBack');
         break;
       case 'KeyZ':
         if (mod) run = shift ? c.redo : c.undo;
@@ -109,16 +132,23 @@ export function installShortcuts() {
       case 'KeyF': if (!mod) run = c.matchFrame; break;
       case 'Equal':
       case 'NumpadAdd':
-        run = c.zoomIn;
+        // Shift: expand all tracks · Ctrl: taller video tracks · Alt: taller audio tracks (Premiere)
+        if (shift) run = () => c.trackHeights('all', 1);
+        else if (mod) run = () => c.trackHeights('video', 1);
+        else if (alt) run = () => c.trackHeights('audio', 1);
+        else run = c.zoomIn;
         break;
       case 'Minus':
       case 'NumpadSubtract':
-        run = c.zoomOut;
+        if (shift) run = () => c.trackHeights('all', -1);
+        else if (mod) run = () => c.trackHeights('video', -1);
+        else if (alt) run = () => c.trackHeights('audio', -1);
+        else run = c.zoomOut;
         break;
       case 'Backslash': run = c.zoomFit; break;
       case 'Backquote': run = c.maximizePanel; break;
       case 'F1': run = c.shortcuts; break;
-      case 'Slash': if (shift) run = c.shortcuts; break;
+      case 'Slash': run = shift ? c.shortcuts : c.markSelection; break;
       case 'Escape': run = c.deselectAll; break;
       default:
         // multicam angles: 1-9 (top row or keypad)

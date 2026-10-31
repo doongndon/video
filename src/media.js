@@ -45,7 +45,84 @@ export function mediaStatus(id) {
   const m = store.project.media[id];
   if (!m) return 'missing';
   if (m.kind === 'color' || m.kind === 'adjustment' || m.kind === 'sequence') return 'ready';
+  if (m.subclipOf && m.subclipOf !== id) return mediaStatus(m.subclipOf); // a subclip uses its master's file
   return getRuntime(id).status;
+}
+
+// ---------------------------------------------------------------- 푸티지 해석 (interpret footage)
+
+/**
+ * Interpreted seconds per second of the file. A video can be told to assume another frame rate
+ * (m.interpretFps instead of the file's m.nativeFps): its frames then play at that rate, so
+ * 60 fps footage interpreted as 24 fps runs 2.5x longer (slow motion). Project times of the media
+ * (m.duration, clip in points, source marks) are in interpreted seconds; the file is read at
+ * fileTime(m, t).
+ */
+export function interpretRatio(m) {
+  return m?.interpretFps && m.nativeFps ? m.nativeFps / m.interpretFps : 1;
+}
+
+/** Position in the file for an interpreted media time. */
+export const fileTime = (m, t) => t / interpretRatio(m);
+
+/** Set fps and duration of a media item from its file values and interpretation. */
+function applyInterpretFields(m) {
+  if (m.kind !== 'video' || m.fileDuration == null) return;
+  if (m.interpretFps && m.nativeFps) {
+    m.fps = m.interpretFps;
+    m.duration = m.fileDuration * interpretRatio(m);
+  } else {
+    if (m.nativeFps) m.fps = m.nativeFps;
+    m.duration = m.fileDuration;
+  }
+}
+
+/**
+ * 푸티지 해석: make video items assume a frame rate (null: use the file's own). Clips keep their place
+ * and first frame; a clip that would run past the end of its media is shortened. One undo step.
+ */
+export function setInterpretation(ids, fps) {
+  let n = 0;
+  store.transact('푸티지 해석', () => {
+    for (const id of ids) {
+      const m = store.project.media[id];
+      if (!m || m.kind !== 'video') continue;
+      if (!m.nativeFps && m.fps) m.nativeFps = m.fps;
+      if (m.fileDuration == null && m.duration != null) m.fileDuration = m.duration / interpretRatio(m);
+      if (!m.nativeFps || m.fileDuration == null) continue;
+      const r0 = interpretRatio(m);
+      if (fps && Math.abs(fps - m.nativeFps) > 1e-3) m.interpretFps = fps;
+      else delete m.interpretFps;
+      const r1 = interpretRatio(m);
+      applyInterpretFields(m);
+      const k = r1 / r0;
+      if (m.inPoint != null) m.inPoint *= k;
+      if (m.outPoint != null) m.outPoint *= k;
+      // subclips keep their part of the master (their bounds are master media times)
+      for (const sm of Object.values(store.project.media)) {
+        if (sm.subclipOf !== id) continue;
+        for (const key of ['subIn', 'subOut', 'inPoint', 'outPoint']) if (sm[key] != null) sm[key] *= k;
+        sm.fps = m.fps;
+        if (sm.duration != null) sm.duration *= k;
+      }
+      for (const seq of Object.values(store.project.sequences)) {
+        for (const c of Object.values(seq.clips)) {
+          if (c.mediaId !== id) continue;
+          c.inPoint *= k;
+          if (c.holdTime != null) c.holdTime *= k; // the frozen frame of a frame hold (edit.js)
+          // a plain clip shown at its old length must not run past the media
+          const ramp = c.effects?.some((e) => e.type === 'timeRemap' && e.enabled && (e.params.speed.kf?.length || e.params.speed.value !== 100));
+          if (!ramp && !c.hold) {
+            const avail = (m.duration - c.inPoint) / Math.max(1e-6, c.speed || 1);
+            if (c.duration > avail) c.duration = Math.max(1 / seq.fps, avail);
+          }
+        }
+      }
+      n++;
+    }
+  });
+  mediaEvents.emit('updated', ids[0]);
+  return n;
 }
 
 // ---------------------------------------------------------------- import
@@ -101,6 +178,9 @@ export async function attachFile(id, file) {
   rt.file = file;
   rt.status = 'loading';
   rt.thumb = rt.filmstrip = rt.peaks = rt.image = null;
+  // decoded sound and failures belong to the previous file
+  rt.decodedFallback = rt.audioDecodeError = rt.info = null;
+  rt.captureFailed = false;
   disposeInput(rt);
   mediaEvents.emit('updated', id);
   await probeMedia(id);
@@ -192,6 +272,7 @@ async function probeMedia(id) {
         if (stats.averagePacketRate > 1 && stats.averagePacketRate < 300) info.fps = Math.round(stats.averagePacketRate * 100) / 100;
       }
       if (!info.duration) info.duration = await input.computeDuration();
+      if (info.fps) info.nativeFps = info.fps;
     } catch (err) {
       console.warn('container probe failed, falling back to element metadata', err);
       info.hasAudio = true;
@@ -201,11 +282,14 @@ async function probeMedia(id) {
 
   // write analysed values without creating an undo entry. The project tree may have been replaced
   // (undo/redo) while probing, so look the item up again; keep a copy for later restores.
+  if (info.duration != null && (info.kind || media.kind) === 'video') info.fileDuration = info.duration;
   rt.info = { ...info, analyzed: true };
   const current = store.project.media[id];
   if (current) {
     Object.assign(current, info, { analyzed: true });
     if (info.kind) current.kind = info.kind;
+    // an interpreted frame rate (푸티지 해석) survives re-reading the file
+    applyInterpretFields(current);
   }
   rt.status = 'ready';
   store.changed('media');
@@ -224,6 +308,7 @@ function reapplyAnalysis() {
     if (m && rt.info && !m.analyzed) {
       Object.assign(m, rt.info);
       if (rt.info.kind) m.kind = rt.info.kind;
+      applyInterpretFields(m);
     }
   }
 }
@@ -238,18 +323,67 @@ function enqueueAnalysis(id) {
   queue = queue.then(() => analyse(id)).catch((err) => console.warn('analysis failed', err));
 }
 
+/**
+ * Waveforms and filmstrips of files seen before, kept by persist.js in IndexedDB (keyed by file name,
+ * size and date): opening the project again does not decode every file again.
+ */
+export const analysisCache = { get: async () => null, put: async () => {} };
+const fileSignature = (rt) => (rt.file ? `${rt.file.name}|${rt.file.size}|${rt.file.lastModified}` : null);
+
 async function analyse(id) {
   const media = store.project.media[id];
   const rt = getRuntime(id);
   if (!media || rt.status !== 'ready' || media.kind === 'lut' || media.kind === 'font') return;
+  const sig = fileSignature(rt);
+  const cached = sig ? await analysisCache.get(sig).catch(() => null) : null;
+  const save = { ...(cached || {}) };
+  let dirty = false;
   if (media.kind === 'video') {
-    await buildFilmstrip(id).catch((err) => console.warn('filmstrip failed', err));
+    if (cached?.filmstrip?.length && await restoreFilmstrip(id, cached.filmstrip).catch(() => false)) {
+      // from the cache
+    } else {
+      await buildFilmstrip(id).catch((err) => console.warn('filmstrip failed', err));
+      if (rt.filmstrip?.length && sig) {
+        save.filmstrip = await Promise.all(rt.filmstrip.map(async (f) => ({ t: f.t / interpretRatio(store.project.media[id]), blob: await new Promise((r) => f.canvas.toBlob(r, 'image/jpeg', 0.8)) })));
+        dirty = true;
+      }
+    }
     mediaEvents.emit('updated', id);
   }
-  if (media.hasAudio && media.kind !== 'image') {
-    await buildPeaks(id).catch((err) => console.warn('waveform failed', err));
+  const m2 = store.project.media[id];
+  if (m2?.hasAudio && m2.kind !== 'image') {
+    if (cached?.peaks instanceof Float32Array) setPeaks(id, cached.peaks);
+    else if (cached?.noAudio) {
+      if (rt.info) rt.info.hasAudio = false;
+      m2.hasAudio = false;
+    } else {
+      await buildPeaks(id).catch((err) => console.warn('waveform failed', err));
+      if (rt.peaks) save.peaks = rt.peaks.data;
+      else if (store.project.media[id]?.hasAudio === false) save.noAudio = true;
+      dirty = dirty || !!(save.peaks || save.noAudio);
+    }
     mediaEvents.emit('updated', id);
   }
+  if (sig && dirty) analysisCache.put(sig, { ...save, used: Date.now() }).catch(() => {});
+}
+
+async function restoreFilmstrip(id, frames) {
+  const out = [];
+  for (const f of frames) {
+    if (!f?.blob) continue;
+    const bmp = await createImageBitmap(f.blob);
+    const c = document.createElement('canvas');
+    c.width = bmp.width;
+    c.height = bmp.height;
+    c.getContext('2d').drawImage(bmp, 0, 0);
+    bmp.close?.();
+    out.push({ t: f.t, canvas: c });
+  }
+  if (!out.length) return false;
+  const rt = getRuntime(id);
+  rt.filmstrip = out.map(({ t, canvas }) => ({ canvas, get t() { return t * interpretRatio(store.project.media[id]); } }));
+  rt.thumb = out[Math.min(out.length - 1, Math.floor(out.length * 0.1))].canvas;
+  return true;
 }
 
 function drawThumb(source, w, h) {
@@ -263,7 +397,7 @@ function drawThumb(source, w, h) {
 async function buildFilmstrip(id) {
   const media = store.project.media[id];
   const rt = getRuntime(id);
-  const dur = media.duration || 0;
+  const dur = media.fileDuration ?? media.duration ?? 0; // frames are taken at file times
   const n = Math.max(1, Math.min(FILMSTRIP_FRAMES, Math.ceil(dur)));
   const times = Array.from({ length: n }, (_, i) => (dur * (i + 0.5)) / n);
   const frames = [];
@@ -294,7 +428,8 @@ async function buildFilmstrip(id) {
     el.load();
   }
   if (frames.length) {
-    rt.filmstrip = frames;
+    // frame times are file times; consumers read them in (interpreted) media time
+    rt.filmstrip = frames.map(({ t, canvas }) => ({ canvas, get t() { return t * interpretRatio(store.project.media[id]); } }));
     rt.thumb = frames[Math.min(frames.length - 1, Math.floor(frames.length * 0.1))].canvas;
   }
 }
@@ -310,7 +445,7 @@ function copyCanvas(src) {
 async function buildPeaks(id) {
   const media = store.project.media[id];
   const rt = getRuntime(id);
-  const dur = media.duration || 0;
+  const dur = media.fileDuration ?? media.duration ?? 0; // buckets are per second of the file
   const peaks = new Float32Array(Math.ceil(dur * PEAK_RATE) + 2);
   let done = false;
   try {
@@ -334,7 +469,12 @@ async function buildPeaks(id) {
     if (rt.file.size > 400 * 1024 * 1024) return;
     accumulatePeaks(peaks, await decodeWholeAudio(rt), 0);
   }
-  rt.peaks = { data: peaks, rate: PEAK_RATE };
+  setPeaks(id, peaks);
+}
+
+/** Waveform buckets are per file second; their rate is read per (interpreted) media second. */
+function setPeaks(id, data) {
+  getRuntime(id).peaks = { data, get rate() { return PEAK_RATE / interpretRatio(store.project.media[id]); } };
 }
 
 function accumulatePeaks(peaks, buffer, timestamp) {
@@ -374,10 +514,16 @@ export async function decodeAudioRange(id, start, end, { capture = false, onCapt
     if (!at) return null;
     if (!(await at.canDecode())) throw new Error('audio codec not decodable');
     const first = await at.getFirstTimestamp();
-    const sr = at.sampleRate;
     const chs = Math.min(2, at.numberOfChannels) || 1;
-    const out = new AudioBuffer({ length: Math.max(1, Math.ceil((end - start) * sr)), numberOfChannels: chs, sampleRate: sr });
+    // the decoder may run at another rate than the container says (HE-AAC doubles it): size the
+    // result by the first decoded buffer
+    let out = null;
+    let sr = at.sampleRate;
     for await (const { buffer, timestamp } of new MB.AudioBufferSink(at).buffers(start + first, end + first)) {
+      if (!out) {
+        sr = buffer.sampleRate || sr;
+        out = new AudioBuffer({ length: Math.max(1, Math.ceil((end - start) * sr)), numberOfChannels: chs, sampleRate: sr });
+      }
       const offset = Math.round((timestamp - first - start) * sr);
       for (let c = 0; c < chs; c++) {
         const src = buffer.getChannelData(Math.min(c, buffer.numberOfChannels - 1));
@@ -386,7 +532,7 @@ export async function decodeAudioRange(id, start, end, { capture = false, onCapt
         if (to > from) out.getChannelData(c).set(src.subarray(from, to), offset + from);
       }
     }
-    return out;
+    return out || new AudioBuffer({ length: Math.max(1, Math.ceil((end - start) * sr)), numberOfChannels: chs, sampleRate: sr });
   } catch (err) {
     console.warn('streamed audio decode failed, falling back to decodeAudioData', err);
   }

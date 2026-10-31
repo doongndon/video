@@ -113,6 +113,8 @@ class Store extends Emitter {
   }
 
   redo() {
+    // a drag still in progress becomes its own step first (its 'before' would otherwise predate the redo)
+    if (this.pending) this.commit();
     const entry = this.redoStack.pop();
     if (!entry) return;
     this.undoStack.push({ label: entry.label, snapshot: this.snapshot() });

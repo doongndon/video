@@ -5,6 +5,7 @@ import { store } from './store.js';
 import { playback } from './playback.js';
 import { importFiles, mediaStatus } from './media.js';
 import * as edit from './edit.js';
+import { clamp } from './util.js';
 
 let rec = null;
 
@@ -26,12 +27,28 @@ export async function toggleVoiceover(trackId) {
     return;
   }
   const mime = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4'].find((t) => MediaRecorder.isTypeSupported(t)) || '';
-  const mr = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+  let mr;
+  try {
+    mr = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+  } catch (err) {
+    // the microphone must not stay on when recording cannot start
+    stream.getTracks().forEach((t) => t.stop());
+    store.toast(`녹음을 시작할 수 없습니다: ${err.message || err}`);
+    return;
+  }
+  if (playback.suspended) {
+    stream.getTracks().forEach((t) => t.stop());
+    store.toast('내보내는 중에는 녹음할 수 없습니다');
+    return;
+  }
   const chunks = [];
   mr.addEventListener('dataavailable', (e) => {
     if (e.data.size) chunks.push(e.data);
   });
-  rec = { trackId, mr, chunks, start: store.ui.playhead, stream, mime };
+  const a = playback.ensureAudio();
+  const inLatency = stream.getAudioTracks()[0]?.getSettings?.().latency || 0.01;
+  const latency = (a.ctx.outputLatency || 0) + (a.ctx.baseLatency || 0) + inLatency;
+  rec = { trackId, mr, chunks, start: store.ui.playhead, stream, mime, latency };
   mr.start(250);
   playback.openEnded = true;
   playback.play(1);
@@ -61,7 +78,13 @@ async function stopRecording() {
   const file = new File([blob], `보이스오버 ${store.ui.voCount}.${ext}`, { type: blob.type });
   const [id] = await importFiles([file]);
   if (id && mediaStatus(id) === 'ready') {
-    edit.placeMedia(id, { mode: 'overwrite', start: r.start, aTrackId: r.trackId, video: false });
+    // what was heard left the speakers late and the voice reached the recording late: skip that much
+    // of the take so the words line up with the picture they answered
+    const lag = clamp(r.latency, 0, 0.5);
+    const dur = store.project.media[id]?.duration;
+    const opts = { mode: 'overwrite', start: r.start, aTrackId: r.trackId, video: false };
+    if (lag > 0.001 && dur > lag + 0.1) opts.inPoint = lag;
+    edit.placeMedia(id, opts);
     store.toast('보이스오버를 타임라인에 넣었습니다');
   }
 }

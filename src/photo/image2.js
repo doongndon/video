@@ -5,8 +5,8 @@
 //           for focus), Purge
 //  Layer  ▸ Matting (defringe, remove black/white matte), Arrange ▸ Reverse, Layer Style ▸
 //           Hide/Show All Effects and Create Layers, Stack Mode (median, mean…), Background ↔ layer
-//  File   ▸ Quick Export, Save for Web (GIF, PNG-8, JPG, PNG-24), File Info, Print, Automate ▸
-//           Contact Sheet, Fit Image
+//  File   ▸ Save for Web (GIF, PNG-8, JPG, PNG-24), File Info, Print, Automate ▸ Contact Sheet,
+//           Fit Image (Export As / Quick Export: exportas.js)
 //  View   ▸ Proof Colors (CMYK look), Gamut Warning
 // The menus built in editor.js are extended here.
 
@@ -18,6 +18,10 @@ import { compositeOnto, BLEND_MODES } from './blend.js';
 import { applyToLayer } from './pdialogs.js';
 import { quantize, indexedToImage, gifBlob, png8Blob, PALETTES, DITHERS } from './quantize.js';
 import { gaussF, grayOf, read, toCanvas, lum, cl, hexRgb } from './fxutil.js';
+import { installExportAs } from './exportas.js';
+import { installPanels4 } from './panels4.js';
+import { installTaskbar } from './taskbar.js';
+import { installAutomate } from './automate.js';
 
 // ---------------------------------------------------------------- HDR toning (an adjustment)
 
@@ -332,11 +336,14 @@ export function installImage2(P) {
         l._cache = null;
         l.rev++;
       }
+      // saved selections (alpha channels) turn with the picture and stay document-size
+      doc.channels = (doc.channels || []).map((ch) => (ch.canvas ? { ...ch, canvas: rot(ch.canvas, 0, 0) } : ch));
       doc.width = NW;
       doc.height = NH;
       doc.selection = null;
       doc.rev++;
     });
+    P.emit('channels');
     P.fit();
   };
 
@@ -522,24 +529,31 @@ export function installImage2(P) {
     const data = ls.map((l) => read(P.layerAsDocCanvas(l)).data);
     const n = doc.width * doc.height;
     const out = new ImageData(doc.width, doc.height);
-    const vals = new Float32Array(ls.length);
-    for (let i = 0; i < n; i++) {
-      for (let c = 0; c < 4; c++) {
-        let m = 0;
-        for (let k = 0; k < ls.length; k++) vals[k] = data[k][i * 4 + c];
-        if (c === 3) {
-          m = Math.max(...vals);
-        } else if (kind === 'median') {
-          const s = Array.from(vals).sort((a, b) => a - b);
-          m = s[s.length >> 1];
-        } else if (kind === 'mean') {
-          for (const v of vals) m += v;
-          m /= ls.length;
-        } else if (kind === 'max') m = Math.max(...vals);
-        else if (kind === 'min') m = Math.min(...vals);
-        else if (kind === 'range') m = Math.max(...vals) - Math.min(...vals);
-        out.data[i * 4 + c] = m;
+    const o = out.data;
+    const K = ls.length;
+    // typed arrays only: big stacks are millions of pixels × channels
+    const vals = new Uint8Array(K);
+    for (let j = 0; j < n * 4; j++) {
+      let lo = 255;
+      let hi = 0;
+      let sum = 0;
+      for (let k = 0; k < K; k++) {
+        const v = data[k][j];
+        vals[k] = v;
+        if (v < lo) lo = v;
+        if (v > hi) hi = v;
+        sum += v;
       }
+      let m;
+      if ((j & 3) === 3 || kind === 'max') m = hi;
+      else if (kind === 'min') m = lo;
+      else if (kind === 'range') m = hi - lo;
+      else if (kind === 'mean') m = sum / K;
+      else {
+        vals.sort();
+        m = vals[K >> 1];
+      }
+      o[j] = m;
     }
     const names = { median: '중간값', mean: '평균', max: '최대값', min: '최소값', range: '범위' };
     P.run(`스택 모드: ${names[kind]}`, () => {
@@ -635,12 +649,27 @@ export function installImage2(P) {
   // ---- Layer ▸ Arrange ▸ Reverse
   C.reverseLayers = () => {
     const doc = P.doc;
-    const ls = doc?.selectedLayers || [];
+    // the selected layers that aren't inside another selected group
+    const sel = doc?.selectedLayers || [];
+    const ids = new Set(sel.map((l) => l.id));
+    const ls = sel.filter((l) => !doc.ancestors(l).some((a) => ids.has(a.id)));
     if (ls.length < 2) return toast('순서를 뒤집을 레이어를 두 개 이상 고르세요');
+    if (new Set(ls.map((l) => l.parent || null)).size > 1) return toast('같은 그룹 안에 있는 레이어끼리만 순서를 뒤집을 수 있습니다');
     P.run('레이어 순서 반전', () => {
-      const idx = ls.map((l) => doc.layers.indexOf(l)).sort((a, b) => a - b);
-      const rev = idx.map((i) => doc.layers[i]).reverse();
-      idx.forEach((i, k) => { doc.layers[i] = rev[k]; });
+      // whole blocks move (a group with its contents), so the groups stay intact
+      const blocks = ls.map((l) => doc.block(l.id)).sort((a, b) => a[0] - b[0]);
+      const rev = blocks.map(([a, b]) => doc.layers.slice(a, b + 1)).reverse();
+      const out = [];
+      let bi = 0;
+      for (let i = 0; i < doc.layers.length;) {
+        const blk = blocks[bi];
+        if (blk && i === blk[0]) {
+          out.push(...rev[bi]);
+          i = blk[1] + 1;
+          bi++;
+        } else out.push(doc.layers[i++]);
+      }
+      doc.layers = out;
       doc.rev++;
     });
     return undefined;
@@ -722,13 +751,7 @@ export function installImage2(P) {
     });
   };
 
-  // ---- File ▸ Export
-  C.quickExport = async () => {
-    if (!need()) return;
-    const { exportBlob } = await import('./io.js');
-    const blob = await exportBlob(P.doc, 'png', 1, 1, { fg: P.fg, bg: P.bg });
-    if (await downloadBlob(blob, `${P.doc.name}.png`)) toast(`${P.doc.name}.png 저장`);
-  };
+  // ---- File ▸ Export ▸ Save for Web (Legacy); Quick Export and Export As are in exportas.js
   C.saveForWeb = () => {
     if (!need()) return;
     const doc = P.doc;
@@ -970,6 +993,12 @@ export function installImage2(P) {
   // ---------------------------------------------------------------- menus (after editor.js builds them)
   P.extendMenus = [...(P.extendMenus || []), () => extendMenus(P, C, proof)];
   P.proofState = proof;
+
+  // more of this area's modules (they are installed from here: editor.js calls installImage2)
+  installExportAs(P);
+  installPanels4(P);
+  installTaskbar(P);
+  installAutomate(P);
 }
 
 function extendMenus(P, C, proof) {
@@ -1034,10 +1063,7 @@ function extendMenus(P, C, proof) {
     return items;
   });
   wrap('파일', (items) => {
-    const i = at(items, '내보내기 (PNG');
-    items.splice(i + 1, 0,
-      { label: '빠른 내보내기 (PNG)', key: 'Ctrl+Shift+Alt+\'', disabled: no(), action: () => C.quickExport() },
-      { label: '웹용으로 저장 (GIF · PNG-8 · JPG)…', disabled: no(), action: () => C.saveForWeb() });
+    // File ▸ Export (quick export, export as, save for web…) is built in exportas.js
     const a = items[at(items, '자동화')];
     if (a?.submenu) a.submenu.push({ label: '밀착 인화… (여러 사진을 한 장에)', action: () => C.contactSheet() }, { label: '이미지 맞추기…', disabled: no(), action: () => C.fitImage() });
     items.push('-', { label: '파일 정보…', disabled: no(), action: () => C.fileInfo() }, { label: '인쇄…', key: 'Ctrl+P', disabled: no(), action: () => C.print() });

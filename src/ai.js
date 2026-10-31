@@ -655,8 +655,9 @@ export async function runAssistant(prompt, { history = [], onEvent = () => {}, o
     for (let round = 0; round < maxRounds; round++) {
       const d = await generate({ systemInstruction: { parts: [{ text: SYSTEM }] }, contents, tools: DECLARATIONS, generationConfig: { temperature: 0.2 } }, signal);
       const cand = firstCandidate(d);
-      // keep the model turn exactly as returned (Gemini needs its thought signatures back)
-      contents.push(cand.content);
+      // keep the model turn as returned (Gemini needs its thought signatures back); a turn must say
+      // whose it is, or the next request is refused
+      contents.push(cand.content.role ? cand.content : { ...cand.content, role: 'model' });
       const calls = (cand.content.parts || []).filter((p) => p.functionCall);
       if (!calls.length) return { text: textOf(cand.content) || '(답이 비어 있습니다)', edits };
       const responses = [];

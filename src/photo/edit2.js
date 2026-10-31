@@ -5,6 +5,9 @@ import { h, clamp } from '../util.js';
 import { toast, openModal, formRow } from '../ui/common.js';
 import { makeCanvas, PhotoDoc } from './doc.js';
 import { applyToLayer } from './pdialogs.js';
+import { BLEND_MODES, compositeOnto } from './blend.js';
+import { installCrop2 } from './crop2.js';
+import { installTransform2 } from './transform2.js';
 
 // ---------------------------------------------------------------- shared
 
@@ -50,6 +53,10 @@ const needLayer = (P) => {
   const l = P.doc?.active;
   if (!l || l.kind !== 'raster' || !l.canvas) {
     toast('이미지(일반) 레이어를 고르세요. 글자·모양·고급 개체는 래스터화한 뒤 쓰세요.');
+    return null;
+  }
+  if (l.locked || l.lockPixels) {
+    toast('잠긴 레이어입니다 (레이어 패널에서 잠금 해제)');
     return null;
   }
   return l;
@@ -264,18 +271,22 @@ function contentAwareScale(P) {
         const nh = Math.max(4, Math.round((H * +hp.value) / 100));
         if (nw === W && nh === H) return;
         toast('내용 인식 비율 적용 중…');
-        const d = run(l.canvas.getContext('2d').getImageData(0, 0, W, H).data, W, H, nw, nh);
-        P.run('내용 인식 비율', () => {
-          const c = makeCanvas(nw, nh);
-          c.getContext('2d').putImageData(new ImageData(d, nw, nh), 0, 0);
-          const cx = l.x + W / 2;
-          const cy = l.y + H / 2;
-          l.canvas = c;
-          l.x = Math.round(cx - nw / 2);
-          l.y = Math.round(cy - nh / 2);
-          l._styled = null;
-          doc.touch(l);
-        });
+        // a moment for the message to show before the work starts
+        setTimeout(() => {
+          if (P.doc !== doc || !doc.layers.includes(l)) return;
+          const d = run(l.canvas.getContext('2d').getImageData(0, 0, W, H).data, W, H, nw, nh);
+          P.run('내용 인식 비율', () => {
+            const c = makeCanvas(nw, nh);
+            c.getContext('2d').putImageData(new ImageData(d, nw, nh), 0, 0);
+            const cx = l.x + W / 2;
+            const cy = l.y + H / 2;
+            l.canvas = c;
+            l.x = Math.round(cx - nw / 2);
+            l.y = Math.round(cy - nh / 2);
+            l._styled = null;
+            doc.touch(l);
+          });
+        }, 30);
       },
     }],
   });
@@ -484,7 +495,8 @@ function puppetWarp(P) {
 
 // ---------------------------------------------------------------- fade
 
-const FADE_MODES = [['source-over', '표준'], ['multiply', '곱하기'], ['screen', '스크린'], ['overlay', '오버레이'], ['soft-light', '소프트 라이트'], ['hard-light', '하드 라이트'], ['darken', '어둡게 하기'], ['lighten', '밝게 하기'], ['difference', '차이'], ['color', '색상'], ['luminosity', '광도'], ['hue', '색조'], ['saturation', '채도']];
+// Photoshop's blend modes (dissolve and the computed ones included)
+const FADE_MODES = BLEND_MODES.map(([id, name]) => [id, name]);
 
 function fadeDialog(P) {
   const doc = P.doc;
@@ -501,13 +513,21 @@ function fadeDialog(P) {
   const mode = h('select', FADE_MODES.map(([v, t]) => h('option', { value: v }, t)));
   const apply = () => {
     opn.textContent = `${op.value}%`;
+    const a = +op.value / 100;
     const c = makeCanvas(after.width, after.height);
     const g = c.getContext('2d');
-    g.drawImage(prev.canvas, prev.x - ax, prev.y - ay);
-    g.globalAlpha = +op.value / 100;
-    g.globalCompositeOperation = mode.value;
-    g.drawImage(after, 0, 0);
-    // keep the edited layer's transparency where the edit painted
+    if (mode.value === 'normal') {
+      // part-way between before and after (an erased stroke comes partly back too)
+      g.globalAlpha = 1 - a;
+      g.drawImage(prev.canvas, prev.x - ax, prev.y - ay);
+      g.globalAlpha = a;
+      g.globalCompositeOperation = 'lighter';
+      g.drawImage(after, 0, 0);
+    } else {
+      // the edit blended over what was there before
+      g.drawImage(prev.canvas, prev.x - ax, prev.y - ay);
+      compositeOnto(g, after, 0, 0, mode.value, a);
+    }
     l.canvas = c;
     l._styled = null;
     doc.touch(l);
@@ -534,6 +554,8 @@ function fadeDialog(P) {
 
 export function installEdit2(P) {
   const C = P.cmd;
+  installCrop2(P);
+  installTransform2(P);
   C.contentAwareScale = () => contentAwareScale(P);
   C.puppetWarp = () => puppetWarp(P);
   C.fade = () => fadeDialog(P);

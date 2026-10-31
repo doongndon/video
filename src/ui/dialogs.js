@@ -5,7 +5,8 @@ import { store } from '../store.js';
 import * as edit from '../edit.js';
 import { h, formatTimecode, parseTimecode, formatBytes, downloadBlob, clamp } from '../util.js';
 import { openModal, formRow, toast, showPanel } from './common.js';
-import { FORMATS, EXPORT_PRESETS, exportRange, exportSequence, exportFrame } from '../export.js';
+import { exportRange } from '../export.js';
+import { openExportSettings } from './export-dialog.js';
 import { createSyntheticMedia, detectScenes, mediaStatus, getRuntime, audioSyncOffsets, AUDIO_FILE_FORMATS, audioFileFormatSupport, extractAudioFile, importFiles, prepareSoundCapture } from '../media.js';
 import { clipEnd, clipsOnTrack, videoTracks, audioTracks, isTimed, hasSpeedRamp, sourceOut } from '../model.js';
 import { ASR_MODELS, ASR_LANGUAGES, transcribeSequence, createCaptionTrack, stripSoundTags, splitCues } from '../captions.js';
@@ -182,149 +183,9 @@ export function openSequenceSettings() {
 
 // ---------------------------------------------------------------- export
 
-const SCALE_OPTIONS = [['1', '원본 크기 (100%)'], ['0.75', '75%'], ['0.5', '50% (절반)'], ['0.25', '25%'], ['uhd', '4K 폭 (3840)'], ['gif', '480px 폭 (움짤용)'], ['2', '200% (확대)']];
-
-function resolveScale(v, seq) {
-  if (v === 'uhd') return 3840 / Math.max(seq.width, seq.height > seq.width ? seq.height * (16 / 9) : seq.width);
-  if (v === 'gif') return Math.min(1, 480 / seq.width);
-  return parseFloat(v) || 1;
-}
-
+/** 내보내기 설정 (Ctrl+M): the full Premiere-style export dialog lives in export-dialog.js. */
 export function openExportDialog() {
-  const s = store.seq;
-  const fileName = h('input', { type: 'text', value: (s.name || '시퀀스').replace(/[\\/:*?"<>|]+/g, '_'), style: { width: '100%' } });
-  const format = select(Object.entries(FORMATS).map(([k, f]) => [k, f.label]), 'mp4');
-  const hasInOut = s.inPoint != null || s.outPoint != null;
-  const range = select([['all', '시퀀스 전체'], ['inout', '시작(In)~끝(Out) 표시 구간']], hasInOut ? 'inout' : 'all');
-  const scale = select(SCALE_OPTIONS, '1');
-  const quality = select([['very-high', '매우 높음 (파일 큼)'], ['high', '높음 (권장)'], ['medium', '보통'], ['low', '낮음 (파일 작음)']], 'high');
-  const fps = select([['', `시퀀스와 같게 (${s.fps} fps)`], ['120', '120 fps'], ['60', '60 fps'], ['30', '30 fps'], ['24', '24 fps'], ['15', '15 fps'], ['12', '12 fps'], ['10', '10 fps']], '');
-  const audio = check(true, '소리 포함');
-  const summary = note();
-  const warn = h('div.note.warn');
-  const prog = progressBar();
-  const status = note('');
-  const silentNote = h('div.note.warn', { hidden: true });
-  let presetId = null;
-  const presetBtns = EXPORT_PRESETS.map((p) => {
-    const b = h('button.preset', { onclick: () => applyPreset(p) }, h('b', p.name), h('small', p.desc));
-    b.dataset.id = p.id;
-    return b;
-  });
-  const applyPreset = (p) => {
-    presetId = p.id;
-    format.value = p.format;
-    scale.value = String(p.scale);
-    quality.value = p.quality;
-    fps.value = p.fps ? String(p.fps) : '';
-    update();
-  };
-  const update = () => {
-    const r = exportRange(range.value);
-    const f = FORMATS[format.value];
-    const sc = resolveScale(scale.value, s);
-    const ow = Math.round((s.width * sc) / 2) * 2;
-    const oh = Math.round((s.height * sc) / 2) * 2;
-    const rate = parseFloat(fps.value) || s.fps;
-    for (const b of presetBtns) b.classList.toggle('on', b.dataset.id === presetId);
-    summary.textContent = f.still
-      ? `재생헤드 위치(${formatTimecode(store.ui.playhead, s.fps)})의 화면 한 장을 PNG로 저장합니다 (${s.width}×${s.height}).`
-      : `${f.audioOnly ? '소리만' : `${ow}×${oh} · ${rate} fps`} · ${formatTimecode(r.start, s.fps)} ~ ${formatTimecode(r.end, s.fps)} (${(r.end - r.start).toFixed(1)}초)`;
-    scale.disabled = !!(f.audioOnly || f.still);
-    quality.disabled = !!(f.audioOnly || f.still || f.gif);
-    fps.disabled = !!(f.audioOnly || f.still);
-    audio.box.disabled = !!(f.audioOnly || f.still || f.gif);
-    range.disabled = !!f.still;
-    const warnings = [];
-    if (presetId === 'shorts' && s.width >= s.height) warnings.push('지금 시퀀스는 가로 화면입니다. 세로(9:16) 영상이 필요하면 먼저 시퀀스 ▸ 자동 리프레임으로 세로 시퀀스를 만드세요.');
-    if (f.gif && (r.end - r.start) * rate > 600) warnings.push('GIF가 600프레임을 넘습니다. 시간이 오래 걸리고 파일이 매우 커질 수 있습니다. 시작/끝 표시로 구간을 줄이는 것을 권장합니다.');
-    if (sc > 1.01 && !f.audioOnly && !f.still) warnings.push('원본보다 크게 내보내면 화질이 좋아지지는 않습니다 (확대만 됩니다).');
-    // frames are not invented: above the footage's own rate a video frame is simply shown again
-    const srcFps = Math.max(0, ...Object.values(s.clips).filter((c) => c.kind === 'video').map((c) => store.project.media[c.mediaId]?.fps || 0));
-    if (!f.audioOnly && !f.still && srcFps && rate > srcFps + 0.5) warnings.push(`영상 원본이 ${Math.round(srcFps)} fps라 ${rate} fps로 내보내도 영상 장면은 같은 프레임이 반복됩니다. 글자·스티커·애니메이션 움직임만 ${rate} fps로 그려집니다.`);
-    warn.textContent = warnings.join(' ');
-    warn.hidden = !warnings.length;
-  };
-  for (const el of [format, range, scale, quality, fps]) el.addEventListener('change', () => { presetId = null; update(); });
-  update();
-  const token = { cancelled: false };
-  let running = false;
-  const modal = openModal({
-    title: '내보내기',
-    width: '640px',
-    body: [
-      h('div.preset-grid', presetBtns),
-      formRow('파일 이름', fileName),
-      formRow('형식', format),
-      formRow('범위', range),
-      formRow('출력 크기', scale),
-      formRow('화질', quality),
-      formRow('프레임 속도', fps),
-      formRow('', audio.el),
-      summary,
-      warn,
-      prog.el,
-      status,
-      silentNote,
-      note('이 탭 안에서 프레임 단위로 렌더링합니다(WebCodecs). 끝날 때까지 탭을 열어 두세요. MP4(H.264)는 Chrome/Edge를 권장합니다.'),
-    ],
-    buttons: [
-      { label: '닫기', action: () => { token.cancelled = true; } },
-      {
-        label: '내보내기', primary: true, action: async () => {
-          if (running) return false;
-          running = true;
-          token.cancelled = false;
-          silentNote.hidden = true;
-          // must run inside the tap: phone browsers only start audio/media from a gesture
-          if (audio.box.checked) prepareSoundCapture();
-          const f = FORMATS[format.value];
-          const btn = modal.footer.querySelector('button.primary');
-          btn.disabled = true;
-          try {
-            let result;
-            if (f.still) {
-              status.textContent = '프레임을 그리는 중…';
-              result = { blob: await exportFrame(), info: 'PNG' };
-            } else {
-              result = await exportSequence({
-                format: format.value,
-                scale: resolveScale(scale.value, s),
-                quality: quality.value,
-                fps: parseFloat(fps.value) || null,
-                range: exportRange(range.value),
-                audio: audio.box.checked,
-                token,
-                onProgress: (p, label) => {
-                  prog.set(p);
-                  status.textContent = label || '';
-                },
-              });
-            }
-            const name = `${fileName.value || 'export'}.${f.ext}`;
-            prog.set(1);
-            status.textContent = `${name} 완성 · ${formatBytes(result.blob.size)} · ${result.info}`;
-            if (result.warnings?.length) {
-              silentNote.textContent = `소리를 풀지 못해 이 파일은 소리 없이 들어갔습니다 — ${result.warnings.join(' / ')}. 다른 브라우저(예: Chrome)에서 내보내면 소리가 들어갈 수 있습니다.`;
-              silentNote.hidden = false;
-            }
-            if (await downloadBlob(result.blob, name)) {
-              status.textContent = `${name} 저장 · ${formatBytes(result.blob.size)} · ${result.info}`;
-              toast(result.warnings?.length ? `${name} 파일을 내보냈습니다 (일부 소리 빠짐)` : `${name} 파일을 내보냈습니다`);
-            }
-          } catch (err) {
-            console.error(err);
-            status.textContent = `내보내기 실패: ${err.message || err}`;
-          } finally {
-            running = false;
-            btn.disabled = false;
-          }
-          return false;
-        },
-      },
-    ],
-    onClose: () => { token.cancelled = true; },
-  });
+  return openExportSettings();
 }
 
 // ---------------------------------------------------------------- new items
@@ -336,6 +197,293 @@ export function openColorMatteDialog() {
     title: '새 색상 매트 (단색 배경)',
     body: [formRow('색상', color), formRow('이름', name), note('프로젝트 패널에 단색 항목이 생깁니다. 타임라인으로 끌어다 배경으로 쓰세요.')],
     buttons: [{ label: '취소' }, { label: '확인', primary: true, action: () => createSyntheticMedia('color', { name: name.value || '색상 매트', color: color.value }) }],
+  });
+}
+
+/** 새 시퀀스: name, frame size and frame rate (파일 ▸ 새로 만들기 ▸ 시퀀스). */
+export function openNewSequenceDialog() {
+  const s = store.seq;
+  const name = h('input', { type: 'text', value: `시퀀스 ${String(Object.keys(store.project.sequences).length + 1).padStart(2, '0')}`, style: { width: '100%' } });
+  const cur = `${s.width}x${s.height}`;
+  const preset = select(FRAME_PRESETS, FRAME_PRESETS.some(([v]) => v === cur) ? cur : 'custom');
+  const w = h('input', { type: 'number', value: s.width, min: 16, max: 8192, step: 2, style: { width: '86px' } });
+  const hh = h('input', { type: 'number', value: s.height, min: 16, max: 8192, step: 2, style: { width: '86px' } });
+  const fps = h('select', RATES.map((r) => h('option', { value: r, selected: Math.abs(r - s.fps) < 0.01 }, `${r} fps`)));
+  preset.addEventListener('change', () => {
+    if (preset.value === 'custom') return;
+    const [a, b] = preset.value.split('x').map(Number);
+    w.value = a;
+    hh.value = b;
+  });
+  openModal({
+    title: '새 시퀀스',
+    body: [formRow('시퀀스 이름', name), formRow('화면 크기', preset), formRow('', w, '×', hh), formRow('초당 프레임', fps),
+      note('새 시퀀스는 프로젝트 패널에 항목으로 생기고 타임라인에 탭으로 열립니다. 클립에 맞춘 시퀀스가 필요하면 프로젝트 패널에서 영상을 오른쪽 클릭 ▸ 클립에서 새 시퀀스를 쓰세요.')],
+    buttons: [{ label: '취소' }, {
+      label: '확인', primary: true, action: () => {
+        const W = clamp(Math.round((parseInt(w.value, 10) || 1920) / 2) * 2, 16, 8192);
+        const H = clamp(Math.round((parseInt(hh.value, 10) || 1080) / 2) * 2, 16, 8192);
+        edit.newSequence({ name: name.value.trim() || undefined, width: W, height: H, fps: parseFloat(fps.value) });
+      },
+    }],
+  });
+}
+
+/** Shared progress UI for items that are rendered into a file (바 및 톤, 카운트다운 리더). */
+function generateWithProgress(modal, run) {
+  const btn = modal.footer.querySelector('button.primary');
+  const prog = modal.prog;
+  btn.disabled = true;
+  modal.status.textContent = '만드는 중…';
+  return run({ onProgress: prog.set, token: modal.token }).then((id) => {
+    prog.set(1);
+    if (id) {
+      store.ui.selectedMedia = new Set([id]);
+      store.emit('reveal-media', id);
+    }
+    modal.close();
+  }).catch((err) => {
+    console.error(err);
+    modal.status.textContent = `만들지 못했습니다: ${err.message || err}`;
+    btn.disabled = false;
+  });
+}
+
+const sizeRow = (s) => {
+  const w = h('input', { type: 'number', value: s.width, min: 16, max: 8192, step: 2, style: { width: '86px' } });
+  const hh = h('input', { type: 'number', value: s.height, min: 16, max: 8192, step: 2, style: { width: '86px' } });
+  const fps = h('select', RATES.map((r) => h('option', { value: r, selected: Math.abs(r - s.fps) < 0.01 }, `${r} fps`)));
+  const read = () => ({
+    width: clamp(Math.round((parseInt(w.value, 10) || s.width) / 2) * 2, 16, 8192),
+    height: clamp(Math.round((parseInt(hh.value, 10) || s.height) / 2) * 2, 16, 8192),
+    fps: parseFloat(fps.value) || s.fps,
+  });
+  return { rows: [formRow('화면 크기', w, '×', hh), formRow('시간 기준', fps)], read };
+};
+
+/** 바 및 톤: SMPTE colour bars with a 1 kHz reference tone. */
+export function openBarsToneDialog() {
+  const s = store.seq;
+  const size = sizeRow(s);
+  const dur = h('input', { type: 'number', value: 10, min: 1, max: 120, step: 1, style: { width: '72px' } });
+  const level = select([['-12', '-12 dB'], ['-18', '-18 dB (EBU)'], ['-20', '-20 dB (SMPTE, 기본)']], '-20');
+  const prog = progressBar();
+  const status = note('');
+  const token = { cancelled: false };
+  const modal = openModal({
+    title: '새 바 및 톤',
+    body: [...size.rows, formRow('길이', dur, '초'), formRow('톤 레벨', level), prog.el, status,
+      note('SMPTE HD 컬러 바와 1 kHz 기준음을 영상 파일로 만들어 프로젝트에 넣습니다. 방송·납품용 영상 앞머리나 모니터·소리 크기 맞추기에 씁니다.')],
+    buttons: [
+      { label: '취소', action: () => { token.cancelled = true; } },
+      {
+        label: '만들기', primary: true, action: async () => {
+          const o = size.read();
+          await generateWithProgress(Object.assign(modal, { prog, status, token }), async (cb) => {
+            const { createBarsAndTone } = await import('../generated-media.js');
+            return createBarsAndTone({ ...o, duration: clamp(parseFloat(dur.value) || 10, 1, 120), toneDb: parseFloat(level.value), ...cb });
+          });
+          return false;
+        },
+      },
+    ],
+    onClose: () => { token.cancelled = true; },
+  });
+}
+
+/** 범용 카운트다운 리더: 8 → 2 countdown with a clock wipe and cue blips. */
+export async function openCountingLeaderDialog() {
+  const { LEADER_DEFAULTS, LEADER_SECONDS } = await import('../generated-media.js');
+  const s = store.seq;
+  const size = sizeRow(s);
+  const colour = (v) => h('input', { type: 'color', value: v });
+  const c = {
+    wipe: colour(LEADER_DEFAULTS.wipe), background: colour(LEADER_DEFAULTS.background), line: colour(LEADER_DEFAULTS.line),
+    target: colour(LEADER_DEFAULTS.target), numeral: colour(LEADER_DEFAULTS.numeral),
+  };
+  const blipOut = check(LEADER_DEFAULTS.blipOut, '끝에서 큐 블립');
+  const blipOn2 = check(LEADER_DEFAULTS.blipOn2, '2에서 큐 블립 (2-pop)');
+  const blipEvery = check(LEADER_DEFAULTS.blipEverySecond, '매 초 시작마다 큐 블립');
+  const prog = progressBar();
+  const status = note('');
+  const token = { cancelled: false };
+  const modal = openModal({
+    title: '범용 카운트다운 리더 설정',
+    width: '520px',
+    body: [...size.rows,
+      formRow('와이프 색상', c.wipe), formRow('배경 색상', c.background), formRow('선 색상', c.line), formRow('대상 색상', c.target), formRow('숫자 색상', c.numeral),
+      formRow('', h('div', { style: { display: 'grid', gap: '4px' } }, blipOut.el, blipOn2.el, blipEvery.el)),
+      prog.el, status,
+      note(`8에서 2까지 1초마다 숫자가 바뀌고 시계 방향 와이프가 돕니다. 뒤에 검은 화면 2초가 붙어 모두 ${LEADER_SECONDS}초입니다. 큐 블립은 1 kHz 짧은 삐 소리입니다.`)],
+    buttons: [
+      { label: '취소', action: () => { token.cancelled = true; } },
+      {
+        label: '확인', primary: true, action: async () => {
+          const o = { ...size.read(), wipe: c.wipe.value, background: c.background.value, line: c.line.value, target: c.target.value, numeral: c.numeral.value,
+            blipOut: blipOut.box.checked, blipOn2: blipOn2.box.checked, blipEverySecond: blipEvery.box.checked };
+          await generateWithProgress(Object.assign(modal, { prog, status, token }), async (cb) => {
+            const { createCountingLeader } = await import('../generated-media.js');
+            return createCountingLeader({ ...o, ...cb });
+          });
+          return false;
+        },
+      },
+    ],
+    onClose: () => { token.cancelled = true; },
+  });
+}
+
+// ---------------------------------------------------------------- roll / crawl
+
+/**
+ * 롤/크롤 옵션 (Premiere's 반응형 디자인 - 시간 ▸ 롤): make the selected text (or any picture) clips
+ * roll up the screen or crawl sideways by keyframing their position.
+ */
+export async function openRollCrawlDialog() {
+  const [{ applyRollCrawl, clearRollCrawl }, { Compositor }, { playback }, { evalEffect }] = await Promise.all([
+    import('../features.js'), import('../compositor.js'), import('../playback.js'), import('../model.js'),
+  ]);
+  const s = store.seq;
+  const clips = store.selectedClips().filter((c) => c.kind !== 'audio' && c.kind !== 'adjustment' && c.effects.some((e) => e.type === 'motion'));
+  if (!clips.length) {
+    toast('롤이나 크롤을 넣을 텍스트(또는 그림) 클립을 타임라인에서 선택하세요');
+    return;
+  }
+  const prev = clips[0].roll || {};
+  const dir = select([['still', '정지 (움직임 없음)'], ['roll', '롤 (아래에서 위로)'], ['crawlLeft', '크롤 왼쪽 (오른쪽에서 왼쪽으로)'], ['crawlRight', '크롤 오른쪽 (왼쪽에서 오른쪽으로)']], prev.dir || 'roll');
+  const startOff = check(prev.startOff ?? true, '화면 밖에서 시작');
+  const endOff = check(prev.endOff ?? true, '화면 밖에서 끝');
+  const tc = (v) => h('input', { type: 'text', value: formatTimecode(v || 0, s.fps), style: { width: '110px' } });
+  const pre = tc(prev.preRoll);
+  const post = tc(prev.postRoll);
+  const easeIn = tc(prev.easeIn);
+  const easeOut = tc(prev.easeOut);
+  const timing = h('div', { style: { display: 'grid', gap: '6px' } },
+    formRow('사전 롤', pre), formRow('감속', easeIn), formRow('가속', easeOut), formRow('사후 롤', post));
+  const sync = () => {
+    const still = dir.value === 'still';
+    for (const el of [startOff.box, endOff.box, pre, post, easeIn, easeOut]) el.disabled = still;
+  };
+  dir.addEventListener('change', sync);
+  sync();
+  const comp = new Compositor();
+  // the clip's box in sequence px where it rests (a roll already on it is undone first)
+  const measure = (c) => {
+    const t = clamp(store.ui.playhead, c.start, clipEnd(c) - 1e-3);
+    const q = comp.clipQuad(store.seq, c, t, playback.provider);
+    const motion = c.effects.find((e) => e.type === 'motion');
+    if (!q || !motion) return null;
+    const cur = evalEffect(motion, t - c.start);
+    const restOf = (k) => (motion.params[k].kf?.length ? (motion.params[k].restValue ?? motion.params[k].value) : motion.params[k].value);
+    const dx = restOf('posX') - cur.posX;
+    const dy = restOf('posY') - cur.posY;
+    const xs = q.map((p) => p[0] + dx);
+    const ys = q.map((p) => p[1] + dy);
+    return { x0: Math.min(...xs), x1: Math.max(...xs), y0: Math.min(...ys), y1: Math.max(...ys) };
+  };
+  const secs = (el) => Math.max(0, parseTimecode(el.value, s.fps) || 0);
+  openModal({
+    title: `롤/크롤 옵션${clips.length > 1 ? ` (클립 ${clips.length}개)` : ''}`,
+    width: '460px',
+    body: [
+      formRow('유형', dir),
+      formRow('', h('div', { style: { display: 'grid', gap: '4px' } }, startOff.el, endOff.el)),
+      timing,
+      note('클립 길이 동안 위치에 키프레임을 넣어 움직입니다 (엔딩 크레딧, 뉴스 자막 띠 등). 사전 롤·사후 롤은 움직이기 전·후에 멈춰 있는 시간, 감속·가속은 천천히 출발하고 멈추는 시간입니다. 시간은 타임코드나 프레임 수로 넣으세요.'),
+    ],
+    buttons: [
+      { label: '취소' },
+      {
+        label: '확인', primary: true, action: () => {
+          const ids = clips.map((c) => c.id);
+          if (dir.value === 'still') {
+            clearRollCrawl(ids);
+            return true;
+          }
+          const n = applyRollCrawl(ids, {
+            dir: dir.value, startOff: startOff.box.checked, endOff: endOff.box.checked,
+            preRoll: secs(pre), postRoll: secs(post), easeIn: secs(easeIn), easeOut: secs(easeOut),
+          }, measure);
+          if (!n) toast('움직일 수 있는 클립이 없습니다');
+          return true;
+        },
+      },
+    ],
+  });
+}
+
+// ---------------------------------------------------------------- subclips
+
+/** 하위 클립 만들기: name and trim restriction for a new subclip of the given range. */
+export async function openSubclipDialog(sourceId, { inPoint, outPoint } = {}) {
+  const { createSubclip, nextSubclipName, itemRange } = await import('../subclips.js');
+  const m = store.project.media[sourceId];
+  if (!m) return;
+  const masterId = m.subclipOf || sourceId;
+  const fps = m.fps || store.seq.fps;
+  const [lo, hi] = itemRange(m);
+  const a = clamp(inPoint ?? lo, lo, hi);
+  const b = clamp(outPoint ?? hi, a, hi);
+  const name = h('input', { type: 'text', value: nextSubclipName(masterId), style: { width: '100%' } });
+  const restrict = check(true, '하위 클립 경계로 트리밍 제한');
+  openModal({
+    title: '하위 클립 만들기',
+    body: [formRow('이름', name), formRow('', restrict.el),
+      note(`${formatTimecode(a, fps)} ~ ${formatTimecode(b, fps)} (길이 ${formatTimecode(b - a, fps)}) 구간이 프로젝트 패널에 새 항목으로 생깁니다. 원본 파일을 그대로 쓰므로 용량이 늘지 않습니다.`),
+      a === lo && b === hi && !m.subclipOf ? h('div.note.warn', '시작·끝 표시가 없어 클립 전체로 만듭니다. 소스 모니터에서 I·O로 구간을 표시하면 그 부분만 하위 클립이 됩니다.') : null],
+    buttons: [{ label: '취소' }, {
+      label: '확인', primary: true, action: () => {
+        const id = createSubclip(sourceId, { name: name.value.trim() || undefined, inPoint: a, outPoint: b, restrict: restrict.box.checked });
+        if (!id) {
+          toast('하위 클립을 만들 수 없습니다 (구간이 너무 짧습니다)');
+          return false;
+        }
+        store.ui.selectedMedia = new Set([id]);
+        store.emit('reveal-media', id);
+        toast(`하위 클립 "${store.project.media[id].name}"을(를) 만들었습니다`);
+        return true;
+      },
+    }],
+  });
+}
+
+/** 하위 클립 편집: start / end in master time and the trim restriction. */
+export async function openEditSubclipDialog(id) {
+  const { editSubclip } = await import('../subclips.js');
+  const m = store.project.media[id];
+  const master = m?.subclipOf ? store.project.media[m.subclipOf] : null;
+  if (!master) {
+    toast('하위 클립을 고르세요');
+    return;
+  }
+  const fps = master.fps || store.seq.fps;
+  const name = h('input', { type: 'text', value: m.name, style: { width: '100%' } });
+  const start = h('input', { type: 'text', value: formatTimecode(m.subIn, fps), style: { width: '120px' } });
+  const end = h('input', { type: 'text', value: formatTimecode(m.subOut, fps), style: { width: '120px' } });
+  const restrict = check(m.restrictTrims !== false, '하위 클립 경계로 트리밍 제한');
+  openModal({
+    title: '하위 클립 편집',
+    body: [
+      formRow('이름', name),
+      formRow('마스터 클립', h('span', `${master.name} · ${formatTimecode(0, fps)} ~ ${formatTimecode(master.duration || 0, fps)}`)),
+      formRow('시작', start), formRow('끝', end), formRow('', restrict.el),
+      note('바꾼 구간은 앞으로 타임라인에 놓는 클립부터 적용됩니다. 이미 놓은 클립은 그대로입니다.'),
+    ],
+    buttons: [{ label: '취소' }, {
+      label: '확인', primary: true, action: () => {
+        const a = parseTimecode(start.value, fps);
+        const b = parseTimecode(end.value, fps);
+        if (a == null || b == null || b <= a) {
+          toast('시작이 끝보다 앞이어야 합니다');
+          return false;
+        }
+        if (!editSubclip(id, { name: name.value.trim() || m.name, subIn: a, subOut: b, restrict: restrict.box.checked })) {
+          toast('구간이 너무 짧습니다');
+          return false;
+        }
+        return true;
+      },
+    }],
   });
 }
 
@@ -394,10 +542,11 @@ export function openSceneDetectDialog() {
 
 // ---------------------------------------------------------------- captions (SRT)
 
+/** "HH:MM:SS,mmm" (SRT) or "[HH:]MM:SS.mmm" (WebVTT, hours optional); fractions of any length. */
 function parseSrtTime(s) {
-  const m = /(\d+):(\d+):(\d+)[,.](\d+)/.exec(s);
+  const m = /(?:(\d+):)?(\d+):(\d+)[,.](\d+)/.exec(s);
   if (!m) return null;
-  return +m[1] * 3600 + +m[2] * 60 + +m[3] + +m[4] / 1000;
+  return (+m[1] || 0) * 3600 + +m[2] * 60 + +m[3] + +m[4] / 10 ** m[4].length;
 }
 
 function fmtSrtTime(t) {
@@ -1065,6 +1214,12 @@ export const SHORTCUTS = [
     ['타임라인 확대 / 축소', '= / -'], ['시퀀스 전체 보기', '\\'], ['스냅 켜기/끄기', 'S'], ['패널 크게 보기', '`'],
     ['가져오기', 'Ctrl+I'], ['프로젝트 열기', 'Ctrl+O'], ['내보내기', 'Ctrl+M'], ['현재 프레임 저장', 'Ctrl+Shift+E'], ['프로젝트 파일로 저장', 'Ctrl+S'],
     ['타임라인: 시간 이동 / 트랙 이동 / 확대', '휠 / Shift+휠 / Alt 또는 Ctrl+휠'], ['단축키 보기', 'F1 / ?'],
+  ]],
+  ['모니터', [
+    ['하위 클립 만들기 (소스 모니터 · 프로젝트)', 'Ctrl+U'], ['포스터 프레임 설정 (소스 모니터)', 'Shift+P'],
+    ['눈금자 표시 (프로그램 모니터)', 'Ctrl+R'], ['안내선 표시 / 프로그램 모니터에서 스냅', 'Ctrl+; / Ctrl+Shift+;'],
+    ['프로그램 모니터 확대 / 화면 이동', 'Ctrl+휠 / 휠 · 손 도구(H) 끌기 · 가운데 버튼 끌기'], ['프로그램 모니터에서 프레임 이동', '휠 (맞추기 보기에서)'],
+    ['마스크 점 추가 / 곡선·모서리 바꾸기 / 점 지우기', 'Ctrl+클릭 / Alt+클릭 / Delete'],
   ]],
 ];
 

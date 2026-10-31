@@ -4,7 +4,7 @@
 // The result is a list of passes drawn in order, each with its own blend mode, so a multiply shadow
 // really multiplies with the layers below.
 
-import { hexRgb, boxGradient, paintPattern } from './resources.js';
+import { hexRgb, paintGradient, paintPattern } from './resources.js';
 
 export const FX_KEYS = ['dropShadow', 'innerShadow', 'outerGlow', 'innerGlow', 'bevel', 'satin', 'colorOverlay', 'gradientOverlay', 'patternOverlay', 'stroke'];
 
@@ -20,12 +20,110 @@ export const FX_DEFAULTS = {
   outerGlow: { enabled: true, color: '#ffffbe', blend: 'screen', opacity: 0.75, spread: 0, size: 5 },
   innerGlow: { enabled: true, color: '#ffffbe', blend: 'screen', opacity: 0.75, source: 'edge', choke: 0, size: 5 },
   bevel: { enabled: true, style: 'inner bevel', technique: 'smooth', depth: 100, direction: 'up', size: 5, soften: 0, angle: 120, altitude: 30, highlightColor: '#ffffff', highlightBlend: 'screen', highlightOpacity: 0.75, shadowColor: '#000000', shadowBlend: 'multiply', shadowOpacity: 0.75 },
-  satin: { enabled: true, color: '#000000', blend: 'multiply', opacity: 0.5, angle: 19, distance: 11, size: 14, invert: true },
+  satin: { enabled: true, color: '#000000', blend: 'multiply', opacity: 0.5, angle: 19, distance: 11, size: 14, invert: true, contour: 'gaussian' },
   colorOverlay: { enabled: true, color: '#ff0000', blend: 'normal', opacity: 1 },
   gradientOverlay: { enabled: true, gradient: { stops: [{ pos: 0, color: '#000000' }, { pos: 1, color: '#ffffff' }] }, blend: 'normal', opacity: 1, style: 'linear', angle: 90, scale: 100, reverse: false },
   patternOverlay: { enabled: true, pattern: 'checker', blend: 'normal', opacity: 1, scale: 100 },
   stroke: { enabled: true, size: 3, position: 'outside', blend: 'normal', opacity: 1, fillType: 'color', color: '#000000', gradient: { stops: [{ pos: 0, color: '#000000' }, { pos: 1, color: '#ffffff' }] }, angle: 90 },
 };
+
+/** Effects that can be added more than once (Photoshop's "+" button): fx[k], fx[`${k}_2`], … top first. */
+export const MULTI_FX = ['dropShadow', 'innerShadow', 'colorOverlay', 'gradientOverlay', 'stroke'];
+
+/** The effect type of an fx key ('stroke_2' → 'stroke'). */
+export const baseKey = (key) => String(key).replace(/_\d+$/, '');
+
+/** Keys of every instance of effect type k present in fx, top (drawn last) first. */
+export function instanceKeys(fx, k) {
+  if (!fx) return [];
+  const out = [];
+  for (const key of Object.keys(fx)) if (baseKey(key) === k && fx[key] && typeof fx[key] === 'object') out.push(key);
+  const n = (key) => (key === k ? 1 : +key.slice(k.length + 1));
+  return out.sort((a, b) => n(a) - n(b));
+}
+
+/** Write a list of instances of effect type k back into fx (renumbered: k, k_2, k_3 …). */
+export function setInstances(fx, k, list) {
+  for (const key of instanceKeys(fx, k)) delete fx[key];
+  list.forEach((v, i) => { fx[i ? `${k}_${i + 1}` : k] = v; });
+  return fx;
+}
+
+/**
+ * Contours (윤곽선): how an effect's density runs from the edge outward (shadows, glows, satin) or how a
+ * bevel's surface rises. [id, Korean name, curve 0..1 → 0..1].
+ */
+export const CONTOURS = [
+  ['linear', '선형', (x) => x],
+  ['cone', '원뿔', (x) => 1 - Math.abs(2 * x - 1)],
+  ['coneInv', '원뿔 - 반전', (x) => Math.abs(2 * x - 1)],
+  ['gaussian', '가우스', (x) => x * x * (3 - 2 * x)],
+  ['halfRound', '반원', (x) => Math.sqrt(Math.max(0, 1 - (1 - x) * (1 - x)))],
+  ['ring', '고리', (x) => 0.5 - 0.5 * Math.cos(2 * Math.PI * x)],
+  ['ringDouble', '고리 - 이중', (x) => 0.5 - 0.5 * Math.cos(4 * Math.PI * x)],
+  ['sawtooth', '톱니 모양', (x) => (x >= 1 ? 1 : (x * 3) % 1)],
+  ['coveDeep', '만 - 깊게', (x) => x * x * x],
+  ['coveShallow', '만 - 얕게', (x) => x * Math.sqrt(x)],
+  ['rollingSlope', '구르는 경사 - 내림차순', (x) => Math.min(1, Math.max(0, 1 - x + 0.18 * Math.sin(4 * Math.PI * x)))],
+  ['roundedSteps', '둥근 계단', (x) => { const n = 4; const f = Math.min(n - 1e-6, x * n); const i = Math.floor(f); const t = f - i; return Math.min(1, (i + t * t * (3 - 2 * t)) / (n - 1) * ((n - 1) / n) + (x >= 1 ? 1 / n : 0)); }],
+  ['log', '로그', (x) => Math.log(1 + 9 * x) / Math.LN10],
+];
+const CONTOUR_FN = Object.fromEntries(CONTOURS.map(([id, , f]) => [id, f]));
+/** A 256-entry lookup table for a contour (null for the linear one). */
+const contourLuts = new Map();
+export function contourLut(id) {
+  if (!id || id === 'linear' || !CONTOUR_FN[id]) return null;
+  if (!contourLuts.has(id)) {
+    const f = CONTOUR_FN[id];
+    const lut = new Float32Array(257);
+    for (let i = 0; i <= 256; i++) lut[i] = Math.min(1, Math.max(0, f(i / 256)));
+    contourLuts.set(id, lut);
+  }
+  return contourLuts.get(id);
+}
+/** Map an array of 0..1 values through a contour (in place). */
+function applyContour(arr, id) {
+  const lut = contourLut(id);
+  if (!lut) return arr;
+  for (let i = 0; i < arr.length; i++) {
+    const v = arr[i];
+    if (v > 0) arr[i] = lut[Math.min(256, Math.round(v * 256))];
+  }
+  return arr;
+}
+
+// ---------------------------------------------------------------- defaults the user saved (기본값으로 만들기)
+
+const USER_DEFAULTS_KEY = 'montage.photo.fxDefaults';
+let userDefaults = null;
+const loadUserDefaults = () => {
+  if (userDefaults) return userDefaults;
+  try {
+    userDefaults = JSON.parse(localStorage.getItem(USER_DEFAULTS_KEY) || '{}') || {};
+  } catch {
+    userDefaults = {};
+  }
+  return userDefaults;
+};
+/** Settings for a new effect of type k: the user's saved defaults, else Photoshop's. */
+export function fxDefaults(k) {
+  const u = loadUserDefaults()[k];
+  return structuredClone({ ...FX_DEFAULTS[k], ...(u || {}), enabled: true });
+}
+/** Remember settings as the defaults for effect type k (null: back to the factory settings). */
+export function saveFxDefaults(k, v) {
+  const all = loadUserDefaults();
+  if (v) {
+    const { enabled, ...rest } = v;
+    void enabled;
+    all[k] = structuredClone(rest);
+  } else delete all[k];
+  try {
+    localStorage.setItem(USER_DEFAULTS_KEY, JSON.stringify(all));
+  } catch { /* storage unavailable */ }
+}
+/** Photoshop's built-in settings for effect type k. */
+export const factoryFx = (k) => structuredClone({ ...FX_DEFAULTS[k], enabled: true });
 
 /** Bring older style data ({shadow, glow, stroke}) to the current shape. */
 export function normalizeFx(fx) {
@@ -41,18 +139,60 @@ export function normalizeFx(fx) {
 
 export function hasFx(fx) {
   if (!fx || fx.disabled) return false;
-  return FX_KEYS.some((k) => fx[k]?.enabled);
+  for (const key in fx) {
+    const v = fx[key];
+    if (v && typeof v === 'object' && v.enabled && FX_DEFAULTS[baseKey(key)]) return true;
+  }
+  return false;
+}
+
+/** Whether any effect follows the document's global light (전체 조명 사용). */
+export function fxUsesGlobalLight(fx) {
+  if (!fx) return false;
+  if (fx.useGlobalLight) return true;
+  for (const key in fx) if (fx[key]?.enabled && fx[key].useGlobalLight) return true;
+  return false;
+}
+
+/** Whether an effect is laid out on the document (gradient not aligned with the layer, pattern not linked). */
+export function fxDocAnchored(fx) {
+  if (!hasFx(fx)) return false;
+  for (const key in fx) {
+    const e = fx[key];
+    if (!e?.enabled) continue;
+    const k = baseKey(key);
+    if ((k === 'gradientOverlay' || (k === 'stroke' && e.fillType === 'gradient')) && e.align === false) return true;
+    if ((k === 'patternOverlay' || (k === 'stroke' && e.fillType === 'pattern')) && e.link === false) return true;
+  }
+  return false;
+}
+
+/** Layer ▸ Layer Style ▸ Scale Effects: sizes and distances times k. */
+export function scaleFx(fx, k) {
+  const out = structuredClone(fx || {});
+  const SIZE = ['size', 'distance', 'soften'];
+  for (const key of Object.keys(out)) {
+    const e = out[key];
+    if (!e || typeof e !== 'object' || !FX_DEFAULTS[baseKey(key)]) continue;
+    for (const f of SIZE) if (typeof e[f] === 'number') e[f] = Math.max(f === 'size' && baseKey(key) === 'stroke' ? 1 : 0, Math.round(e[f] * k * 10) / 10);
+    if (baseKey(key) === 'patternOverlay' && typeof e.scale === 'number') e.scale = Math.max(1, Math.min(1000, Math.round(e.scale * k)));
+  }
+  return out;
 }
 
 /** How far effects reach outside the layer pixels. */
 export function fxPad(fx) {
   if (!hasFx(fx)) return 0;
   let p = 0;
-  const on = (k) => fx[k]?.enabled && fx[k];
-  if (on('dropShadow')) p = Math.max(p, fx.dropShadow.distance + fx.dropShadow.size * 1.5);
-  if (on('outerGlow')) p = Math.max(p, fx.outerGlow.size * 1.5);
-  if (on('stroke') && fx.stroke.position !== 'inside') p = Math.max(p, fx.stroke.size);
-  if (on('bevel') && fx.bevel.style !== 'inner bevel') p = Math.max(p, fx.bevel.size * 1.2);
+  for (const key of Object.keys(fx)) {
+    const e = fx[key];
+    if (!e?.enabled) continue;
+    const k = baseKey(key);
+    if (k === 'dropShadow') p = Math.max(p, (e.distance || 0) + (e.size || 0) * 1.5);
+    if (k === 'outerGlow') p = Math.max(p, (e.size || 0) * 1.5);
+    if (k === 'stroke' && e.position !== 'inside') p = Math.max(p, e.size || 0);
+    if (k === 'bevel' && e.style !== 'inner bevel') p = Math.max(p, (e.size || 0) * 1.2);
+  }
   return Math.ceil(p) + 3;
 }
 
@@ -153,6 +293,44 @@ function shift(src, w, h, dx, dy, fill = 0) {
 
 const clamp01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v);
 
+/** The box of the pixels that aren't transparent in an alpha array, or null. */
+function alphaBounds(A, w, h) {
+  let x0 = w;
+  let y0 = h;
+  let x1 = -1;
+  let y1 = -1;
+  for (let y = 0; y < h; y++) {
+    const o = y * w;
+    for (let x = 0; x < w; x++) {
+      if (A[o + x] <= 0) continue;
+      if (x < x0) x0 = x;
+      if (x > x1) x1 = x;
+      if (y < y0) y0 = y;
+      y1 = y;
+    }
+  }
+  return x1 < 0 ? null : { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 };
+}
+
+/**
+ * A w×h canvas with a gradient laid out on `box` (Photoshop's gradient overlay / gradient stroke: angle,
+ * scale and style measured on the layer's bounds or the document), continuing past the box.
+ */
+function gradientIn(w, h, box, gr, { angle = 90, scale = 100, style = 'linear', reverse = false, fg, bg } = {}) {
+  const a = (angle * Math.PI) / 180;
+  const cx = box.x + box.w / 2;
+  const cy = box.y + box.h / 2;
+  const k = scale / 100;
+  if (style === 'linear' || style === 'reflected' || style === 'diamond' || style === 'angle') {
+    const half = ((Math.abs(Math.cos(a)) * box.w + Math.abs(Math.sin(a)) * box.h) / 2) * k;
+    const from = style === 'linear' ? { x: cx - Math.cos(a) * half, y: cy + Math.sin(a) * half } : { x: cx, y: cy };
+    const to = { x: cx + Math.cos(a) * half, y: cy - Math.sin(a) * half };
+    return paintGradient(w, h, gr, from, to, { style, reverse, fg, bg });
+  }
+  const r = (Math.hypot(box.w, box.h) / 2) * k;
+  return paintGradient(w, h, gr, { x: cx, y: cy }, { x: cx + r * Math.cos(a), y: cy - r * Math.sin(a) }, { style, reverse, fg, bg });
+}
+
 /** An RGBA canvas from a colour and an alpha array. */
 function colourCanvas(w, h, color, alpha, opacity = 1) {
   const c = document.createElement('canvas');
@@ -190,17 +368,31 @@ function maskedCanvas(img, alpha, opacity = 1) {
 
 /**
  * Build the passes for a layer: `body` is the layer pixels with its mask applied (canvas already padded
- * by fxPad), `fill` the fill opacity. Returns [{ canvas, blend, opacity, kind }] in drawing order;
- * kind 'body' marks the pass that takes the layer's own blend mode.
+ * by fxPad). Returns [{ canvas, blend, opacity, kind, interior? }] in drawing order: shadows and glows
+ * behind the layer, the 'body' pass (the layer itself: it takes the layer's blend mode and fill
+ * opacity), the effects painted inside the layer (interior: overlays, satin, inner glow and shadow),
+ * then strokes and the bevel. Several instances of one effect: the first listed is drawn on top.
+ * `globalAngle` / `globalAltitude`: the document's light for effects that use it (전체 조명 사용).
+ * `docBox`: the document's rectangle in body coordinates (gradients with 레이어에 정렬 off span it);
+ * `origin`: where the layer's own origin is in body coordinates (patterns linked with the layer start there).
  */
-export function stylePasses(body, fx, { fill = 1, fg = '#000000', bg = '#ffffff', globalAngle = null } = {}) {
+export function stylePasses(body, fx, { fg = '#000000', bg = '#ffffff', globalAngle = null, globalAltitude = null, docBox = null, origin = null } = {}) {
   const w = body.width;
   const h = body.height;
   const bd = body.getContext('2d').getImageData(0, 0, w, h).data;
   const A = new Float32Array(w * h);
   for (let i = 0; i < A.length; i++) A[i] = bd[i * 4 + 3] / 255;
-  const on = (k) => (fx[k]?.enabled ? fx[k] : null);
-  const ang = (e) => (((globalAngle ?? e.angle ?? 120) * Math.PI) / 180);
+  // Photoshop lays gradients out on the layer's bounds (레이어에 정렬) or on the document
+  let layerBox = null;
+  const getLayerBox = () => (layerBox ||= alphaBounds(A, w, h) || { x: 0, y: 0, w, h });
+  const gradBox = (e) => (e.align === false && docBox ? docBox : getLayerBox());
+  const gradient = (e, opts) => gradientIn(w, h, gradBox(e), e.gradient, { fg, bg, ...opts });
+  // patterns start at the layer's origin (레이어에 연결) or the document's
+  const patternAt = (e) => (e.link === false && docBox ? [docBox.x, docBox.y] : origin ? [origin.x, origin.y] : [0, 0]);
+  // enabled instances of an effect type, bottom (drawn first) to top
+  const list = (k) => instanceKeys(fx, k).map((key) => fx[key]).filter((e) => e?.enabled).reverse();
+  const global = (e) => (fx.useGlobalLight || e.useGlobalLight) && globalAngle != null;
+  const ang = (e) => (((global(e) ? globalAngle : e.angle ?? 120) * Math.PI) / 180);
   let dOut = null;
   let dIn = null;
   const getOut = () => (dOut ||= distanceTo(A, w, h, (a) => a >= 0.5));
@@ -208,8 +400,7 @@ export function stylePasses(body, fx, { fill = 1, fg = '#000000', bg = '#ffffff'
   const passes = [];
 
   // ---- below the layer
-  const ds = on('dropShadow');
-  if (ds) {
+  for (const ds of list('dropShadow')) {
     const spread = clamp01((ds.spread || 0) / 100);
     let base = A;
     if (spread > 0) {
@@ -219,72 +410,93 @@ export function stylePasses(body, fx, { fill = 1, fg = '#000000', bg = '#ffffff'
       for (let i = 0; i < A.length; i++) base[i] = Math.max(A[i], clamp01(r + 0.5 - o[i]));
     }
     let s = blurArray(base, w, h, (ds.size * (1 - spread)) / 2);
+    if (s === base) s = Float32Array.from(base);
+    applyContour(s, ds.contour);
     s = shift(s, w, h, -Math.cos(ang(ds)) * ds.distance, Math.sin(ang(ds)) * ds.distance);
+    if (ds.noise) addNoise(s, ds.noise / 100);
     if (ds.knockout !== false) for (let i = 0; i < s.length; i++) s[i] *= 1 - A[i];
     passes.push({ canvas: colourCanvas(w, h, ds.color, s), blend: ds.blend, opacity: ds.opacity, kind: 'dropShadow' });
   }
-  const og = on('outerGlow');
-  if (og) {
+  for (const og of list('outerGlow')) {
     const spread = clamp01((og.spread || 0) / 100);
     const o = getOut();
     const r = og.size * spread;
     const base = new Float32Array(A.length);
     for (let i = 0; i < A.length; i++) base[i] = Math.max(A[i], clamp01(r + 0.5 - o[i]));
-    let s = blurArray(base, w, h, (og.size * (1 - spread)) / 2 || 0.5);
-    // the glow fades out over its size
-    s = s.map((v, i) => clamp01(v * 1.6) * (o[i] <= og.size + 1 ? 1 : 0));
+    let s;
+    if (og.technique === 'precise') {
+      // 정확하게: the glow keeps the shape's corners, fading evenly over its size
+      s = new Float32Array(A.length);
+      for (let i = 0; i < A.length; i++) s[i] = Math.max(A[i], og.size > 0 ? clamp01(1 - Math.max(0, o[i] - r) / Math.max(0.5, og.size - r)) : 0);
+    } else {
+      s = blurArray(base, w, h, (og.size * (1 - spread)) / 2 || 0.5);
+      // the glow fades out over its size
+      s = s.map((v, i) => clamp01(v * 1.6) * (o[i] <= og.size + 1 ? 1 : 0));
+    }
+    if (og.contour && og.contour !== 'linear') {
+      // the contour runs over the glow's range (범위): 0 at its outer end, 1 at the layer's edge
+      const range = clamp01((og.range ?? 50) / 100) || 0.01;
+      const lut = contourLut(og.contour);
+      for (let i = 0; i < s.length; i++) {
+        if (A[i] >= 0.999 || s[i] <= 0) continue;
+        const t = clamp01(1 - (1 - s[i]) / (range * 2));
+        s[i] = lut[Math.round(t * 256)] * (s[i] > 0 ? 1 : 0);
+      }
+    }
+    if (og.noise) addNoise(s, og.noise / 100);
     passes.push({ canvas: colourCanvas(w, h, og.color, s), blend: og.blend, opacity: og.opacity, kind: 'outerGlow' });
   }
 
-  // ---- the layer and what is painted inside it
-  const inner = document.createElement('canvas');
-  inner.width = w;
-  inner.height = h;
-  const ig = inner.getContext('2d');
-  ig.globalAlpha = fill;
-  ig.drawImage(body, 0, 0);
-  ig.globalAlpha = 1;
-  const interior = [];
-  const po = on('patternOverlay');
-  if (po) interior.push([maskedCanvas(paintPattern(w, h, po.pattern, po.scale), A), po.blend, po.opacity]);
-  const go = on('gradientOverlay');
-  if (go) interior.push([maskedCanvas(boxGradient(w, h, go.gradient, { angle: go.angle, scale: go.scale, style: go.style, reverse: go.reverse, fg, bg }), A), go.blend, go.opacity]);
-  const co = on('colorOverlay');
-  if (co) interior.push([colourCanvas(w, h, co.color, A), co.blend, co.opacity]);
-  const sa = on('satin');
-  if (sa) {
-    const a = ang(sa);
+  // ---- the layer itself
+  passes.push({ canvas: body, blend: null, opacity: 1, kind: 'body' });
+
+  // ---- painted inside the layer (bottom to top: pattern, gradient, colour, satin, inner glow, inner shadow)
+  for (const po of list('patternOverlay')) passes.push({ canvas: maskedCanvas(paintPattern(w, h, po.pattern, po.scale, ...patternAt(po)), A), blend: po.blend, opacity: po.opacity, kind: 'patternOverlay', interior: true });
+  for (const go of list('gradientOverlay')) passes.push({ canvas: maskedCanvas(gradient(go, { angle: go.angle ?? 90, scale: go.scale ?? 100, style: go.style || 'linear', reverse: !!go.reverse }), A), blend: go.blend, opacity: go.opacity, kind: 'gradientOverlay', interior: true });
+  for (const co of list('colorOverlay')) passes.push({ canvas: colourCanvas(w, h, co.color, A), blend: co.blend, opacity: co.opacity, kind: 'colorOverlay', interior: true });
+  for (const sa of list('satin')) {
+    const a = ((sa.angle ?? 19) * Math.PI) / 180;
     const dx = Math.cos(a) * sa.distance;
     const dy = -Math.sin(a) * sa.distance;
     const s1 = blurArray(shift(A, w, h, dx, dy), w, h, sa.size / 2);
     const s2 = blurArray(shift(A, w, h, -dx, -dy), w, h, sa.size / 2);
+    const lut = contourLut(sa.contour);
     const s = new Float32Array(A.length);
     for (let i = 0; i < s.length; i++) {
-      const v = Math.abs(s1[i] - s2[i]);
+      let v = Math.abs(s1[i] - s2[i]);
+      if (lut) v = lut[Math.round(clamp01(v) * 256)];
       s[i] = (sa.invert ? 1 - v : v) * A[i];
     }
-    interior.push([colourCanvas(w, h, sa.color, s), sa.blend, sa.opacity]);
+    passes.push({ canvas: colourCanvas(w, h, sa.color, s), blend: sa.blend, opacity: sa.opacity, kind: 'satin', interior: true });
   }
-  const igl = on('innerGlow');
-  if (igl) {
+  for (const igl of list('innerGlow')) {
     const choke = clamp01((igl.choke || 0) / 100);
     let edge;
-    if (choke > 0) {
+    if (igl.technique === 'precise') {
       const di = getIn();
       const r = igl.size * choke;
       edge = new Float32Array(A.length);
-      for (let i = 0; i < A.length; i++) edge[i] = clamp01(r + 0.5 - di[i]);
-    } else edge = A.map((v) => 1 - v);
-    edge = blurArray(edge, w, h, (igl.size * (1 - choke)) / 2 || 0.5);
+      for (let i = 0; i < A.length; i++) edge[i] = igl.size > 0 ? clamp01(1 - Math.max(0, di[i] - r) / Math.max(0.5, igl.size - r)) / 1.6 : 0;
+    } else {
+      if (choke > 0) {
+        const di = getIn();
+        const r = igl.size * choke;
+        edge = new Float32Array(A.length);
+        for (let i = 0; i < A.length; i++) edge[i] = clamp01(r + 0.5 - di[i]);
+      } else edge = A.map((v) => 1 - v);
+      edge = blurArray(edge, w, h, (igl.size * (1 - choke)) / 2 || 0.5);
+    }
+    const lut = contourLut(igl.contour);
     const s = new Float32Array(A.length);
     for (let i = 0; i < s.length; i++) {
-      const e = clamp01(edge[i] * 1.6);
+      let e = clamp01(edge[i] * 1.6);
+      if (lut) e = lut[Math.round(e * 256)];
       s[i] = (igl.source === 'center' ? 1 - e : e) * A[i];
     }
-    interior.push([colourCanvas(w, h, igl.color, s), igl.blend, igl.opacity]);
+    if (igl.noise) addNoise(s, igl.noise / 100);
+    passes.push({ canvas: colourCanvas(w, h, igl.color, s), blend: igl.blend, opacity: igl.opacity, kind: 'innerGlow', interior: true });
   }
-  const ish = on('innerShadow');
-  if (ish) {
+  for (const ish of list('innerShadow')) {
     const inv = A.map((v) => 1 - v);
     const choke = clamp01((ish.choke || 0) / 100);
     let base = inv;
@@ -295,14 +507,16 @@ export function stylePasses(body, fx, { fill = 1, fg = '#000000', bg = '#ffffff'
     }
     let s = shift(base, w, h, -Math.cos(ang(ish)) * ish.distance, Math.sin(ang(ish)) * ish.distance, 1);
     s = blurArray(s, w, h, (ish.size * (1 - choke)) / 2);
+    applyContour(s, ish.contour);
+    if (ish.noise) addNoise(s, ish.noise / 100);
     for (let i = 0; i < s.length; i++) s[i] *= A[i];
-    interior.push([colourCanvas(w, h, ish.color, s), ish.blend, ish.opacity]);
+    passes.push({ canvas: colourCanvas(w, h, ish.color, s), blend: ish.blend, opacity: ish.opacity, kind: 'innerShadow', interior: true });
   }
-  passes.push({ canvas: inner, blend: null, opacity: 1, kind: 'body', interior });
 
-  // ---- above: stroke, then bevel
-  const st = on('stroke');
-  if (st && st.size > 0) {
+  // ---- above: strokes, then the bevel
+  let strokeA = null;
+  for (const st of list('stroke')) {
+    if (!(st.size > 0)) continue;
     const s = new Float32Array(A.length);
     const size = st.size;
     const pos = st.position || 'outside';
@@ -315,14 +529,43 @@ export function stylePasses(body, fx, { fill = 1, fg = '#000000', bg = '#ffffff'
       const ero = din ? clamp01(din[i] - ri + 0.5) * (A[i] >= 0.5 ? 1 : 0) : A[i];
       s[i] = pos === 'outside' ? Math.max(0, dil - A[i]) : pos === 'inside' ? Math.max(0, A[i] - ero) : Math.max(0, dil - ero);
     }
-    const canvas = st.fillType === 'gradient'
-      ? maskedCanvas(boxGradient(w, h, st.gradient, { angle: st.angle ?? 90, fg, bg }), s)
-      : colourCanvas(w, h, st.color, s);
+    strokeA = s;
+    let canvas;
+    if (st.fillType === 'gradient') canvas = maskedCanvas(gradient(st, { angle: st.angle ?? 90, style: st.style || 'linear', scale: st.scale ?? 100, reverse: !!st.reverse }), s);
+    else if (st.fillType === 'pattern') canvas = maskedCanvas(paintPattern(w, h, st.pattern || 'checker', st.scale ?? 100, ...patternAt(st)), s);
+    else canvas = colourCanvas(w, h, st.color, s);
     passes.push({ canvas, blend: st.blend, opacity: st.opacity, kind: 'stroke' });
   }
-  const bv = on('bevel');
-  if (bv && bv.size > 0) passes.push(...bevelPasses(A, w, h, bv, getIn, getOut, ang(bv)));
+  for (const bv of list('bevel')) {
+    if (!(bv.size > 0)) continue;
+    const alt = global(bv) && globalAltitude != null ? globalAltitude : bv.altitude ?? 30;
+    if (bv.style === 'stroke emboss') {
+      // 획 엠보스: an inner bevel on the stroke's band (nothing without a stroke)
+      if (!strokeA) continue;
+      const U = new Float32Array(A.length);
+      for (let i = 0; i < A.length; i++) U[i] = Math.max(A[i], strokeA[i]);
+      let uIn = null;
+      const getUIn = () => (uIn ||= distanceTo(U, w, h, (a) => a < 0.5));
+      const ps = bevelPasses(U, w, h, { ...bv, style: 'inner bevel', altitude: alt }, getUIn, getOut, ang(bv));
+      for (const p of ps) maskedCanvas(p.canvas, strokeA);
+      passes.push(...ps);
+      continue;
+    }
+    passes.push(...bevelPasses(A, w, h, { ...bv, altitude: alt }, getIn, getOut, ang(bv)));
+  }
   return passes;
+}
+
+/** Photoshop's noise slider: random dots knocked out of an effect (deterministic per pixel). */
+function addNoise(s, amount) {
+  if (!(amount > 0)) return;
+  let seed = 12345;
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] <= 0) continue;
+    seed = (Math.imul(seed, 1103515245) + 12345) | 0;
+    const r = ((seed >>> 8) & 0xffff) / 65535;
+    s[i] *= 1 - amount * r;
+  }
 }
 
 function bevelPasses(A, w, h, bv, getIn, getOut, a) {
@@ -331,11 +574,16 @@ function bevelPasses(A, w, h, bv, getIn, getOut, a) {
   const Hm = new Float32Array(A.length);
   const din = style === 'outer bevel' ? null : getIn();
   const dout = style === 'inner bevel' ? null : getOut();
+  // the surface profile; the 윤곽선 (contour) option reshapes it
+  const shape = bv.contourOn && bv.profile && bv.profile !== 'linear' ? contourLut(bv.profile) : null;
   const prof = (t) => {
     t = clamp01(t);
-    if (bv.technique === 'chisel hard') return t;
-    if (bv.technique === 'chisel soft') return Math.sqrt(t);
-    return 1 - (1 - t) * (1 - t);
+    let v;
+    if (bv.technique === 'chisel hard') v = t;
+    else if (bv.technique === 'chisel soft') v = Math.sqrt(t);
+    else v = 1 - (1 - t) * (1 - t);
+    if (shape) v = shape[Math.round(clamp01(v) * 256)];
+    return v;
   };
   for (let i = 0; i < A.length; i++) {
     const inside = A[i] >= 0.5;
@@ -371,6 +619,11 @@ function bevelPasses(A, w, h, bv, getIn, getOut, a) {
       if (shade > flat) hi[i] = clamp01((shade - flat) / (1 - flat)) * region;
       else sh[i] = clamp01((flat - shade) / Math.max(0.05, flat)) * region;
     }
+  }
+  // 광택 윤곽선 (gloss contour): reshapes how light and shade fall off
+  if (bv.gloss && bv.gloss !== 'linear') {
+    applyContour(hi, bv.gloss);
+    applyContour(sh, bv.gloss);
   }
   return [
     { canvas: colourCanvas(w, h, bv.shadowColor || '#000000', sh), blend: bv.shadowBlend || 'multiply', opacity: bv.shadowOpacity ?? 0.75, kind: 'bevelShadow' },

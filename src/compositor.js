@@ -2,25 +2,29 @@
 // The same code path is used for the Program monitor and for export so what you see is what
 // you get. Frame sources come from a "provider" (live <video> elements for preview, exact
 // decoded frames for export).
+//
+// Effects run in clip order on a "stage" canvas holding the clip's source at about its on-screen
+// resolution (processStage); CSS-filter effects are batched, the rest draw in place or come from
+// PIXEL_FX renderers (fx-video.js, WebGL2 via glfx.js). Per-effect masks (masks.js) blend each
+// effect with its input; masks on 불투명도 cut out the clip. Transitions come from transitionPlan
+// (clip options / pieces) or shader plans (transitions2.js) that receive both clips rendered alone.
 
 import { clipsOnTrack, clipEnd, evalEffect, mediaTimeAt, transitionsOnTrack, videoTracks, getTrack } from './model.js';
 import { ensureFont, fontSheetPending, isGenericFamily } from './fonts.js';
 import { EFFECTS } from './effects.js';
 import { clamp } from './util.js';
+import { PIXEL_FX, TRANSITION_PLANS } from './fx-registry.js';
+import { blurCanvas } from './fx-video.js';
+import './transitions2.js';
+import { MaskRaster, activeMasks } from './masks.js';
+import { applyLumetri, applyLut, curveTable } from './lumetri.js';
+
+export { PIXEL_FX, TRANSITION_PLANS, curveTable };
 
 const FILTER_FX = new Set(['brightnessContrast', 'basicColor', 'hueShift', 'gaussianBlur', 'blackWhite', 'sepia', 'invert', 'sharpen', 'findEdges', 'posterize']);
 const TRANSFORM_FX = new Set(['dropShadow', 'hFlip', 'vFlip', 'cameraShake', 'stabilize', 'trackMatte', 'blurFill']);
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
-/**
- * Pixel effects registered by other modules (effect type → renderer). A renderer gets
- * { canvas, ctx, w, h, v, ps, clip, tl, t } — the clip's frame so far at processing scale ps
- * (stage pixels per source pixel, so pixel sizes in v must be multiplied by ps) — and either draws
- * into ctx in place or returns a new canvas of the same size.
- */
-export const PIXEL_FX = {};
-/** Transitions registered by other modules: type → (p, dir, W, H) → a plan like transitionPlan's. */
-export const TRANSITION_PLANS = {};
 let svgRoot = null;
 
 /** Smooth pseudo-random wobble in [-1, 1] (sum of incommensurate sines). */
@@ -150,8 +154,6 @@ function hexToRgb(hex) {
   return m ? [parseInt(m[1], 16), parseInt(m[2], 16), parseInt(m[3], 16)] : [0, 0, 0];
 }
 
-const shared = { keyer: null, grader: null };
-
 export class Compositor {
   constructor({ onAsyncReady } = {}) {
     this.stageA = makeCanvas();
@@ -170,6 +172,13 @@ export class Compositor {
     this.matteB = makeCanvas();
     this.maskCanvas = makeCanvas();
     this.stabCache = new Map();
+    this.masks = new MaskRaster();
+    this.preMask = makeCanvas();
+    this.layerA = makeCanvas();
+    this.layerB = makeCanvas();
+    this.layerEmpty = makeCanvas();
+    this.textMaskLayer = makeCanvas();
+    this.background = null;
   }
 
   /**
@@ -181,6 +190,7 @@ export class Compositor {
   render(ctx, seq, t, provider, { scale = 1, background, angle = null } = {}) {
     // undefined background = the sequence's own colour; null = transparent (nested sequences)
     if (background === undefined) background = seq.background || '#000000';
+    this.background = background;
     const W = seq.width;
     const H = seq.height;
     this.scale = scale;
@@ -260,9 +270,13 @@ export class Compositor {
         return this.drawClip(ctx, clip, t, { dip: { color: type === 'dipToBlack' ? '#000000' : '#ffffff', amount: 1 - reveal } });
       }
       // one-sided transitions run the two-sided plan with only this clip present
-      const plan = transitionPlan(type, job.edge === 'in' ? reveal : 1 - reveal, dir, W, H);
+      const p = job.edge === 'in' ? reveal : 1 - reveal;
+      const plan = transitionPlan(type, p, dir, W, H);
+      if (plan.render) {
+        return this.drawShaderTransition(ctx, plan, job.edge === 'in' ? null : clip, job.edge === 'in' ? clip : null, t, p, dir, clip);
+      }
       const o = job.edge === 'in' ? plan.b : plan.a;
-      if (o) this.drawClip(ctx, clip, t, o);
+      if (o) this.drawPieces(ctx, clip, t, o);
       return;
     }
     const { a, b, type, p } = job;
@@ -274,7 +288,9 @@ export class Compositor {
       else this.drawClip(ctx, b, t, { alpha: p });
       return;
     }
-    const plan = transitionPlan(type, p, b.transIn?.direction, W, H);
+    const dir = b.transIn?.direction;
+    const plan = transitionPlan(type, p, dir, W, H);
+    if (plan.render) return this.drawShaderTransition(ctx, plan, a, b, t, p, dir, p < 0.5 ? a : b);
     if (plan.layer) {
       // dissolves blend linearly inside a track layer, then composite with the clip blend mode
       const s = this.scale;
@@ -290,8 +306,80 @@ export class Compositor {
       ctx.restore();
       return;
     }
-    if (plan.a) this.drawClip(ctx, a, t, plan.a);
-    if (plan.b) this.drawClip(ctx, b, t, plan.b);
+    if (plan.bFirst) {
+      if (plan.b) this.drawPieces(ctx, b, t, plan.b);
+      if (plan.a) this.drawPieces(ctx, a, t, plan.a);
+      return;
+    }
+    if (plan.a) this.drawPieces(ctx, a, t, plan.a);
+    if (plan.b) this.drawPieces(ctx, b, t, plan.b);
+  }
+
+  /** Draw a clip once per option set (a transition plan side may cut a clip into pieces). */
+  drawPieces(ctx, clip, t, o) {
+    if (Array.isArray(o)) for (const piece of o) this.drawClip(ctx, clip, t, piece);
+    else this.drawClip(ctx, clip, t, o);
+  }
+
+  /** A clip rendered alone into a frame-sized layer canvas (transparent around it). */
+  clipLayer(which, clip, t) {
+    const W = this.seq.width;
+    const H = this.seq.height;
+    const s = this.scale;
+    const canvas = which === 'A' ? this.layerA : which === 'B' ? this.layerB : this.layerEmpty;
+    const lctx = sizeCanvas(canvas, W * s, H * s);
+    if (clip) {
+      lctx.setTransform(s, 0, 0, s, 0, 0);
+      this.drawClip(lctx, clip, t, { composite: 'source-over' });
+    }
+    return canvas;
+  }
+
+  /** Shader transitions (transitions2.js): both clips rendered alone, mixed on the GPU. */
+  drawShaderTransition(ctx, plan, a, b, t, p, dir, blendClip) {
+    const A = this.clipLayer(a ? 'A' : 'E', a, t);
+    const B = this.clipLayer(b ? 'B' : (a ? 'E' : 'B'), b, t);
+    const out = plan.render({ A, B, p, dir, cw: A.width, ch: A.height, k: this.scale });
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalCompositeOperation = this.clipBlend(blendClip, t);
+    if (out) ctx.drawImage(out, 0, 0, ctx.canvas.width, ctx.canvas.height);
+    else {
+      // no WebGL2: fall back to a plain cross-fade
+      ctx.globalAlpha = 1 - p;
+      ctx.drawImage(A, 0, 0);
+      ctx.globalAlpha = p;
+      ctx.drawImage(B, 0, 0);
+    }
+    ctx.restore();
+  }
+
+  /**
+   * One video track rendered alone at time t into a frame-sized canvas (for effects that read
+   * another layer, e.g. 그레이디언트 지우기). Uses a helper compositor so the stage canvases of the
+   * clip being processed are left alone. Returns null for the calling track or inside another
+   * such render.
+   */
+  renderTrack(trackId, t, selfTrackId = null) {
+    if (this.inTrackRender || !trackId || trackId === selfTrackId) return null;
+    const track = getTrack(this.seq, trackId);
+    if (!track) return null;
+    const W = this.seq.width;
+    const H = this.seq.height;
+    const s = this.scale;
+    const c = this.trackRenderCanvas || (this.trackRenderCanvas = makeCanvas());
+    const g = sizeCanvas(c, W * s, H * s);
+    const job = this.trackJob(this.seq, track, t);
+    if (!job) return c;
+    const sub = this.trackSub || (this.trackSub = new Compositor({ onAsyncReady: this.onAsyncReady }));
+    Object.assign(sub, { depth: this.depth + 1, prefix: this.prefix, scale: s, seq: this.seq, provider: this.provider, frameT: t, background: null, inTrackRender: true });
+    g.setTransform(s, 0, 0, s, 0, 0);
+    try {
+      sub.drawJob(g, job, t, W, H);
+    } catch (err) {
+      console.warn('track render failed', err);
+    }
+    return c;
   }
 
   clipBlend(clip, t) {
@@ -350,7 +438,8 @@ export class Compositor {
       case 'shape': {
         const fx = clip.effects.find((e) => e.type === clip.kind);
         const motion = clip.effects.find((e) => e.type === 'motion');
-        const sc = motion ? Math.abs(evalEffect(motion, tl).scale) / 100 : 1;
+        const mv = motion ? evalEffect(motion, tl) : null;
+        const sc = mv ? Math.max(Math.abs(mv.scale), mv.uniform === false ? Math.abs(mv.scaleW ?? 100) : 0) / 100 : 1;
         const k = clamp(this.scale * Math.max(1, sc), 0.25, 4);
         return clip.kind === 'text' ? this.textSource(evalEffect(fx, tl), k) : this.shapeSource(evalEffect(fx, tl), k);
       }
@@ -456,44 +545,110 @@ export class Compositor {
     const widths = lines.map((l) => measure.measureText(l || ' ').width);
     const lineH = p.size * (p.lineHeight || 120) / 100;
     const pad = p.background ? p.bgPadding : 0;
-    const stroke = p.strokeWidth || 0;
-    const w = Math.ceil(Math.max(1, ...widths) + pad * 2 + stroke * 2 + 4);
-    const h = Math.ceil(lineH * lines.length + pad * 2 + stroke * 2 + 4);
+    // strokes wrap the glyphs from the inside out: 외곽선, 외곽선 2, 외곽선 3
+    const strokes = [];
+    let reach = 0;
+    for (const [wk, ck] of [['strokeWidth', 'strokeColor'], ['stroke2Width', 'stroke2Color'], ['stroke3Width', 'stroke3Color']]) {
+      const sw = Math.max(0, p[wk] || 0);
+      if (sw <= 0) continue;
+      reach += sw;
+      strokes.push({ width: reach, color: p[ck] || '#000000' });
+    }
+    const stroke = reach;
+    const shadowOn = !!p.shadowOn && (p.shadowOpacity ?? 75) > 0;
+    const sDist = shadowOn ? Math.max(0, p.shadowDistance || 0) : 0;
+    const sBlur = shadowOn ? Math.max(0, p.shadowBlur || 0) : 0;
+    const sSize = shadowOn ? Math.max(0, p.shadowSize || 0) : 0;
+    // room for the shadow on every side keeps the text box centred on the clip position
+    const margin = shadowOn ? Math.ceil(sDist + sBlur * 1.5 + sSize + 2) : 0;
+    const bw = Math.ceil(Math.max(1, ...widths) + pad * 2 + stroke * 2 + 4);
+    const bh = Math.ceil(lineH * lines.length + pad * 2 + stroke * 2 + 4);
+    const w = bw + margin * 2;
+    const h = bh + margin * 2;
     const c = makeCanvas(Math.max(1, Math.ceil(w * k)), Math.max(1, Math.ceil(h * k)));
     const ctx = c.getContext('2d');
     ctx.scale(k, k);
     if (p.background) {
       const [r, g, b] = hexToRgb(p.bgColor);
       ctx.fillStyle = `rgba(${r},${g},${b},${(p.bgOpacity ?? 100) / 100})`;
-      roundRect(ctx, 0, 0, w, h, Math.min(16, pad / 2));
+      roundRect(ctx, margin, margin, bw, bh, Math.min(p.bgRadius ?? Math.min(16, pad / 2), bw / 2, bh / 2));
       ctx.fill();
     }
-    ctx.font = font;
-    if ('letterSpacing' in ctx) ctx.letterSpacing = `${p.tracking || 0}px`;
-    ctx.textBaseline = 'middle';
-    ctx.lineJoin = 'round';
-    const inner = w - pad * 2 - stroke * 2;
+    const inner = bw - pad * 2 - stroke * 2;
     // typewriter reveal: show only the first N characters, laid out in their final positions
     const total = Array.from(String(p.content ?? '')).length;
-    let remaining = p.reveal == null ? Infinity : Math.round((total * clamp(p.reveal, 0, 100)) / 100);
-    lines.forEach((full, i) => {
-      const chars = Array.from(full);
-      const line = remaining >= chars.length ? full : chars.slice(0, Math.max(0, remaining)).join('');
-      remaining -= chars.length + 1;
-      if (!line) return;
-      const lw = widths[i];
-      let x = pad + stroke + 2;
-      if (p.align === 'center') x += (inner - 4 - lw) / 2;
-      else if (p.align === 'right') x += inner - 4 - lw;
-      const y = pad + stroke + 2 + lineH * (i + 0.5);
-      if (stroke > 0) {
-        ctx.strokeStyle = p.strokeColor;
-        ctx.lineWidth = stroke * 2;
-        ctx.strokeText(line, x, y);
+    const revealN = p.reveal == null ? Infinity : Math.round((total * clamp(p.reveal, 0, 100)) / 100);
+    const eachLine = (fn) => {
+      let remaining = revealN;
+      lines.forEach((full, i) => {
+        const chars = Array.from(full);
+        const line = remaining >= chars.length ? full : chars.slice(0, Math.max(0, remaining)).join('');
+        remaining -= chars.length + 1;
+        if (!line) return;
+        const lw = widths[i];
+        let x = margin + pad + stroke + 2;
+        if (p.align === 'center') x += (inner - 4 - lw) / 2;
+        else if (p.align === 'right') x += inner - 4 - lw;
+        const y = margin + pad + stroke + 2 + lineH * (i + 0.5);
+        fn(line, x, y);
+      });
+    };
+    const setup = (g) => {
+      g.font = font;
+      if ('letterSpacing' in g) g.letterSpacing = `${p.tracking || 0}px`;
+      g.textBaseline = 'middle';
+      g.lineJoin = 'round';
+    };
+    setup(ctx);
+    if (shadowOn) {
+      // 그림자: the glyph silhouette (with strokes and 크기 spread), blurred and offset
+      const sh = makeCanvas(c.width, c.height);
+      const sg = sh.getContext('2d');
+      sg.scale(k, k);
+      setup(sg);
+      const rad = ((p.shadowAngle ?? 135) * Math.PI) / 180;
+      const dx = Math.sin(rad) * sDist;
+      const dy = -Math.cos(rad) * sDist;
+      sg.fillStyle = sg.strokeStyle = p.shadowColor || '#000000';
+      sg.lineWidth = (stroke + sSize) * 2;
+      eachLine((line, x, y) => {
+        if (stroke + sSize > 0) sg.strokeText(line, x + dx, y + dy);
+        sg.fillText(line, x + dx, y + dy);
+      });
+      ctx.save();
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      if (sBlur > 0.3) ctx.filter = `blur(${(sBlur * k) / 2}px)`;
+      ctx.globalAlpha = clamp((p.shadowOpacity ?? 75) / 100, 0, 1);
+      ctx.drawImage(sh, 0, 0);
+      ctx.restore();
+    }
+    for (let i = strokes.length - 1; i >= 0; i--) {
+      ctx.strokeStyle = strokes[i].color;
+      ctx.lineWidth = strokes[i].width * 2;
+      eachLine((line, x, y) => ctx.strokeText(line, x, y));
+    }
+    if (p.fillOn !== false) {
+      let style = p.color;
+      const x0 = margin + pad + stroke;
+      const y0 = margin + pad + stroke;
+      const tw = bw - (pad + stroke) * 2;
+      const th = bh - (pad + stroke) * 2;
+      if (p.fillType === 'linear') {
+        const a = ((p.gradAngle ?? 90) * Math.PI) / 180;
+        const half = (Math.abs(Math.cos(a)) * tw + Math.abs(Math.sin(a)) * th) / 2;
+        const cx = x0 + tw / 2;
+        const cy = y0 + th / 2;
+        style = ctx.createLinearGradient(cx - Math.cos(a) * half, cy - Math.sin(a) * half, cx + Math.cos(a) * half, cy + Math.sin(a) * half);
+        style.addColorStop(0, p.color);
+        style.addColorStop(1, p.color2 || p.color);
+      } else if (p.fillType === 'radial') {
+        style = ctx.createRadialGradient(x0 + tw / 2, y0 + th / 2, 0, x0 + tw / 2, y0 + th / 2, Math.max(tw, th) / 2);
+        style.addColorStop(0, p.color);
+        style.addColorStop(1, p.color2 || p.color);
       }
-      ctx.fillStyle = p.color;
-      ctx.fillText(line, x, y);
-    });
+      ctx.fillStyle = style;
+      eachLine((line, x, y) => ctx.fillText(line, x, y));
+    }
     const src = { img: c, w, h, fit: false };
     if (this.textCache.size > 80) this.textCache.clear();
     this.textCache.set(key, src);
@@ -524,7 +679,8 @@ export class Compositor {
   // ---------------------------------------------------------------- drawing
 
   /**
-   * Draw one clip. opts: { alpha, composite, offsetX, clipPath(ctx), dip:{color,amount} }
+   * Draw one clip. opts: { alpha, composite, offsetX, offsetY, blur, frameZoom, clipPath(ctx),
+   * dip:{color,amount} }
    */
   drawClip(ctx, clip, t, opts = {}) {
     const seq = this.seq;
@@ -540,14 +696,19 @@ export class Compositor {
 
     const fx = {};
     const userFx = [];
+    let opacityFx = null;
     for (const e of clip.effects) {
       if (!e.enabled) continue;
       const def = EFFECTS[e.type];
       if (!def) continue;
       const v = evalEffect(e, tl);
-      if (def.fixed) fx[e.type] = v;
-      else userFx.push({ type: e.type, v });
+      if (def.fixed) {
+        fx[e.type] = v;
+        if (e.type === 'opacity') opacityFx = e;
+      } else userFx.push({ type: e.type, v, fx: e, masks: activeMasks(e) });
     }
+    // 텍스트로 마스크: the glyphs cut the tracks below instead of being drawn
+    if (clip.kind === 'text' && fx.text?.textMask && !opts._noTextMask) return this.drawTextMask(ctx, clip, t, opts, !!fx.text.maskInvert);
     const motion = fx.motion || { posX: W / 2, posY: H / 2, scale: 100, rotation: 0, anchorX: 0, anchorY: 0 };
     const opacity = fx.opacity ? fx.opacity.opacity / 100 : 1;
     const blend = fx.opacity?.blend || 'source-over';
@@ -568,12 +729,16 @@ export class Compositor {
       if (f.type === 'hFlip') flipX = -flipX;
       if (f.type === 'vFlip') flipY = -flipY;
     }
+    const opMasks = opacityFx ? activeMasks(opacityFx) : null;
+    // text and shapes are only as big as their content: effects that work in frame space (변형,
+    // 기본 3D, generators, wipes…) get the source padded out to the sequence frame around it
+    if (!src.fit && stageFx.some((f) => EFFECTS[f.type]?.frameSpace)) src = padSource(src, W, H);
 
     let img = src.img;
-    if (stageFx.length || opts.dip) {
+    if (stageFx.length || opts.dip || opMasks) {
       // process at roughly the on-screen resolution
-      const onScreen = baseScale * this.scale * Math.max(1, Math.abs(motion.scale) / 100);
-      img = this.processStage(src, stageFx, opts.dip, clamp(onScreen, 0.05, 1), clip, tl);
+      const onScreen = baseScale * this.scale * Math.max(1, Math.abs(motion.scale) / 100, motion.uniform === false ? Math.abs(motion.scaleW ?? 100) / 100 : 0);
+      img = this.processStage(src, stageFx, opts.dip, clamp(onScreen, 0.05, 1), clip, tl, { baseScale, opMasks, opacityFx });
     }
 
     if (fill) {
@@ -609,9 +774,14 @@ export class Compositor {
       ctx.translate(-W / 2, -H / 2);
     }
     if (opts.clipPath) {
+      // a transition piece's clip region travels with its offset (가운데 분할, 분할 …)
+      const ox = opts.offsetX || 0;
+      const oy = opts.offsetY || 0;
+      ctx.translate(ox, oy);
       ctx.beginPath();
       opts.clipPath(ctx);
       ctx.clip();
+      ctx.translate(-ox, -oy);
     }
     if (shadow) {
       const [r, g, b] = hexToRgb(shadow.color);
@@ -621,7 +791,9 @@ export class Compositor {
       ctx.shadowOffsetY = -Math.cos(rad) * shadow.distance * this.scale;
       ctx.shadowBlur = shadow.softness * this.scale;
     }
+    // 균일 비율 off: 비율 is the height, 비율 폭 the width
     const s = (baseScale * motion.scale) / 100;
+    const sxm = motion.uniform === false ? (baseScale * (motion.scaleW ?? 100)) / 100 : s;
     let shX = 0;
     let shY = 0;
     let shR = 0;
@@ -633,8 +805,8 @@ export class Compositor {
     }
     ctx.translate(motion.posX + (opts.offsetX || 0) + shX, motion.posY + (opts.offsetY || 0) + shY);
     ctx.rotate(((motion.rotation + shR) * Math.PI) / 180);
-    ctx.scale(s * flipX, s * flipY);
-    ctx.translate(-(motion.anchorX || 0) / (s || 1), -(motion.anchorY || 0) / (s || 1));
+    ctx.scale(sxm * flipX, s * flipY);
+    ctx.translate(-(motion.anchorX || 0) / (sxm || 1), -(motion.anchorY || 0) / (s || 1));
     if (stab && clip.stab) {
       const corr = this.stabCorrection(clip, t, stab, src);
       if (corr) {
@@ -644,19 +816,76 @@ export class Compositor {
       }
     }
     if (img === src.img) img = mip(img, onScreenWidth(ctx, src.w));
-    ctx.drawImage(img, -src.w / 2, -src.h / 2, src.w, src.h);
+    if (img === src.img && src.inner) {
+      const r = src.inner;
+      ctx.drawImage(img, -src.w / 2 + r.x, -src.h / 2 + r.y, r.w, r.h);
+    } else ctx.drawImage(img, -src.w / 2, -src.h / 2, src.w, src.h);
     ctx.restore();
   }
 
-  /** Run the per-clip pixel effects. Returns a canvas holding the processed source. */
-  processStage(src, effects, dip, ps, clip = null, tl = 0) {
+  /**
+   * The clip's processed source at sequence time t, through its enabled effects that come before
+   * effect `stopFxId`, on the same stage as `stage` ({ src, ps, baseScale } of the running
+   * processStage). Lets time effects (반향, 포스터화 시간) look at other moments of stills, text and
+   * shapes exactly. Uses a helper compositor; the returned canvas is only valid until the next call.
+   */
+  stageAt(clip, t, stopFxId, stage) {
+    const sub = this.timeSub || (this.timeSub = new Compositor({ onAsyncReady: this.onAsyncReady }));
+    Object.assign(sub, { depth: this.depth + 1, prefix: this.prefix, scale: this.scale, seq: this.seq, provider: this.provider, frameT: t, background: null, inTrackRender: true });
+    const tl = t - clip.start;
+    let src = sub.getSource(clip, t, tl);
+    if (!src || src.offline) return null;
+    if (stage.src?.inner && !src.fit) src = padSource(src, this.seq.width, this.seq.height);
+    const effects = [];
+    for (const e of clip.effects) {
+      if (e.id === stopFxId) break;
+      const def = EFFECTS[e.type];
+      if (!e.enabled || !def || def.fixed || TRANSFORM_FX.has(e.type)) continue;
+      effects.push({ type: e.type, v: evalEffect(e, tl), fx: e, masks: activeMasks(e) });
+    }
+    return sub.processStage(src, effects, null, stage.ps, clip, tl, { baseScale: stage.baseScale });
+  }
+
+  /** 텍스트로 마스크: keep (or with 반전, remove) the tracks drawn so far only where the text is. */
+  drawTextMask(ctx, clip, t, opts, invert) {
+    const W = this.seq.width;
+    const H = this.seq.height;
+    const s = this.scale;
+    const lctx = sizeCanvas(this.textMaskLayer, W * s, H * s);
+    lctx.setTransform(s, 0, 0, s, 0, 0);
+    this.drawClip(lctx, clip, t, { ...opts, composite: 'source-over', _noTextMask: true });
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalCompositeOperation = invert ? 'destination-out' : 'destination-in';
+    ctx.drawImage(this.textMaskLayer, 0, 0);
+    if (this.background && ctx.canvas.width) {
+      // what is cut away shows the sequence background, like Premiere's black
+      ctx.globalCompositeOperation = 'destination-over';
+      ctx.fillStyle = this.background;
+      ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+    }
+    ctx.restore();
+  }
+
+  /**
+   * Run the per-clip pixel effects. Returns a canvas holding the processed source.
+   * extra: { baseScale (fit scale of the source in the frame), opMasks (masks on 불투명도) }.
+   */
+  processStage(src, effects, dip, ps, clip = null, tl = 0, extra = {}) {
     const w = Math.max(1, Math.round(src.w * ps));
     const h = Math.max(1, Math.round(src.h * ps));
+    const seq = this.seq;
+    const baseScale = extra.baseScale || 1;
     let cur = this.stageA;
     let alt = this.stageB;
     let cctx = sizeCanvas(cur, w, h);
-    cctx.drawImage(mip(src.img, w), 0, 0, w, h);
+    const inner = src.inner ? { x: src.inner.x * ps, y: src.inner.y * ps, w: src.inner.w * ps, h: src.inner.h * ps } : null;
+    if (inner) cctx.drawImage(mip(src.img, inner.w), inner.x, inner.y, inner.w, inner.h);
+    else cctx.drawImage(mip(src.img, w), 0, 0, w, h);
     let filters = [];
+    // stage pixels per sequence pixel, and sequence point → stage pixel (clip placed fit, centred)
+    const k = ps / baseScale;
+    const map = (X, Y) => [(X - seq.width / 2) * k + w / 2, (Y - seq.height / 2) * k + h / 2];
 
     const flushFilters = () => {
       if (!filters.length) return;
@@ -669,7 +898,19 @@ export class Compositor {
       filters = [];
     };
 
-    for (const { type, v } of effects) {
+    /** Replace the stage with `out` (a canvas of any size, stretched over the stage). */
+    const put = (out) => {
+      if (!out || out === cur) return;
+      cctx.save();
+      cctx.setTransform(1, 0, 0, 1, 0, 0);
+      cctx.globalCompositeOperation = 'copy';
+      cctx.globalAlpha = 1;
+      cctx.filter = 'none';
+      cctx.drawImage(out, 0, 0, w, h);
+      cctx.restore();
+    };
+
+    const run = (type, v, fxObj) => {
       if (FILTER_FX.has(type)) {
         switch (type) {
           case 'brightnessContrast':
@@ -685,9 +926,18 @@ export class Compositor {
           case 'hueShift':
             filters.push(`hue-rotate(${v.hue}deg)`);
             break;
-          case 'gaussianBlur':
-            if (v.blurriness > 0) filters.push(`blur(${v.blurriness * ps}px)`);
+          case 'gaussianBlur': {
+            if (!(v.blurriness > 0)) break;
+            const r = v.blurriness * ps;
+            if ((!v.dims || v.dims === 'both') && !v.repeatEdges) {
+              filters.push(`blur(${r}px)`);
+              break;
+            }
+            // 흐림 차원 / 가장자리 픽셀 반복
+            flushFilters();
+            put(blurCanvas(cur, v.dims === 'v' ? 0 : r, v.dims === 'h' ? 0 : r, !!v.repeatEdges, 'gauss'));
             break;
+          }
           case 'blackWhite':
             filters.push('grayscale(1)');
             break;
@@ -707,7 +957,7 @@ export class Compositor {
             filters.push(svgFilter('posterize', Math.round(clamp(v.levels, 2, 32))));
             break;
         }
-        continue;
+        return;
       }
       flushFilters();
       switch (type) {
@@ -831,58 +1081,99 @@ export class Compositor {
           break;
         }
         case 'lumetri':
+          put(applyLumetri(cur, v, { lut: (id) => this.provider.lut?.(id) || null, k }));
+          break;
         case 'lut': {
-          const grader = this.getGrader();
-          if (!grader) break;
-          const lutData = type === 'lut' && v.lutId ? this.provider.lut?.(v.lutId) : null;
-          if (type === 'lut' && !lutData) break;
-          const out = type === 'lut' ? grader.applyLut(cur, lutData, v.lutId, v.intensity / 100) : grader.applyGrade(cur, v);
-          if (out) {
-            cctx.save();
-            cctx.globalCompositeOperation = 'copy';
-            cctx.drawImage(out, 0, 0, w, h);
-            cctx.restore();
-          }
+          const lutData = v.lutId ? this.provider.lut?.(v.lutId) : null;
+          if (lutData) put(applyLut(cur, lutData, v.intensity / 100));
           break;
         }
         case 'crop': {
-          const l = (clamp(v.left, 0, 100) / 100) * w;
-          const tp = (clamp(v.top, 0, 100) / 100) * h;
-          const r = (clamp(v.right, 0, 100) / 100) * w;
-          const b = (clamp(v.bottom, 0, 100) / 100) * h;
+          let l = (clamp(v.left, 0, 100) / 100) * w;
+          let tp = (clamp(v.top, 0, 100) / 100) * h;
+          let r = (clamp(v.right, 0, 100) / 100) * w;
+          let b = (clamp(v.bottom, 0, 100) / 100) * h;
+          if (v.zoom && w - l - r > 1 && h - tp - b > 1) {
+            // 확대/축소: the part that is left fills the frame again
+            const actx = sizeCanvas(alt, w, h);
+            actx.drawImage(cur, l, tp, w - l - r, h - tp - b, 0, 0, w, h);
+            [cur, alt] = [alt, cur];
+            cctx = actx;
+            l = tp = r = b = 0;
+          }
+          const fe = Math.max(0, v.feather || 0) * k;
+          if (fe > 0.3) {
+            // 가장자리 페더: a soft-edged rectangle (drawn on a padded canvas so the frame edge fades too)
+            const pad = Math.ceil(fe) + 2;
+            const mc = sizeCanvas(this.small, w + pad * 2, h + pad * 2);
+            mc.filter = `blur(${fe / 2}px)`;
+            mc.fillStyle = '#fff';
+            mc.fillRect(pad + l + fe / 2, pad + tp + fe / 2, Math.max(0, w - l - r - fe), Math.max(0, h - tp - b - fe));
+            mc.filter = 'none';
+            cctx.save();
+            cctx.globalCompositeOperation = 'destination-in';
+            cctx.drawImage(this.small, pad, pad, w, h, 0, 0, w, h);
+            cctx.restore();
+            break;
+          }
           cctx.clearRect(0, 0, l, h);
           cctx.clearRect(w - r, 0, r, h);
           cctx.clearRect(0, 0, w, tp);
           cctx.clearRect(0, h - b, w, b);
           break;
         }
-        case 'colorKey': {
-          const keyer = this.getKeyer();
-          if (!keyer) break;
-          const out = keyer.apply(cur, v);
-          if (out) {
-            cctx.save();
-            cctx.globalCompositeOperation = 'copy';
-            cctx.drawImage(out, 0, 0, w, h);
-            cctx.restore();
-          }
-          break;
-        }
         default: {
           const fn = PIXEL_FX[type];
           if (!fn) break;
-          const out = fn({ canvas: cur, ctx: cctx, w, h, v, ps, clip, tl, t: (clip?.start || 0) + tl });
-          if (out && out !== cur) {
-            cctx.save();
-            cctx.globalCompositeOperation = 'copy';
-            cctx.drawImage(out, 0, 0, w, h);
-            cctx.restore();
+          let out;
+          try {
+            out = fn({ canvas: cur, ctx: cctx, w, h, v, ps, k, map, clip, fx: fxObj, tl, t: (clip?.start || 0) + tl, seq, comp: this, stage: { src, ps, baseScale } });
+          } catch (err) {
+            console.warn(`effect ${type} failed`, err);
           }
+          put(out);
           break;
         }
       }
+    };
+
+    for (const { type, v, fx: fxObj, masks } of effects) {
+      if (!masks) {
+        run(type, v, fxObj);
+        continue;
+      }
+      // masked effect: out = input · (1 − m) + effect · m
+      flushFilters();
+      const pctx = sizeCanvas(this.preMask, w, h);
+      pctx.drawImage(cur, 0, 0);
+      run(type, v, fxObj);
+      flushFilters();
+      const m = this.masks.render(masks, tl, w, h, ps, inner);
+      if (!m) continue;
+      cctx.save();
+      cctx.setTransform(1, 0, 0, 1, 0, 0);
+      cctx.globalAlpha = 1;
+      cctx.globalCompositeOperation = 'destination-in';
+      cctx.drawImage(m, 0, 0);
+      pctx.globalCompositeOperation = 'destination-out';
+      pctx.drawImage(m, 0, 0);
+      pctx.globalCompositeOperation = 'source-over';
+      cctx.globalCompositeOperation = 'lighter';
+      cctx.drawImage(this.preMask, 0, 0);
+      cctx.restore();
     }
     flushFilters();
+    if (extra.opMasks) {
+      // masks on 불투명도: the clip only shows inside them
+      const m = this.masks.render(extra.opMasks, tl, w, h, ps, inner);
+      if (m) {
+        cctx.save();
+        cctx.setTransform(1, 0, 0, 1, 0, 0);
+        cctx.globalCompositeOperation = 'destination-in';
+        cctx.drawImage(m, 0, 0);
+        cctx.restore();
+      }
+    }
     if (dip && dip.amount > 0) {
       cctx.save();
       cctx.globalCompositeOperation = 'source-atop';
@@ -927,11 +1218,17 @@ export class Compositor {
       v.points.forEach(([px, py], i) => (i ? mctx.lineTo((px / 100) * w, (py / 100) * h) : mctx.moveTo((px / 100) * w, (py / 100) * h)));
       mctx.closePath();
       mctx.fill();
-      if (exp > 0) {
+      if (Math.abs(exp) > 0.05) {
+        // 확장: grow by stroking the outline, shrink (negative) by erasing along it
         mctx.strokeStyle = mctx.fillStyle;
         mctx.lineJoin = 'round';
-        mctx.lineWidth = exp * 2;
+        mctx.lineWidth = Math.abs(exp) * 2;
+        if (exp < 0) {
+          mctx.globalCompositeOperation = 'destination-out';
+          mctx.strokeStyle = '#000';
+        }
         mctx.stroke();
+        mctx.globalCompositeOperation = 'source-over';
       }
     } else {
       const cx = (v.cx / 100) * w;
@@ -1028,37 +1325,29 @@ export class Compositor {
     return { x: lerp2(c.xs, st.x), y: lerp2(c.ys, st.y), a: v.rotation ? lerp2(c.as, st.a) : 0, zoom };
   }
 
-  getGrader() {
-    if (shared.grader === null) {
-      try {
-        shared.grader = new ColorGrader();
-      } catch (err) {
-        console.warn('WebGL2 colour grading unavailable', err);
-        shared.grader = false;
-      }
-    }
-    return shared.grader || null;
-  }
-
   applyAdjustment(ctx, clip, t, strength = 1) {
     const tl = t - clip.start;
     const userFx = [];
     let opacity = 1;
     let blend = 'source-over';
+    let opMasks = null;
     for (const e of clip.effects) {
       if (!e.enabled || !EFFECTS[e.type]) continue;
       const v = evalEffect(e, tl);
       if (e.type === 'opacity') {
         opacity = v.opacity / 100;
         blend = v.blend;
-      } else if (!EFFECTS[e.type].fixed && !TRANSFORM_FX.has(e.type)) userFx.push({ type: e.type, v });
+        opMasks = activeMasks(e);
+      } else if (!EFFECTS[e.type].fixed && !TRANSFORM_FX.has(e.type)) userFx.push({ type: e.type, v, fx: e, masks: activeMasks(e) });
     }
     if (!userFx.length) return;
     const cw = ctx.canvas.width;
     const ch = ctx.canvas.height;
     const actx = sizeCanvas(this.adjust, cw, ch);
     actx.drawImage(ctx.canvas, 0, 0);
-    const processed = this.processStage({ img: this.adjust, w: cw, h: ch }, userFx, null, 1);
+    // the frame below is the source: sizes in sequence pixels scale with the preview resolution
+    const s = this.scale || 1;
+    const processed = this.processStage({ img: this.adjust, w: cw / s, h: ch / s }, userFx, null, s, clip, tl, { opMasks });
     ctx.save();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.globalAlpha = clamp(opacity * strength, 0, 1);
@@ -1079,19 +1368,6 @@ export class Compositor {
     ctx.restore();
   }
 
-  /** WebGL helpers are shared by every compositor (browsers allow only a few WebGL contexts). */
-  getKeyer() {
-    if (shared.keyer === null) {
-      try {
-        shared.keyer = new ColorKeyer();
-      } catch (err) {
-        console.warn('WebGL keyer unavailable', err);
-        shared.keyer = false;
-      }
-    }
-    return shared.keyer || null;
-  }
-
   /**
    * Corners of a clip's transformed rectangle in sequence coordinates (for monitor handles).
    */
@@ -1107,10 +1383,11 @@ export class Compositor {
     const m = evalEffect(motionFx, tl);
     const base = size.fit ? Math.min(seq.width / size.w, seq.height / size.h) : 1;
     const s = (base * m.scale) / 100;
+    const sx = m.uniform === false ? (base * (m.scaleW ?? 100)) / 100 : s;
     const rad = (m.rotation * Math.PI) / 180;
     const cos = Math.cos(rad);
     const sin = Math.sin(rad);
-    const hw = (size.w * s) / 2;
+    const hw = (size.w * sx) / 2;
     const hh = (size.h * s) / 2;
     const ax = m.anchorX || 0;
     const ay = m.anchorY || 0;
@@ -1210,354 +1487,18 @@ function roundRectPath(ctx, x, y, w, h, r) {
   else ctx.rect(x, y, w, h);
 }
 
+/**
+ * A text / shape source padded out to the sequence frame around it (same centre), so frame-space
+ * effects have room. `inner` is where the original lies, in logical units.
+ */
+function padSource(src, W, H) {
+  const w = Math.max(W, src.w);
+  const h = Math.max(H, src.h);
+  return { img: src.img, w, h, fit: false, inner: { x: (w - src.w) / 2, y: (h - src.h) / 2, w: src.w, h: src.h } };
+}
+
 function roundRect(ctx, x, y, w, h, r) {
   ctx.beginPath();
   if (ctx.roundRect) ctx.roundRect(x, y, w, h, r);
   else ctx.rect(x, y, w, h);
-}
-
-// ---------------------------------------------------------------- WebGL chroma keyer
-
-class ColorKeyer {
-  constructor() {
-    this.canvas = makeCanvas(2, 2);
-    const gl = this.canvas.getContext('webgl', { premultipliedAlpha: true, preserveDrawingBuffer: true, alpha: true });
-    if (!gl) throw new Error('no webgl');
-    this.gl = gl;
-    const vs = `attribute vec2 p; varying vec2 uv; void main(){ uv = p * 0.5 + 0.5; gl_Position = vec4(p, 0.0, 1.0); }`;
-    const fs = `precision mediump float;
-      uniform sampler2D tex; uniform vec3 key; uniform float tol; uniform float soft; uniform float spill; uniform float mode;
-      varying vec2 uv;
-      vec2 chroma(vec3 c){ return vec2(-0.168736*c.r - 0.331264*c.g + 0.5*c.b, 0.5*c.r - 0.418688*c.g - 0.081312*c.b); }
-      void main(){
-        vec4 c = texture2D(tex, uv);
-        vec2 pc = chroma(c.rgb);
-        vec2 kc = chroma(key);
-        float pl = length(pc);
-        float kl = max(length(kc), 1e-4);
-        // hue similarity (1 = same hue) gated by saturation relative to the key colour,
-        // so darker/brighter shades of the key colour are keyed as well
-        float cosA = dot(pc, kc) / (pl * kl + 1e-5);
-        float hueDiff = 1.0 - cosA;
-        float sat = pl / kl;
-        float m = (1.0 - smoothstep(tol, tol + soft + 1e-4, hueDiff)) * smoothstep(0.12, 0.12 + soft + 0.08, sat);
-        float a = 1.0 - m;
-        vec3 col = c.rgb;
-        if (mode > 0.5 && mode < 1.5) { float lim = (col.r + col.b) * 0.5; col.g = mix(col.g, min(col.g, lim), spill); }
-        else if (mode > 1.5) { float lim = (col.r + col.g) * 0.5; col.b = mix(col.b, min(col.b, lim), spill); }
-        float outA = c.a * a;
-        gl_FragColor = vec4(col * outA, outA);
-      }`;
-    const prog = gl.createProgram();
-    for (const [type, src] of [[gl.VERTEX_SHADER, vs], [gl.FRAGMENT_SHADER, fs]]) {
-      const sh = gl.createShader(type);
-      gl.shaderSource(sh, src);
-      gl.compileShader(sh);
-      if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(sh));
-      gl.attachShader(prog, sh);
-    }
-    gl.linkProgram(prog);
-    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
-    this.prog = prog;
-    const buf = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
-    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
-    const loc = gl.getAttribLocation(prog, 'p');
-    gl.enableVertexAttribArray(loc);
-    gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
-    this.tex = gl.createTexture();
-    gl.bindTexture(gl.TEXTURE_2D, this.tex);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    this.u = {};
-    for (const n of ['tex', 'key', 'tol', 'soft', 'spill', 'mode']) this.u[n] = gl.getUniformLocation(prog, n);
-  }
-
-  apply(source, v) {
-    const gl = this.gl;
-    const w = source.width;
-    const h = source.height;
-    if (this.canvas.width !== w || this.canvas.height !== h) {
-      this.canvas.width = w;
-      this.canvas.height = h;
-    }
-    gl.viewport(0, 0, w, h);
-    gl.useProgram(this.prog);
-    gl.bindTexture(gl.TEXTURE_2D, this.tex);
-    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
-    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
-    const [r, g, b] = hexToRgb(v.keyColor).map((x) => x / 255);
-    gl.uniform1i(this.u.tex, 0);
-    gl.uniform3f(this.u.key, r, g, b);
-    gl.uniform1f(this.u.tol, (v.tolerance / 100) * 0.3);
-    gl.uniform1f(this.u.soft, (v.softness / 100) * 0.25);
-    gl.uniform1f(this.u.spill, v.spill / 100);
-    gl.uniform1f(this.u.mode, g >= r && g >= b ? 1 : b >= r && b >= g ? 2 : 0);
-    gl.clearColor(0, 0, 0, 0);
-    gl.clear(gl.COLOR_BUFFER_BIT);
-    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-    return this.canvas;
-  }
-}
-
-// ---------------------------------------------------------------- WebGL2 colour grading (curves, wheels, LUT)
-
-/** Monotone cubic interpolation through curve points → 256-entry table (0..1). */
-export function curveTable(points) {
-  const pts = (points?.length >= 2 ? points : [[0, 0], [1, 1]]).map(([x, y]) => [clamp(x, 0, 1), clamp(y, 0, 1)]).sort((a, b) => a[0] - b[0]);
-  const n = pts.length;
-  const xs = pts.map((p) => p[0]);
-  const ys = pts.map((p) => p[1]);
-  const d = new Array(n - 1);
-  for (let i = 0; i < n - 1; i++) d[i] = (ys[i + 1] - ys[i]) / Math.max(1e-6, xs[i + 1] - xs[i]);
-  const m = new Array(n);
-  m[0] = d[0];
-  m[n - 1] = d[n - 2];
-  for (let i = 1; i < n - 1; i++) m[i] = d[i - 1] * d[i] <= 0 ? 0 : (d[i - 1] + d[i]) / 2;
-  for (let i = 0; i < n - 1; i++) {
-    if (Math.abs(d[i]) < 1e-9) {
-      m[i] = m[i + 1] = 0;
-      continue;
-    }
-    const a = m[i] / d[i];
-    const b = m[i + 1] / d[i];
-    const h = a * a + b * b;
-    if (h > 9) {
-      const tt = 3 / Math.sqrt(h);
-      m[i] = tt * a * d[i];
-      m[i + 1] = tt * b * d[i];
-    }
-  }
-  const out = new Float32Array(256);
-  for (let k = 0; k < 256; k++) {
-    const x = k / 255;
-    let i = 0;
-    while (i < n - 2 && x > xs[i + 1]) i++;
-    if (x <= xs[0]) out[k] = ys[0];
-    else if (x >= xs[n - 1]) out[k] = ys[n - 1];
-    else {
-      const hseg = xs[i + 1] - xs[i];
-      const t = (x - xs[i]) / hseg;
-      const t2 = t * t;
-      const t3 = t2 * t;
-      out[k] = clamp((2 * t3 - 3 * t2 + 1) * ys[i] + (t3 - 2 * t2 + t) * hseg * m[i] + (-2 * t3 + 3 * t2) * ys[i + 1] + (t3 - t2) * hseg * m[i + 1], 0, 1);
-    }
-  }
-  return out;
-}
-
-function wheelOffset(w, k) {
-  const x = w?.x || 0;
-  const y = w?.y || 0;
-  const amt = Math.min(1, Math.hypot(x, y));
-  if (amt < 1e-4) return [0, 0, 0];
-  const hue = (Math.atan2(y, x) / (Math.PI * 2) + 1) % 1;
-  const f = (n) => {
-    const kk = (n + hue * 6) % 6;
-    return 1 - Math.max(0, Math.min(kk, 4 - kk, 1));
-  };
-  const rgb = [f(5), f(3), f(1)];
-  const l = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
-  return rgb.map((c) => (c - l) * amt * k);
-}
-
-class ColorGrader {
-  constructor() {
-    this.canvas = makeCanvas(2, 2);
-    const gl = this.canvas.getContext('webgl2', { premultipliedAlpha: true, preserveDrawingBuffer: true, alpha: true });
-    if (!gl) throw new Error('no webgl2');
-    this.gl = gl;
-    const vs = `#version 300 es
-      in vec2 p; out vec2 uv;
-      void main(){ uv = p * 0.5 + 0.5; gl_Position = vec4(p, 0.0, 1.0); }`;
-    const grade = `#version 300 es
-      precision highp float;
-      uniform sampler2D tex; uniform sampler2D curve;
-      uniform float exposure, contrast, highlights, shadows, whites, blacks, temp, tint, sat, vib;
-      uniform vec3 lift, gamma, gain;
-      in vec2 uv; out vec4 o;
-      float luma(vec3 c){ return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
-      void main(){
-        vec4 s = texture(tex, uv);
-        vec3 c = s.rgb;
-        c *= vec3(1.0 + temp * 0.25, 1.0 - tint * 0.12, 1.0 - temp * 0.25);
-        c *= exp2(exposure);
-        c = (c - 0.45) * (1.0 + contrast) + 0.45;
-        float l = luma(c);
-        c += highlights * 0.35 * smoothstep(0.35, 1.0, l);
-        c += shadows * 0.35 * (1.0 - smoothstep(0.0, 0.6, l));
-        c += whites * 0.25 * c;
-        c += blacks * 0.15 * (1.0 - c);
-        c = c + lift * (1.0 - clamp(c, 0.0, 1.0));
-        c = pow(max(c, 0.0), 1.0 / max(vec3(0.05), vec3(1.0) + gamma));
-        c = c * (vec3(1.0) + gain);
-        l = luma(c);
-        float mx = max(c.r, max(c.g, c.b));
-        float mn = min(c.r, min(c.g, c.b));
-        float boost = 1.0 + vib * (1.0 - clamp((mx - mn) * 2.0, 0.0, 1.0));
-        c = mix(vec3(l), c, sat * boost);
-        c = clamp(c, 0.0, 1.0);
-        c = vec3(texture(curve, vec2(c.r, 0.5)).r, texture(curve, vec2(c.g, 0.5)).g, texture(curve, vec2(c.b, 0.5)).b);
-        o = vec4(c * s.a, s.a);
-      }`;
-    const lut = `#version 300 es
-      precision highp float;
-      precision highp sampler3D;
-      uniform sampler2D tex; uniform sampler3D lut;
-      uniform float size, intensity; uniform vec3 dmin, dmax;
-      in vec2 uv; out vec4 o;
-      void main(){
-        vec4 s = texture(tex, uv);
-        vec3 c = clamp((s.rgb - dmin) / max(dmax - dmin, vec3(1e-5)), 0.0, 1.0);
-        vec3 g = texture(lut, c * ((size - 1.0) / size) + 0.5 / size).rgb;
-        o = vec4(mix(s.rgb, clamp(g, 0.0, 1.0), intensity) * s.a, s.a);
-      }`;
-    this.progGrade = this.program(vs, grade);
-    this.progLut = this.program(vs, lut);
-    const buf = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
-    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
-    this.vao = gl.createVertexArray();
-    gl.bindVertexArray(this.vao);
-    for (const prog of [this.progGrade, this.progLut]) {
-      const loc = gl.getAttribLocation(prog, 'p');
-      if (loc >= 0) {
-        gl.enableVertexAttribArray(loc);
-        gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
-      }
-    }
-    this.srcTex = this.texture2D();
-    this.curveTex = this.texture2D();
-    this.curveKey = '';
-    this.luts = new Map();
-  }
-
-  program(vs, fs) {
-    const gl = this.gl;
-    const prog = gl.createProgram();
-    for (const [type, src] of [[gl.VERTEX_SHADER, vs], [gl.FRAGMENT_SHADER, fs]]) {
-      const sh = gl.createShader(type);
-      gl.shaderSource(sh, src);
-      gl.compileShader(sh);
-      if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(sh));
-      gl.attachShader(prog, sh);
-    }
-    gl.bindAttribLocation(prog, 0, 'p');
-    gl.linkProgram(prog);
-    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
-    return prog;
-  }
-
-  texture2D() {
-    const gl = this.gl;
-    const t = gl.createTexture();
-    gl.bindTexture(gl.TEXTURE_2D, t);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    return t;
-  }
-
-  begin(source, prog) {
-    const gl = this.gl;
-    if (this.canvas.width !== source.width || this.canvas.height !== source.height) {
-      this.canvas.width = source.width;
-      this.canvas.height = source.height;
-    }
-    gl.viewport(0, 0, source.width, source.height);
-    gl.useProgram(prog);
-    gl.bindVertexArray(this.vao);
-    gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, this.srcTex);
-    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
-    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
-    gl.uniform1i(gl.getUniformLocation(prog, 'tex'), 0);
-  }
-
-  finish() {
-    const gl = this.gl;
-    gl.clearColor(0, 0, 0, 0);
-    gl.clear(gl.COLOR_BUFFER_BIT);
-    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-    return this.canvas;
-  }
-
-  applyGrade(source, v) {
-    const gl = this.gl;
-    const prog = this.progGrade;
-    this.begin(source, prog);
-    const curves = v.curves || {};
-    const key = JSON.stringify(curves);
-    if (key !== this.curveKey) {
-      const master = curveTable(curves.master);
-      const r = curveTable(curves.r);
-      const g = curveTable(curves.g);
-      const b = curveTable(curves.b);
-      const data = new Uint8Array(256 * 4);
-      const at = (tab, x) => tab[Math.round(clamp(x, 0, 1) * 255)];
-      for (let i = 0; i < 256; i++) {
-        const m = master[i];
-        data[i * 4] = Math.round(at(r, m) * 255);
-        data[i * 4 + 1] = Math.round(at(g, m) * 255);
-        data[i * 4 + 2] = Math.round(at(b, m) * 255);
-        data[i * 4 + 3] = 255;
-      }
-      gl.activeTexture(gl.TEXTURE1);
-      gl.bindTexture(gl.TEXTURE_2D, this.curveTex);
-      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 256, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, data);
-      this.curveKey = key;
-    }
-    gl.activeTexture(gl.TEXTURE1);
-    gl.bindTexture(gl.TEXTURE_2D, this.curveTex);
-    const u = (n) => gl.getUniformLocation(prog, n);
-    gl.uniform1i(u('curve'), 1);
-    gl.uniform1f(u('exposure'), v.exposure || 0);
-    gl.uniform1f(u('contrast'), (v.contrast || 0) / 100);
-    gl.uniform1f(u('highlights'), (v.highlights || 0) / 100);
-    gl.uniform1f(u('shadows'), (v.shadows || 0) / 100);
-    gl.uniform1f(u('whites'), (v.whites || 0) / 100);
-    gl.uniform1f(u('blacks'), (v.blacks || 0) / 100);
-    gl.uniform1f(u('temp'), (v.temperature || 0) / 100);
-    gl.uniform1f(u('tint'), (v.tint || 0) / 100);
-    gl.uniform1f(u('sat'), (v.saturation ?? 100) / 100);
-    gl.uniform1f(u('vib'), (v.vibrance || 0) / 100);
-    gl.uniform3f(u('lift'), ...wheelOffset(v.shadowsWheel, 0.25));
-    gl.uniform3f(u('gamma'), ...wheelOffset(v.midsWheel, 0.5));
-    gl.uniform3f(u('gain'), ...wheelOffset(v.highlightsWheel, 0.5));
-    return this.finish();
-  }
-
-  applyLut(source, lut, id, intensity) {
-    const gl = this.gl;
-    const prog = this.progLut;
-    let tex = this.luts.get(id);
-    if (!tex || tex.lut !== lut) {
-      const t = gl.createTexture();
-      gl.activeTexture(gl.TEXTURE2);
-      gl.bindTexture(gl.TEXTURE_3D, t);
-      gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-      gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-      for (const w of [gl.TEXTURE_WRAP_S, gl.TEXTURE_WRAP_T, gl.TEXTURE_WRAP_R]) gl.texParameteri(gl.TEXTURE_3D, w, gl.CLAMP_TO_EDGE);
-      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
-      gl.texImage3D(gl.TEXTURE_3D, 0, gl.RGB16F, lut.size, lut.size, lut.size, 0, gl.RGB, gl.FLOAT, lut.data);
-      tex = { t, lut };
-      this.luts.set(id, tex);
-    }
-    this.begin(source, prog);
-    gl.activeTexture(gl.TEXTURE2);
-    gl.bindTexture(gl.TEXTURE_3D, tex.t);
-    const u = (n) => gl.getUniformLocation(prog, n);
-    gl.uniform1i(u('lut'), 2);
-    gl.uniform1f(u('size'), lut.size);
-    gl.uniform1f(u('intensity'), clamp(intensity, 0, 1));
-    gl.uniform3f(u('dmin'), ...(lut.domainMin || [0, 0, 0]));
-    gl.uniform3f(u('dmax'), ...(lut.domainMax || [1, 1, 1]));
-    return this.finish();
-  }
 }

@@ -2,22 +2,58 @@
 // snapping (guides, grid, canvas edges and centre) and the Navigator, Info and Histogram panels.
 
 import { h, clamp } from '../util.js';
-import { toast, openModal, formRow, loadPref, savePref } from '../ui/common.js';
+import { toast, openModal, formRow, showMenu, loadPref, savePref } from '../ui/common.js';
 import { makeCanvas } from './doc.js';
 
 const RULER = 18;
+/** Ruler units (Preferences ▸ Units & Rulers): [id, name, units per inch or null]. */
+export const UNITS = [['px', '픽셀', null], ['in', '인치', 1], ['cm', 'cm', 2.54], ['mm', 'mm', 25.4], ['pt', '포인트', 72], ['%', '%', null]];
 const SNAP_TOOLS = new Set(['rect', 'ellipse', 'singleRow', 'singleCol', 'crop', 'perspCrop', 'shape', 'text', 'verticalText', 'textMask', 'verticalTextMask', 'gradient', 'ruler', 'pen', 'polyLasso', 'objSel', 'redEye', 'count', 'note', 'sampler']);
 
 export function installViewExtras(P, { stage }) {
-  const vx = loadPref('photo.viewx', { rulers: false, guides: true, grid: false, snap: true, lock: false, gridStep: 100, gridSub: 4, guideColor: '#00c8ff' });
+  const vx = { rulers: false, guides: true, grid: false, snap: true, lock: false, gridStep: 100, gridSub: 4, guideColor: '#00c8ff', gridColor: '#808080', smartColor: '#ff3d9a', ...loadPref('photo.viewx', {}) };
   const save = () => savePref('photo.viewx', vx);
   P.viewx = vx;
+  P.saveViewx = save;
+
+  // ---------------------------------------------------------------- units
+  /** Units per document pixel along an axis ('x' | 'y') in the ruler unit (or `unit`). */
+  const unitScale = (axis = 'x', unit = P.prefs?.units || 'px') => {
+    const doc = P.doc;
+    if (unit === '%') return doc ? 100 / (axis === 'x' ? doc.width : doc.height) : 1;
+    const per = UNITS.find((u) => u[0] === unit)?.[2];
+    return per ? per / (doc?.resolution || 72) : 1;
+  };
+  const unitName = (unit = P.prefs?.units || 'px') => (unit === 'px' ? 'px' : unit === 'in' ? 'in' : unit);
+  const fmtNum = (v) => String(Math.round(v * 100) / 100);
+  /** A length in document pixels written in the ruler unit ("12.5 cm"). */
+  P.fmtUnits = (px, axis = 'x') => `${fmtNum(px * unitScale(axis))} ${unitName()}`;
+  P.unitScale = unitScale;
+  P.unitList = UNITS;
+  P.setUnits = (u) => {
+    if (!UNITS.some((x) => x[0] === u)) return;
+    P.prefs.units = u;
+    savePref('photo.prefs', P.prefs);
+    P.redraw();
+    P.emit('pointer');
+  };
 
   // ---------------------------------------------------------------- drawing
-  const niceStep = (zoom) => {
-    for (const s of [1, 2, 5, 10, 20, 25, 50, 100, 200, 250, 500, 1000, 2000, 5000, 10000]) if (s * zoom >= 60) return s;
-    return 20000;
+  /** Ruler tick spacing in units for `pxPerUnit` screen pixels per unit: { minor, per (minors per labelled tick) }. */
+  const rulerTicks = (pxPerUnit) => {
+    let step = 20000;
+    for (const s of [0.01, 0.02, 0.05, 0.1, 0.2, 0.25, 0.5, 1, 2, 5, 10, 20, 25, 50, 100, 200, 250, 500, 1000, 2000, 5000, 10000]) {
+      if (s * pxPerUnit >= 60) {
+        step = s;
+        break;
+      }
+    }
+    // 1, 2, 2.5 or 5 times a power of ten: 5, 4, 5 or 5 small ticks per labelled one
+    const lead = Number(step.toExponential().split('e')[0]);
+    const per = lead === 2 ? 4 : 5;
+    return { minor: step / per, per };
   };
+  P.rulerTicks = rulerTicks;
   P.drawViewExtras = (g) => {
     const doc = P.doc;
     if (!doc) return;
@@ -72,8 +108,12 @@ export function installViewExtras(P, { stage }) {
         g.stroke();
       };
       g.lineWidth = 1;
-      lines(sub, 'rgba(120,120,120,.25)');
-      lines(step, 'rgba(120,120,120,.6)');
+      const gc = vx.gridColor || '#808080';
+      g.globalAlpha = 0.35;
+      lines(sub, gc);
+      g.globalAlpha = 0.85;
+      lines(step, gc);
+      g.globalAlpha = 1;
     }
     if (vx.guides && extras) {
       g.strokeStyle = vx.guideColor;
@@ -110,8 +150,6 @@ export function installViewExtras(P, { stage }) {
       g.setLineDash([]);
     }
     if (vx.rulers) {
-      const step = niceStep(v.zoom);
-      const minor = step / (String(step).startsWith('25') ? 5 : step % 5 === 0 ? 5 : 2);
       g.fillStyle = 'rgba(32,34,38,.94)';
       g.fillRect(0, 0, W, RULER);
       g.fillRect(0, 0, RULER, H);
@@ -120,27 +158,34 @@ export function installViewExtras(P, { stage }) {
       g.font = '10px system-ui, sans-serif';
       g.textBaseline = 'top';
       g.beginPath();
-      const startX = Math.floor(-v.x / v.zoom / minor) * minor;
-      for (let d = startX; d * v.zoom + v.x < W; d += minor) {
-        const sx = Math.round(d * v.zoom + v.x) + 0.5;
-        if (sx < RULER) continue;
-        const major = Math.abs(d % step) < 1e-6;
+      // ticks in the ruler unit (Preferences ▸ Units & Rulers, or right-click a ruler)
+      const ticks = (axis, len, off) => {
+        const k = unitScale(axis);
+        const t = rulerTicks(v.zoom / k);
+        const start = Math.floor(((-off / v.zoom) * k) / t.minor) * t.minor;
+        const out = [];
+        for (let i = 0, u = start; i < 4000; i++, u = start + i * t.minor) {
+          const s = Math.round((u / k) * v.zoom + off) + 0.5;
+          if (s >= len) break;
+          if (s < RULER) continue;
+          const n = Math.round(u / t.minor);
+          out.push([s, n % t.per === 0, u]);
+        }
+        return out;
+      };
+      for (const [sx, major, u] of ticks('x', W, v.x)) {
         g.moveTo(sx, RULER);
         g.lineTo(sx, major ? 2 : RULER - 5);
-        if (major) g.fillText(String(Math.round(d)), sx + 2, 2);
+        if (major) g.fillText(fmtNum(u), sx + 2, 2);
       }
-      const startY = Math.floor(-v.y / v.zoom / minor) * minor;
-      for (let d = startY; d * v.zoom + v.y < H; d += minor) {
-        const sy = Math.round(d * v.zoom + v.y) + 0.5;
-        if (sy < RULER) continue;
-        const major = Math.abs(d % step) < 1e-6;
+      for (const [sy, major, u] of ticks('y', H, v.y)) {
         g.moveTo(RULER, sy);
         g.lineTo(major ? 2 : RULER - 5, sy);
         if (major) {
           g.save();
           g.translate(2, sy + 2);
           g.rotate(Math.PI / 2);
-          g.fillText(String(Math.round(d)), 0, -10);
+          g.fillText(fmtNum(u), 0, -10);
           g.restore();
         }
       }
@@ -169,9 +214,10 @@ export function installViewExtras(P, { stage }) {
     const doc = P.doc;
     if (!vx.snap || !doc || !SNAP_TOOLS.has(toolId)) return p;
     const tol = 8 / doc.view.zoom;
-    const xs = [0, doc.width / 2, doc.width];
-    const ys = [0, doc.height / 2, doc.height];
-    if (vx.guides) for (const gd of doc.guides) (gd.axis === 'x' ? xs : ys).push(gd.pos);
+    const bounds = vx.snapBounds !== false;
+    const xs = bounds ? [0, doc.width / 2, doc.width] : [];
+    const ys = bounds ? [0, doc.height / 2, doc.height] : [];
+    if (vx.guides && vx.snapGuides !== false) for (const gd of doc.guides) (gd.axis === 'x' ? xs : ys).push(gd.pos);
     let best = (list, v) => {
       let b = null;
       let bd = tol;
@@ -186,7 +232,7 @@ export function installViewExtras(P, { stage }) {
     };
     let sx = best(xs, p.x);
     let sy = best(ys, p.y);
-    if (vx.grid) {
+    if (vx.grid && vx.snapGrid !== false) {
       const s = vx.gridStep / Math.max(1, vx.gridSub);
       const gx = Math.round(p.x / s) * s;
       const gy = Math.round(p.y / s) * s;
@@ -227,7 +273,7 @@ export function installViewExtras(P, { stage }) {
     const H = doc.height;
     const xs = [{ v: 0, a: 0, b: H, page: true }, { v: W / 2, a: 0, b: H, page: true }, { v: W, a: 0, b: H, page: true }];
     const ys = [{ v: 0, a: 0, b: W, page: true }, { v: H / 2, a: 0, b: W, page: true }, { v: H, a: 0, b: W, page: true }];
-    if (vx.guides && vx.snap) for (const gd of doc.guides) (gd.axis === 'x' ? xs : ys).push({ v: gd.pos, a: 0, b: gd.axis === 'x' ? H : W, page: true });
+    if (vx.guides && vx.snap && vx.snapGuides !== false) for (const gd of doc.guides) (gd.axis === 'x' ? xs : ys).push({ v: gd.pos, a: 0, b: gd.axis === 'x' ? H : W, page: true });
     let n = 0;
     for (const l of [...doc.layers].reverse()) {
       if (n > 150) break;
@@ -277,7 +323,7 @@ export function installViewExtras(P, { stage }) {
   const drawSmart = (g) => {
     if (!smart?.marks.length) return;
     g.save();
-    g.strokeStyle = '#ff3d9a';
+    g.strokeStyle = vx.smartColor || '#ff3d9a';
     g.lineWidth = 1;
     g.beginPath();
     for (const m of smart.marks) {
@@ -336,6 +382,7 @@ export function installViewExtras(P, { stage }) {
         save();
       }
       drag = { kind: 'guide', axis: q.y < RULER ? 'y' : 'x', index: -1, before: doc.capture() };
+      drag.axis0 = drag.axis;
       drag.live = { axis: drag.axis, pos: 0 };
       return true;
     }
@@ -353,13 +400,20 @@ export function installViewExtras(P, { stage }) {
   };
   P.viewExtrasMove = (e, p) => {
     if (!drag) return;
+    // a new guide: Alt turns it the other way (Photoshop)
+    if (drag.axis0) drag.axis = e.altKey ? (drag.axis0 === 'x' ? 'y' : 'x') : drag.axis0;
     let pos = drag.axis === 'x' ? p.x : p.y;
-    if (vx.snap) {
+    if (e.shiftKey) {
+      // Shift: onto the ruler's small ticks
+      const k = unitScale(drag.axis);
+      const t = rulerTicks(P.doc.view.zoom / k);
+      pos = (Math.round((pos * k) / t.minor) * t.minor) / k;
+    } else if (vx.snap) {
       const tol = 8 / P.doc.view.zoom;
       const lim = drag.axis === 'x' ? P.doc.width : P.doc.height;
       for (const c of [0, lim / 2, lim]) if (Math.abs(pos - c) <= tol) pos = c;
     }
-    drag.live = { axis: drag.axis, pos: e.shiftKey ? pos : Math.round(pos) };
+    drag.live = { axis: drag.axis, pos: e.shiftKey ? Math.round(pos * 100) / 100 : Math.round(pos) };
     stage.style.cursor = drag.axis === 'x' ? 'col-resize' : 'row-resize';
     P.redraw();
   };
@@ -373,6 +427,13 @@ export function installViewExtras(P, { stage }) {
     if (!gone) doc.guides.push(drag.live);
     if (gone && drag.index < 0) doc.restore(drag.before);
     else P.commit(gone ? '안내선 삭제' : drag.index < 0 ? '새 안내선' : '안내선 이동', drag.before);
+    drag = null;
+    P.redraw();
+  };
+  /** The pointer was taken away mid-drag (a phone call, a second finger): the guide goes back. */
+  P.viewExtrasCancel = () => {
+    if (!drag) return;
+    P.doc?.restore(drag.before);
     drag = null;
     P.redraw();
   };
@@ -416,84 +477,178 @@ export function installViewExtras(P, { stage }) {
     P.run('안내선 지우기', () => { P.doc.guides = []; });
     return undefined;
   };
+  /** Unit picker for a dialog field: [select, toPixels(value, axis), fromPixels(px, axis)]. */
+  const unitSelect = (unit = P.prefs?.units || 'px') => {
+    const s = h('select', UNITS.map(([v, n]) => h('option', { value: v }, n)));
+    s.value = unit;
+    return s;
+  };
   C.newGuide = () => {
     const doc = P.doc;
     if (!doc) return;
     const axis = h('select', h('option', { value: 'y' }, '가로 (수평선)'), h('option', { value: 'x' }, '세로 (수직선)'));
-    const pos = h('input', { type: 'number', value: Math.round(doc.height / 2), style: { width: '100px' } });
-    const unit = h('select', h('option', { value: 'px' }, '픽셀'), h('option', { value: '%' }, '%'));
+    const unit = unitSelect();
+    const pos = h('input', { type: 'number', step: 'any', value: fmtNum(doc.height / 2 * unitScale('y', unit.value)), style: { width: '100px' } });
+    const col = h('input', { type: 'color', value: vx.guideColor });
+    // switching the unit keeps the same place
+    let last = unit.value;
+    const ax = () => (axis.value === 'x' ? 'x' : 'y');
+    unit.addEventListener('change', () => {
+      const px = +pos.value / unitScale(ax(), last);
+      last = unit.value;
+      pos.value = fmtNum(px * unitScale(ax(), last));
+    });
     openModal({
       title: '새 안내선',
-      width: '360px',
-      body: [formRow('방향', axis), formRow('위치', pos, unit)],
+      width: '380px',
+      body: [formRow('방향', axis), formRow('위치', pos, unit), formRow('색상', col), h('div.note', '눈금자에서 끌어 내도 안내선이 생깁니다 (Alt: 방향 바꾸기, Shift: 눈금에 맞추기).')],
       buttons: [{ label: '취소' }, {
         label: '확인', primary: true, action: () => {
-          const lim = axis.value === 'x' ? doc.width : doc.height;
-          const v = unit.value === '%' ? (+pos.value / 100) * lim : +pos.value;
-          P.run('새 안내선', () => doc.guides.push({ axis: axis.value, pos: v }));
+          const v = +pos.value / unitScale(ax(), unit.value);
+          if (!Number.isFinite(v)) return false;
+          if (col.value !== vx.guideColor) {
+            vx.guideColor = col.value;
+            save();
+          }
+          P.run('새 안내선', () => doc.guides.push({ axis: ax(), pos: Math.round(v * 100) / 100 }));
           if (!vx.guides) C.toggleGuides();
+          return undefined;
         },
       }],
     });
   };
+  /** View ▸ New Guide Layout: columns and rows with gutters, margins on each side; live preview. */
   C.guideLayout = () => {
     const doc = P.doc;
     if (!doc) return;
-    const n = (v, w = '70px') => h('input', { type: 'number', value: v, min: 0, style: { width: w } });
-    const cols = n(3);
-    const rows = n(0);
-    const gutter = n(0);
-    const margin = n(0);
-    const clear = h('input', { type: 'checkbox', checked: true });
+    const o = { cols: true, colN: 3, colW: '', colG: 0, rows: false, rowN: 2, rowH: '', rowG: 0, margin: false, mt: 0, ml: 0, mb: 0, mr: 0, center: false, clear: true, ...loadPref('photo.guideLayout', {}) };
+    const num = (k, w = '64px') => {
+      const i = h('input', { type: 'number', min: 0, step: 'any', value: o[k], style: { width: w } });
+      i.addEventListener('input', () => { o[k] = i.value === '' ? '' : +i.value; preview(); });
+      return i;
+    };
+    const chk = (k, label) => {
+      const c = h('input', { type: 'checkbox', checked: !!o[k] });
+      c.addEventListener('change', () => { o[k] = c.checked; preview(); });
+      return h('label.inline', c, ` ${label}`);
+    };
+    const keep = doc.guides;
+    const make = () => {
+      const list = o.clear ? [] : [...keep];
+      const mt = o.margin ? +o.mt || 0 : 0;
+      const ml = o.margin ? +o.ml || 0 : 0;
+      const mb = o.margin ? +o.mb || 0 : 0;
+      const mr = o.margin ? +o.mr || 0 : 0;
+      const push = (axis, pos) => {
+        const p = Math.round(pos * 100) / 100;
+        if (!list.some((g) => g.axis === axis && Math.abs(g.pos - p) < 0.01)) list.push({ axis, pos: p });
+      };
+      // columns / rows across the space inside the margins; a fixed width centres them (optionally)
+      const split = (n, size, gut, from, to, axis) => {
+        const N = Math.max(1, Math.round(n) || 1);
+        const span = to - from;
+        const w = size !== '' && +size > 0 ? +size : (span - gut * (N - 1)) / N;
+        const total = w * N + gut * (N - 1);
+        const start = size !== '' && +size > 0 && o.center ? from + (span - total) / 2 : from;
+        push(axis, start);
+        for (let i = 0; i < N; i++) {
+          const a = start + i * (w + gut);
+          if (i) push(axis, a);
+          if (gut > 0 || i === N - 1) push(axis, a + w);
+        }
+      };
+      if (o.margin) {
+        push('y', mt);
+        push('x', ml);
+        push('y', doc.height - mb);
+        push('x', doc.width - mr);
+      }
+      if (o.cols) split(o.colN, o.colW, +o.colG || 0, ml, doc.width - mr, 'x');
+      if (o.rows) split(o.rowN, o.rowH, +o.rowG || 0, mt, doc.height - mb, 'y');
+      return list.filter((g) => g.pos >= 0 && g.pos <= (g.axis === 'x' ? doc.width : doc.height));
+    };
+    let shown = false;
+    const preview = () => {
+      doc.guides = make();
+      shown = true;
+      if (!vx.guides) {
+        vx.guides = true;
+        save();
+      }
+      P.redraw();
+    };
+    let ok = false;
     openModal({
       title: '새 안내선 레이아웃',
-      width: '400px',
-      body: [formRow('열 (세로 칸)', cols), formRow('행 (가로 칸)', rows), formRow('칸 사이 간격 (px)', gutter), formRow('바깥 여백 (px)', margin), h('label.inline', clear, ' 기존 안내선 지우기')],
-      buttons: [{ label: '취소' }, {
-        label: '확인', primary: true, action: () => {
-          const m = +margin.value;
-          const gt = +gutter.value;
-          const list = clear.checked ? [] : [...doc.guides];
-          const make = (count, total, axis) => {
-            if (count <= 0) return;
-            if (m > 0) list.push({ axis, pos: m }, { axis, pos: total - m });
-            const inner = total - 2 * m;
-            const cell = (inner - gt * (count - 1)) / count;
-            for (let i = 1; i < count; i++) {
-              const x = m + i * cell + (i - 1) * gt;
-              list.push({ axis, pos: x });
-              if (gt > 0) list.push({ axis, pos: x + gt });
-            }
-          };
-          make(+cols.value, doc.width, 'x');
-          make(+rows.value, doc.height, 'y');
+      width: '460px',
+      body: [
+        h('div.ph-sub', chk('cols', '열')),
+        formRow('개수 · 폭 · 간격 (px)', num('colN'), num('colW'), num('colG')),
+        h('div.ph-sub', chk('rows', '행')),
+        formRow('개수 · 높이 · 간격 (px)', num('rowN'), num('rowH'), num('rowG')),
+        h('div.ph-sub', chk('margin', '여백')),
+        formRow('위 · 왼쪽 · 아래 · 오른쪽 (px)', num('mt', '56px'), num('ml', '56px'), num('mb', '56px'), num('mr', '56px')),
+        chk('center', '열 가운데 맞춤 (폭을 정했을 때)'),
+        chk('clear', '기존 안내선 지우기'),
+        h('div.note', '폭·높이를 비워 두면 칸을 똑같이 나눕니다. 바꾸는 대로 그림 위에 미리 보입니다.'),
+      ],
+      buttons: [{ label: '취소' }, { label: '확인', primary: true, action: () => { ok = true; } }],
+      onClose: () => {
+        const list = make();
+        doc.guides = keep;
+        if (ok) {
+          savePref('photo.guideLayout', o);
           P.run('새 안내선 레이아웃', () => { doc.guides = list; });
-          if (!vx.guides) C.toggleGuides();
-        },
-      }],
+        } else if (shown) P.redraw();
+      },
     });
+    preview();
   };
+  /** Preferences ▸ Guides, Grid & Slices (kept as its own dialog for View ▸ … and older shortcuts). */
+  C.gridSettings = () => (C.preferences ? C.preferences('guides') : undefined);
+  /** The controls for guide / grid / smart guide settings (used by Preferences). */
+  P.guidePrefControls = () => {
+    const unit = P.prefs?.units || 'px';
+    const step = h('input', { type: 'number', min: 0.01, step: 'any', value: fmtNum(vx.gridStep * unitScale('x', unit === '%' ? 'px' : unit)), style: { width: '90px' } });
+    const sub = h('input', { type: 'number', value: vx.gridSub, min: 1, max: 20, style: { width: '70px' } });
+    const gcol = h('input', { type: 'color', value: vx.guideColor });
+    const grcol = h('input', { type: 'color', value: vx.gridColor || '#808080' });
+    const scol = h('input', { type: 'color', value: vx.smartColor || '#ff3d9a' });
+    const u = unit === '%' ? 'px' : unit;
+    return {
+      rows: [formRow('안내선 색상', gcol), formRow('격자 색상', grcol), formRow(`격자 간격 (${UNITS.find((x) => x[0] === u)[1]})`, step), formRow('세분', sub), formRow('스마트 안내선 색상', scol)],
+      apply: () => {
+        const px = +step.value / unitScale('x', u);
+        if (Number.isFinite(px) && px >= 1) vx.gridStep = px;
+        vx.gridSub = clamp(Math.round(+sub.value) || 1, 1, 20);
+        vx.guideColor = gcol.value;
+        vx.gridColor = grcol.value;
+        vx.smartColor = scol.value;
+        save();
+        P.redraw();
+      },
+      reset: () => {
+        Object.assign(vx, { gridStep: 100, gridSub: 4, guideColor: '#00c8ff', gridColor: '#808080', smartColor: '#ff3d9a' });
+        save();
+      },
+    };
+  };
+
+  /** View ▸ New Guides From Shape: guides on the edges and middle of the shape (or the selection / layer). */
   C.guideFromShape = () => {
     const doc = P.doc;
     const l = doc?.active;
-    const b = doc?.selection ? null : l && doc.bounds?.(l);
-    const r = doc?.selection ? (() => { const c = doc.selection.canvas; return P.selBounds?.(c); })() : b;
-    if (!r) return toast('선택 영역이나 레이어가 있어야 합니다');
-    P.run('모양에서 안내선', () => doc.guides.push({ axis: 'x', pos: r.x }, { axis: 'x', pos: r.x + r.w / 2 }, { axis: 'x', pos: r.x + r.w }, { axis: 'y', pos: r.y }, { axis: 'y', pos: r.y + r.h / 2 }, { axis: 'y', pos: r.y + r.h }));
+    // the selection when there is one, else the picked layer's visible pixels (a shape's own box)
+    const r = doc?.selection ? P.selBounds?.(doc.selection.canvas) : l && l.kind !== 'adjust' ? P.layerFrame(l)?.box : null;
+    if (!r || !(r.w > 0 && r.h > 0)) return toast('모양 레이어나 선택 영역이 있어야 합니다 (빈 레이어에는 만들 수 없어요)');
+    const add = [['x', r.x], ['x', r.x + r.w / 2], ['x', r.x + r.w], ['y', r.y], ['y', r.y + r.h / 2], ['y', r.y + r.h]]
+      .map(([axis, pos]) => ({ axis, pos: Math.round(pos * 100) / 100 }))
+      .filter((gd) => !doc.guides.some((o) => o.axis === gd.axis && Math.abs(o.pos - gd.pos) < 0.01));
+    if (!add.length) return toast('이미 그 자리에 안내선이 있습니다');
+    P.run('모양에서 새 안내선', () => doc.guides.push(...add));
+    if (!vx.guides) C.toggleGuides();
     return undefined;
   };
-  C.gridSettings = () => {
-    const step = h('input', { type: 'number', value: vx.gridStep, min: 2, style: { width: '90px' } });
-    const sub = h('input', { type: 'number', value: vx.gridSub, min: 1, max: 20, style: { width: '70px' } });
-    const col = h('input', { type: 'color', value: vx.guideColor });
-    openModal({
-      title: '안내선 · 격자 설정',
-      width: '380px',
-      body: [formRow('격자 간격 (px)', step), formRow('세분', sub), formRow('안내선 색', col)],
-      buttons: [{ label: '취소' }, { label: '확인', primary: true, action: () => { vx.gridStep = Math.max(2, +step.value); vx.gridSub = clamp(+sub.value, 1, 20); vx.guideColor = col.value; save(); P.redraw(); } }],
-    });
-  };
-
   C.togglePixelGrid = () => {
     vx.pixelGrid = vx.pixelGrid === false;
     save();
@@ -506,26 +661,61 @@ export function installViewExtras(P, { stage }) {
     P.redraw();
     toast(P.extrasOn ? '표시 요소 보임' : '표시 요소 숨김 (Ctrl+H로 다시 보기)');
   };
+  const flip = (k, label) => {
+    vx[k] = vx[k] === false;
+    save();
+    toast(`${label} ${vx[k] ? '켬' : '끔'}`);
+  };
+  /** View menu items after the zoom ones, in Photoshop's order. */
   P.viewMenuItems = (mod, no) => [
     '-',
-    { label: '눈금자', key: `${mod}R`, checked: vx.rulers, disabled: no(), action: () => C.toggleRulers() },
+    ...(P.screenModeMenu ? [P.screenModeMenu(mod), '-'] : []),
+    { label: '표시자 (선택 테두리·안내선·격자)', key: `${mod}H`, checked: P.extrasOn !== false, disabled: no(), action: () => C.toggleExtras() },
     { label: '표시', disabled: no(), submenu: [
       { label: '안내선', key: `${mod};`, checked: vx.guides, action: () => C.toggleGuides() },
       { label: '격자', key: `${mod}'`, checked: vx.grid, action: () => C.toggleGrid() },
-      { label: '스마트 안내선 (레이어 맞춰 붙기)', checked: vx.smart !== false, action: () => C.toggleSmartGuides() },
+      { label: '스마트 안내선', checked: vx.smart !== false, action: () => C.toggleSmartGuides() },
       { label: '픽셀 격자 (800% 이상 확대했을 때)', checked: vx.pixelGrid !== false, action: () => C.togglePixelGrid() },
-      '-',
-      { label: '표시 요소 모두 (선택 테두리·안내선·격자)', key: `${mod}H`, checked: P.extrasOn !== false, action: () => C.toggleExtras() },
     ] },
-    { label: '스냅 (자석처럼 붙기)', key: `${mod}Shift+;`, checked: vx.snap, disabled: no(), action: () => C.toggleSnap() },
     '-',
-    { label: '새 안내선…', disabled: no(), action: () => C.newGuide() },
-    { label: '새 안내선 레이아웃… (칸 나누기)', disabled: no(), action: () => C.guideLayout() },
-    { label: '선택 영역·레이어에서 안내선', disabled: no(), action: () => C.guideFromShape() },
+    { label: '눈금자', key: `${mod}R`, checked: vx.rulers, disabled: no(), action: () => C.toggleRulers() },
+    { label: '눈금자 단위', submenu: UNITS.map(([u, n]) => ({ label: n, checked: (P.prefs?.units || 'px') === u, action: () => P.setUnits(u) })) },
+    '-',
+    { label: '스냅', key: `${mod}Shift+;`, checked: vx.snap, disabled: no(), action: () => C.toggleSnap() },
+    { label: '스냅 옵션', disabled: no(), submenu: [
+      { label: '안내선', checked: vx.snapGuides !== false, action: () => flip('snapGuides', '안내선에 스냅') },
+      { label: '격자', checked: vx.snapGrid !== false, action: () => flip('snapGrid', '격자에 스냅') },
+      { label: '문서 경계', checked: vx.snapBounds !== false, action: () => flip('snapBounds', '문서 경계에 스냅') },
+      '-',
+      { label: '모두', action: () => { Object.assign(vx, { snapGuides: true, snapGrid: true, snapBounds: true, snap: true }); save(); } },
+      { label: '없음', action: () => { Object.assign(vx, { snapGuides: false, snapGrid: false, snapBounds: false }); save(); } },
+    ] },
+    '-',
     { label: '안내선 잠그기', key: `${mod}Alt+;`, checked: vx.lock, disabled: no(), action: () => C.toggleGuideLock() },
     { label: '안내선 지우기', disabled: no() || !P.doc?.guides.length, action: () => C.clearGuides() },
-    { label: '안내선 · 격자 설정…', action: () => C.gridSettings() },
+    { label: '새 안내선…', disabled: no(), action: () => C.newGuide() },
+    { label: '새 안내선 레이아웃…', disabled: no(), action: () => C.guideLayout() },
+    { label: '모양에서 새 안내선', disabled: no(), action: () => C.guideFromShape() },
+    '-',
+    { label: '안내선, 격자 설정…', action: () => C.gridSettings() },
   ];
+  /** Right-click on a ruler: its units (Photoshop). */
+  P.viewExtrasContext = (e) => {
+    if (!vx.rulers || !P.doc) return false;
+    const q = local(e);
+    if (q.y >= RULER && q.x >= RULER) return false;
+    e.preventDefault();
+    showMenu(UNITS.map(([u, n]) => ({ label: n, checked: (P.prefs?.units || 'px') === u, action: () => P.setUnits(u) })), e.clientX, e.clientY);
+    return true;
+  };
+  /** Double-click on a ruler: Preferences ▸ Units & Rulers. */
+  P.viewExtrasDblclick = (e) => {
+    if (!vx.rulers || !P.doc) return false;
+    const q = local(e);
+    if (q.y >= RULER && q.x >= RULER) return false;
+    C.preferences?.('units');
+    return true;
+  };
   /** Keys handled here: Ctrl+R, Ctrl+; Ctrl+' Ctrl+Shift+; Ctrl+Alt+; */
   P.viewKeys = (e, mod) => {
     if (!mod) return false;
@@ -628,15 +818,18 @@ export function buildInfoPanel(P) {
     const cmyk = rgb ? [0, 1, 2].map((i) => (k >= 1 ? 0 : Math.round(((1 - rgb[i] / 255 - k) / (1 - k)) * 100))).concat(Math.round(k * 100)) : null;
     const sb = doc.selection ? P.selBounds?.(doc.selection.canvas) : null;
     const row = (a, b) => h('div.ph-info-row', h('span', a), h('b', b));
+    // positions and sizes in the ruler unit (Preferences ▸ Units & Rulers)
+    const u = (px, axis) => (P.fmtUnits ? P.fmtUnits(px, axis) : `${Math.round(px)} px`);
+    const inPx = (P.prefs?.units || 'px') === 'px';
     el.replaceChildren(
       h('div.ph-info-grid',
         row('R G B', rgb ? `${rgb[0]}  ${rgb[1]}  ${rgb[2]}` : '—'),
         h('div.ph-info-row', h('span', '16진수'), h('b', rgb ? h('i.ph-info-swatch', { style: { background: hex } }) : null, hex || '—')),
         row('C M Y K', cmyk ? `${cmyk.join('  ')} %` : '—'),
         row('불투명도', rgb ? `${Math.round((rgb[3] / 255) * 100)}%` : '—'),
-        row('X, Y', p ? `${Math.floor(p.x)}, ${Math.floor(p.y)} px` : '—'),
-        row('선택 영역', sb ? `${sb.w} × ${sb.h} px` : '없음'),
-        row('문서', `${doc.width} × ${doc.height} px`),
+        row('X, Y', p ? `${u(Math.floor(p.x), 'x')}, ${u(Math.floor(p.y), 'y')}` : '—'),
+        row('선택 영역', sb ? `${u(sb.w, 'x')} × ${u(sb.h, 'y')}` : '없음'),
+        row('문서', `${doc.width} × ${doc.height} px${inPx ? '' : ` (${u(doc.width, 'x')} × ${u(doc.height, 'y')})`}`),
         row('레이어', doc.active?.name || '—')));
   };
   const schedule = () => {

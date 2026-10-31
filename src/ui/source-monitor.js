@@ -1,11 +1,15 @@
-// Source monitor: preview a media item, mark In/Out, insert/overwrite or drag into the timeline.
+// Source monitor: preview a media item, mark In/Out, insert/overwrite or drag into the timeline
+// (video only / audio only), make subclips (하위 클립 만들기, Ctrl+U) and set poster frames (Shift+P).
+// A subclip opens on its master's file, limited to the subclip's range.
 
 import { store } from '../store.js';
 import { mediaUrl, runtime, mediaEvents, mediaStatus } from '../media.js';
 import * as edit from '../edit.js';
-import { h, clamp, formatTimecode, parseTimecode, snapFrame } from '../util.js';
-import { fitRect, fitCanvasToBox, dnd, inlineEdit } from './common.js';
+import { h, clamp, formatTimecode, parseTimecode, snapFrame, modKey } from '../util.js';
+import { fitRect, fitCanvasToBox, dnd, inlineEdit, showMenu, toast, menusOpen } from './common.js';
 import { icon, iconButton } from './icons.js';
+import { extendMenu } from './menubar.js';
+import { fileIdOf, itemRange, isSubclip } from '../subclips.js';
 
 export const sourceApi = {};
 
@@ -25,6 +29,7 @@ export function createSourceMonitor() {
   const playBtn = iconButton('play', '재생 / 정지 (Space)', () => togglePlay(), { cls: 'play' });
   const dragVideo = h('span.drag-src', { draggable: true, title: '끌어서 영상만 타임라인에 놓기' }, icon('film'), '영상만');
   const dragAudio = h('span.drag-src', { draggable: true, title: '끌어서 소리만 타임라인에 놓기' }, icon('audio'), '소리만');
+  const subBtn = iconButton('subclip', '하위 클립 만들기 (Ctrl+U): 시작~끝 표시 구간을 새 프로젝트 항목으로', () => makeSubclip());
   const transport = h('div.transport',
     tcEl,
     h('span.grow'),
@@ -38,6 +43,7 @@ export function createSourceMonitor() {
     h('span.sep'),
     iconButton('insert', '삽입: 재생헤드 위치에 끼워 넣고 뒤를 밀기 (,)', () => insert('insert'), { label: '삽입' }),
     iconButton('overwrite', '덮어쓰기: 재생헤드 위치에 덮어 놓기 (.)', () => insert('overwrite'), { label: '덮어쓰기' }),
+    subBtn,
     dragVideo, dragAudio,
     h('span.grow'),
     durEl);
@@ -46,13 +52,22 @@ export function createSourceMonitor() {
   let mediaId = null;
   let shuttleRate = 0;
   let shuttleTimer = null;
+  let stopAtOut = true;
 
   const media = () => (mediaId ? store.project.media[mediaId] : null);
   const fps = () => media()?.fps || store.seq.fps;
-  const duration = () => (Number.isFinite(media()?.duration) ? media().duration : 0);
+  /** The playable range of the item: the whole file, or a subclip's part of its master. */
+  const range = () => {
+    const m = media();
+    if (!m) return [0, 0];
+    return itemRange(m);
+  };
+  const duration = () => range()[1];
   const current = () => (media()?.kind === 'image' ? 0 : video.currentTime || 0);
+  const inOf = (m) => m?.inPoint ?? range()[0];
+  const outOf = (m) => m?.outPoint ?? range()[1];
 
-  function load(id) {
+  function load(id, { focus = true } = {}) {
     stop();
     mediaId = id;
     const m = media();
@@ -68,24 +83,27 @@ export function createSourceMonitor() {
       draw();
       return;
     }
-    titleEl.textContent = m.name;
+    titleEl.textContent = isSubclip(m) ? `${m.name} (하위 클립)` : m.name;
+    const file = fileIdOf(id);
     if (m.kind === 'image') {
-      img.src = mediaUrl(id);
+      img.src = mediaUrl(file);
       img.style.display = 'block';
     } else {
-      video.src = mediaUrl(id);
+      video.src = mediaUrl(file);
       video.style.display = m.kind === 'video' ? 'block' : 'none';
       if (m.kind === 'audio') wave.style.display = 'block';
-      const seek = store.ui.sourceSeek ?? m.inPoint ?? 0;
+      const [lo, hi] = range();
+      const seekTo = clamp(store.ui.sourceSeek ?? m.inPoint ?? lo, lo, hi);
       video.addEventListener('loadedmetadata', () => {
-        video.currentTime = clamp(seek, 0, duration());
+        video.currentTime = clamp(seekTo, lo, duration());
       }, { once: true });
     }
     dragVideo.style.display = m.kind === 'audio' ? 'none' : '';
     dragAudio.style.display = m.kind === 'image' || !m.hasAudio ? 'none' : '';
+    subBtn.style.display = ['video', 'audio'].includes(m.kind) ? '' : 'none';
     layout();
     draw();
-    store.setFocus('source');
+    if (focus) store.setFocus('source');
   }
 
   function layout() {
@@ -99,59 +117,70 @@ export function createSourceMonitor() {
     draw();
   }
 
+  /** x position (0..w) of a media time on the scrub bar / waveform. */
+  const xOf = (t, w) => {
+    const [lo, hi] = range();
+    return ((t - lo) / Math.max(1e-6, hi - lo)) * w;
+  };
+
   function draw() {
     const m = media();
     tcEl.textContent = formatTimecode(current(), fps());
-    const inP = m?.inPoint ?? 0;
-    const outP = m?.outPoint ?? duration();
+    const inP = inOf(m);
+    const outP = outOf(m);
     durEl.textContent = m ? `${formatTimecode(Math.max(0, outP - inP), fps())}` : '';
     const playing = !video.paused && !!m;
     if (playBtn.dataset.state !== String(playing)) {
       playBtn.dataset.state = String(playing);
       playBtn.replaceChildren(icon(playing ? 'stop' : 'play'));
     }
+    const [lo, hi] = range();
+    const marked = !!m && (m.inPoint != null || m.outPoint != null) && (Math.abs(inP - lo) > 1e-6 || Math.abs(outP - hi) > 1e-6);
     // scrub bar
     const { ctx, w, h: hh } = fitCanvasToBox(scrub);
     ctx.clearRect(0, 0, w, hh);
-    const d = duration();
-    if (m && d > 0) {
+    if (m && hi > lo) {
       ctx.fillStyle = '#333';
       ctx.fillRect(0, hh / 2 - 2, w, 4);
-      if (m.inPoint != null || m.outPoint != null) {
+      if (marked) {
         ctx.fillStyle = 'rgba(90,150,240,0.6)';
-        ctx.fillRect((inP / d) * w, 2, ((outP - inP) / d) * w, hh - 4);
+        ctx.fillRect(xOf(inP, w), 2, xOf(outP, w) - xOf(inP, w), hh - 4);
       }
-      const x = (current() / d) * w;
+      if (m.posterTime != null && m.posterTime >= lo && m.posterTime <= hi) {
+        ctx.fillStyle = '#ffd666';
+        ctx.fillRect(xOf(m.posterTime, w) - 1, hh - 5, 3, 5);
+      }
       ctx.fillStyle = '#4aa3ff';
-      ctx.fillRect(x - 1, 0, 2, hh);
+      ctx.fillRect(xOf(current(), w) - 1, 0, 2, hh);
     }
     // audio waveform
     if (m?.kind === 'audio' && wave.style.display !== 'none') {
       const g = fitCanvasToBox(wave);
       g.ctx.fillStyle = '#0d0d0d';
       g.ctx.fillRect(0, 0, g.w, g.h);
-      const peaks = runtime.get(mediaId)?.peaks;
-      if (peaks && d > 0) {
+      const peaks = runtime.get(fileIdOf(mediaId))?.peaks;
+      if (peaks && hi > lo) {
         g.ctx.fillStyle = '#4fb183';
+        const span = hi - lo;
         for (let x = 0; x < g.w; x++) {
-          const a = Math.floor((x / g.w) * d * peaks.rate);
-          const b = Math.floor(((x + 1) / g.w) * d * peaks.rate);
+          const a = Math.floor((lo + (x / g.w) * span) * peaks.rate);
+          const b = Math.floor((lo + ((x + 1) / g.w) * span) * peaks.rate);
           let v = 0;
           for (let i = a; i <= b && i < peaks.data.length; i++) v = Math.max(v, peaks.data[i]);
           g.ctx.fillRect(x, g.h / 2 - (v * g.h) / 2, 1, v * g.h);
         }
-        if (m.inPoint != null || m.outPoint != null) {
+        if (marked) {
           g.ctx.fillStyle = 'rgba(90,150,240,0.18)';
-          g.ctx.fillRect((inP / d) * g.w, 0, ((outP - inP) / d) * g.w, g.h);
+          g.ctx.fillRect(xOf(inP, g.w), 0, xOf(outP, g.w) - xOf(inP, g.w), g.h);
         }
         g.ctx.fillStyle = '#4aa3ff';
-        g.ctx.fillRect((current() / d) * g.w - 1, 0, 2, g.h);
+        g.ctx.fillRect(xOf(current(), g.w) - 1, 0, 2, g.h);
       }
     }
     // in/out overlay markers on the image
     const o = fitCanvasToBox(overlay);
     o.ctx.clearRect(0, 0, o.w, o.h);
-    if (m && m.kind !== 'audio' && d > 0) {
+    if (m && m.kind !== 'audio' && hi > lo) {
       const t = current();
       o.ctx.fillStyle = 'rgba(255,255,255,0.8)';
       o.ctx.font = 'bold 13px sans-serif';
@@ -164,7 +193,11 @@ export function createSourceMonitor() {
   function togglePlay() {
     if (!media() || media().kind === 'image') return;
     if (video.paused) {
-      if (video.currentTime >= duration() - 0.05) video.currentTime = media().inPoint ?? 0;
+      const m = media();
+      const [lo, hi] = range();
+      if (video.currentTime >= hi - 0.05) video.currentTime = m.inPoint ?? lo;
+      // started at (or after) the Out point: play on past it, like Premiere
+      stopAtOut = m.outPoint == null || video.currentTime < m.outPoint - 0.5 / fps();
       video.playbackRate = 1;
       video.play().catch(() => {});
     } else stop();
@@ -183,24 +216,27 @@ export function createSourceMonitor() {
     if (dir === 0) return stop();
     if (Math.sign(shuttleRate) === dir) shuttleRate = clamp(shuttleRate * 2, -8, 8);
     else shuttleRate = dir;
+    const lo = range()[0];
     if (shuttleRate > 0) {
       clearInterval(shuttleTimer);
       shuttleTimer = null;
+      stopAtOut = false;
       video.playbackRate = shuttleRate;
       video.play().catch(() => {});
     } else {
       video.pause();
       clearInterval(shuttleTimer);
       shuttleTimer = setInterval(() => {
-        video.currentTime = Math.max(0, video.currentTime + shuttleRate / 15);
-        if (video.currentTime <= 0) stop();
+        video.currentTime = Math.max(lo, video.currentTime + shuttleRate / 15);
+        if (video.currentTime <= lo) stop();
       }, 1000 / 15);
     }
   }
 
   function seek(t) {
     if (!media() || media().kind === 'image') return;
-    video.currentTime = clamp(t, 0, duration());
+    const [lo, hi] = range();
+    video.currentTime = clamp(t, lo, hi);
     draw();
   }
 
@@ -212,15 +248,19 @@ export function createSourceMonitor() {
   function setMark(which, t) {
     const id = mediaId;
     if (!id) return;
+    const [lo, hi] = range();
+    const sub = isSubclip(media());
     store.transact(which === 'in' ? '소스 시작 표시' : '소스 끝 표시', () => {
       const m = store.project.media[id];
       if (!m) return;
+      // a subclip's marks never leave its range (cleared marks fall back to its bounds)
+      const v = t == null ? (sub ? (which === 'in' ? lo : hi) : null) : clamp(t, lo, hi);
       if (which === 'in') {
-        m.inPoint = t;
-        if (m.outPoint != null && t != null && m.outPoint <= t) m.outPoint = null;
+        m.inPoint = v;
+        if (m.outPoint != null && v != null && m.outPoint <= v) m.outPoint = sub ? hi : null;
       } else {
-        m.outPoint = t;
-        if (m.inPoint != null && t != null && m.inPoint >= t) m.inPoint = null;
+        m.outPoint = v;
+        if (m.inPoint != null && v != null && m.inPoint >= v) m.inPoint = sub ? lo : null;
       }
     });
     draw();
@@ -228,8 +268,8 @@ export function createSourceMonitor() {
 
   const markIn = () => media() && media().kind !== 'image' && setMark('in', snapFrame(current(), fps()));
   const markOut = () => media() && media().kind !== 'image' && setMark('out', snapFrame(current(), fps()));
-  const goIn = () => seek(media()?.inPoint ?? 0);
-  const goOut = () => seek(media()?.outPoint ?? duration());
+  const goIn = () => seek(inOf(media()));
+  const goOut = () => seek(outOf(media()));
   const clearIn = () => setMark('in', null);
   const clearOut = () => setMark('out', null);
 
@@ -241,30 +281,76 @@ export function createSourceMonitor() {
     if (sel.length) store.setPlayhead(Math.max(...sel.map((c) => c.start + c.duration)));
   }
 
+  /** 하위 클립 만들기: the In/Out range (or the whole item) becomes a new project item. */
+  async function makeSubclip() {
+    const m = media();
+    if (!m || !['video', 'audio'].includes(m.kind)) {
+      toast('하위 클립은 영상·소리 항목으로 만듭니다. 프로젝트 패널에서 항목을 두 번 클릭해 소스 모니터에서 여세요.');
+      return;
+    }
+    const { openSubclipDialog } = await import('./dialogs.js');
+    openSubclipDialog(mediaId, { inPoint: inOf(m), outPoint: outOf(m) });
+  }
+
+  /** 포스터 프레임 설정: the project panel shows this frame as the item's thumbnail. */
+  function setPosterFrame() {
+    const m = media();
+    if (!m || m.kind !== 'video') {
+      toast('포스터 프레임은 영상 항목에 설정합니다');
+      return;
+    }
+    const t = snapFrame(current(), fps());
+    store.transact('포스터 프레임 설정', () => {
+      const x = store.project.media[mediaId];
+      if (x) x.posterTime = t;
+    });
+    toast(`포스터 프레임: ${formatTimecode(t, fps())}`);
+  }
+
   // ---- interactions
   scrubBar.addEventListener('pointerdown', (e) => {
     scrubBar.setPointerCapture(e.pointerId);
     stop();
     const go = (ev) => {
       const r = scrubBar.getBoundingClientRect();
-      seek(((ev.clientX - r.left) / r.width) * duration());
+      const [lo, hi] = range();
+      seek(lo + clamp((ev.clientX - r.left) / r.width, 0, 1) * (hi - lo));
     };
     go(e);
     const up = () => {
       scrubBar.removeEventListener('pointermove', go);
       scrubBar.removeEventListener('pointerup', up);
+      scrubBar.removeEventListener('pointercancel', up);
     };
     scrubBar.addEventListener('pointermove', go);
     scrubBar.addEventListener('pointerup', up);
+    scrubBar.addEventListener('pointercancel', up);
   });
   wave.addEventListener('pointerdown', (e) => {
     const r = wave.getBoundingClientRect();
-    seek(((e.clientX - r.left) / r.width) * duration());
+    const [lo, hi] = range();
+    seek(lo + ((e.clientX - r.left) / r.width) * (hi - lo));
   });
   view.addEventListener('wheel', (e) => {
     e.preventDefault();
     step(e.deltaY > 0 ? 1 : -1);
   }, { passive: false });
+  view.addEventListener('pointerdown', () => { if (media()) store.setFocus('source'); });
+  view.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    const m = media();
+    if (!m) return;
+    const timed = ['video', 'audio'].includes(m.kind);
+    showMenu([
+      { label: '하위 클립 만들기…', key: 'Ctrl+U', disabled: !timed, action: makeSubclip },
+      { label: '포스터 프레임 설정', key: 'Shift+P', disabled: m.kind !== 'video', action: setPosterFrame },
+      '-',
+      { label: '시작 표시 지우기', key: 'Ctrl+Shift+I', disabled: !timed, action: clearIn },
+      { label: '끝 표시 지우기', key: 'Ctrl+Shift+O', disabled: !timed, action: clearOut },
+      '-',
+      { label: '프로젝트에서 표시', action: () => store.emit('reveal-media', mediaId) },
+    ], e.clientX, e.clientY);
+  });
 
   tcEl.addEventListener('click', () => {
     if (!media()) return;
@@ -300,11 +386,15 @@ export function createSourceMonitor() {
   const loop = () => {
     if (!video.paused) {
       draw();
-      // stop at out point
       const m = media();
-      if (m?.outPoint != null && video.currentTime >= m.outPoint && video.currentTime - m.outPoint < 0.2 && shuttleRate <= 1) {
+      const hi = range()[1];
+      // stop at the Out point (or at the end of a subclip)
+      if (stopAtOut && m?.outPoint != null && video.currentTime >= m.outPoint && video.currentTime - m.outPoint < 0.25 && shuttleRate <= 1) {
         video.pause();
         video.currentTime = m.outPoint;
+      } else if (isSubclip(m) && video.currentTime >= hi) {
+        video.pause();
+        video.currentTime = hi;
       }
       requestAnimationFrame(loop);
     } else rafOn = false;
@@ -316,15 +406,34 @@ export function createSourceMonitor() {
     }
   });
 
+  // keyboard: Ctrl+U (하위 클립 만들기) and Shift+P (포스터 프레임 설정)
+  window.addEventListener('keydown', (e) => {
+    if (document.body.classList.contains('photo-mode') || menusOpen() || document.querySelector('.modal-backdrop')) return;
+    const t = e.target;
+    if (t && (t.isContentEditable || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || (t.tagName === 'INPUT' && !['checkbox', 'radio', 'range', 'button', 'color'].includes(t.type)))) return;
+    if (modKey(e) && !e.shiftKey && !e.altKey && e.code === 'KeyU') {
+      e.preventDefault();
+      e.stopPropagation();
+      subclipCommand();
+    } else if (e.shiftKey && !modKey(e) && !e.altKey && e.code === 'KeyP' && store.ui.focusPanel === 'source' && media()) {
+      e.preventDefault();
+      e.stopPropagation();
+      setPosterFrame();
+    }
+  }, true);
+
   store.on('source', () => load(store.ui.sourceMediaId));
   store.on('change', () => {
     if (mediaId && !store.project.media[mediaId]) load(null);
+    else draw();
   });
   mediaEvents.on('updated', (id) => {
-    if (id === mediaId) {
-      if (!video.src && mediaStatus(id) === 'ready') load(id);
-      else draw();
-    }
+    if (!mediaId || (id !== mediaId && id !== fileIdOf(mediaId))) return;
+    const m = media();
+    const loaded = m?.kind === 'image' ? !!img.getAttribute('src') : !!video.getAttribute('src');
+    // a file that just came online: load it, without pulling keyboard focus away from where the user is
+    if (!loaded && mediaStatus(mediaId) === 'ready') load(mediaId, { focus: false });
+    else draw();
   });
   new ResizeObserver(layout).observe(view);
 
@@ -333,9 +442,43 @@ export function createSourceMonitor() {
     clearInOut: () => { clearIn(); clearOut(); },
     insert: () => insert('insert'),
     overwrite: () => insert('overwrite'),
-    goStart: () => seek(0),
-    goEnd: () => seek(duration()),
+    goStart: () => seek(range()[0]),
+    goEnd: () => seek(range()[1]),
     hasMedia: () => !!media(),
+    currentTime: () => (media() ? current() : null),
+    mediaId: () => mediaId,
+    makeSubclip,
+    setPosterFrame,
   });
   return root;
 }
+
+/**
+ * 하위 클립 만들기 (Ctrl+U): from the Source monitor's In/Out, or from the one video / audio item
+ * selected in the Project panel when that panel has the focus.
+ */
+export function subclipCommand() {
+  const sel = [...store.ui.selectedMedia].map((id) => store.project.media[id]).filter((m) => m && ['video', 'audio'].includes(m.kind));
+  const useProject = sel.length === 1 && (store.ui.focusPanel === 'project' || !sourceApi.hasMedia?.());
+  if (!useProject && sourceApi.hasMedia?.()) return sourceApi.makeSubclip();
+  const m = sel[0];
+  if (!m) {
+    toast('소스 모니터에서 영상을 열거나 프로젝트 패널에서 영상·소리 항목을 하나 고르세요');
+    return;
+  }
+  const [lo, hi] = itemRange(m);
+  import('./dialogs.js').then(({ openSubclipDialog }) => openSubclipDialog(m.id, { inPoint: m.inPoint ?? lo, outPoint: m.outPoint ?? hi }));
+}
+
+// 클립 ▸ 하위 클립 만들기 / 하위 클립 편집 (the menu bar places them after 이름 바꾸기, like Premiere)
+extendMenu('클립', (items) => {
+  const sel = () => [...store.ui.selectedMedia].map((id) => store.project.media[id]).filter(Boolean);
+  return [
+    ...items,
+    { label: '하위 클립 만들기…', key: 'Ctrl+U', action: subclipCommand },
+    { label: '하위 클립 편집…', disabled: !sel().some(isSubclip), action: () => {
+      const m = sel().find(isSubclip);
+      if (m) import('./dialogs.js').then(({ openEditSubclipDialog }) => openEditSubclipDialog(m.id));
+    } },
+  ];
+});

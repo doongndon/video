@@ -110,7 +110,7 @@ function skyReplacement(P) {
         tg.drawImage(sky, 0, 0);
         sky.getContext('2d').drawImage(t, 0, 0);
       }
-      const skyL = newLayer('raster', { name: '하늘 대체', canvas: sky });
+      const skyL = newLayer('raster', { name: '하늘', canvas: sky });
       // the layer mask is white where the sky shows (mask alpha = amount shown)
       skyL.mask = { canvas: mk, x: 0, y: 0, enabled: true, linked: true };
       const amt = +light.value / 100;
@@ -125,12 +125,16 @@ function skyReplacement(P) {
         ig.fillRect(0, 0, W, H);
         ig.globalCompositeOperation = 'destination-out';
         ig.drawImage(mk, 0, 0);
-        layers.unshift(newLayer('raster', { name: '전경 조명 (하늘 색 맞추기)', canvas: tint, blend: 'soft-light', opacity: amt, mask: { canvas: inv, x: 0, y: 0, enabled: true, linked: true } }));
+        layers.push(newLayer('raster', { name: '전경 조명', canvas: tint, blend: 'soft light', opacity: amt, mask: { canvas: inv, x: 0, y: 0, enabled: true, linked: true } }));
       }
-      // above the topmost layer
-      const top = doc.layers[doc.layers.length - 1];
-      doc.activeId = top.id;
-      for (const l of layers) P.addLayer(l);
+      // like Photoshop: a "Sky Replacement Group" on top of the layer stack (never inside an open
+      // group); a pass-through group, so the lighting layer still blends with the photo below
+      const group = newLayer('group', { name: '하늘 대체 그룹', collapsed: false });
+      for (const l of layers) l.parent = group.id;
+      doc.layers.push(...layers, group);
+      doc.activeId = skyL.id;
+      doc.selectedIds = [skyL.id];
+      doc.touch(skyL);
       made = layers;
       P.redraw();
     };
@@ -474,7 +478,33 @@ function findReplace(P) {
 
 // ---------------------------------------------------------------- layer comps
 
-const compState = (doc) => Object.fromEntries(doc.layers.map((l) => [l.id, { visible: l.visible, opacity: l.opacity, x: l.x, y: l.y, blend: l.blend, fx: l.fx ? structuredClone(l.fx) : {} }]));
+/** Where a layer is (smart objects keep it in their placement), or null for layers without a place. */
+const compPos = (l) => (l.kind === 'smart' && l.smart?.m ? [l.smart.m[4], l.smart.m[5]] : ['group', 'adjust', 'fill'].includes(l.kind) ? null : [l.x || 0, l.y || 0]);
+const compState = (doc) => Object.fromEntries(doc.layers.map((l) => [l.id, { visible: l.visible, opacity: l.opacity, p: compPos(l), blend: l.blend, fx: l.fx ? structuredClone(l.fx) : {} }]));
+
+/** Show the layers the way a comp remembers them (no history step: callers record one). */
+export function applyCompState(doc, state) {
+  // each layer goes to its own remembered place: linked layers must not drag each other along
+  const links = doc.layers.filter((l) => l.linkId).map((l) => [l, l.linkId]);
+  for (const [l] of links) l.linkId = null;
+  try {
+    for (const l of doc.layers) {
+      const s = state[l.id];
+      if (!s) continue;
+      Object.assign(l, { visible: s.visible, opacity: s.opacity, blend: s.blend, fx: structuredClone(s.fx || {}) });
+      // moving goes through translateLayers so linked masks and smart objects move too
+      // (comps saved before kept x/y)
+      const want = s.p || (s.x != null && l.kind !== 'smart' ? [s.x, s.y] : null);
+      const p = compPos(l);
+      if (want && p && (Math.abs(want[0] - p[0]) > 1e-6 || Math.abs(want[1] - p[1]) > 1e-6)) doc.translateLayers([l], want[0] - p[0], want[1] - p[1]);
+      l._styled = null;
+      doc.touch(l);
+    }
+  } finally {
+    for (const [l, id] of links) l.linkId = id;
+  }
+}
+export { compState };
 
 export function buildCompsPanel(P) {
   const el = h('div.ph-panel.ph-actions');
@@ -530,13 +560,7 @@ export function installExtra3(P) {
     const c = doc?.comps?.[i];
     if (!c) return;
     P.run(`레이어 구성요소: ${c.name}`, () => {
-      for (const l of doc.layers) {
-        const s = c.state[l.id];
-        if (!s) continue;
-        Object.assign(l, { visible: s.visible, opacity: s.opacity, x: s.x, y: s.y, blend: s.blend, fx: structuredClone(s.fx || {}) });
-        l._styled = null;
-        doc.touch(l);
-      }
+      applyCompState(doc, c.state);
       doc._compOn = c.id;
     });
   };

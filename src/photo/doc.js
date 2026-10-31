@@ -9,7 +9,7 @@
 import { loadFontFor, isWebFont } from '../fonts.js';
 import { applyAdjustment, applyFilter } from './adjust.js';
 import { compositeOnto, setCompositeClip, BLEND_MODES as BM } from './blend.js';
-import { stylePasses, fxPad, hasFx, normalizeFx } from './styles.js';
+import { stylePasses, fxPad, hasFx, normalizeFx, fxUsesGlobalLight, fxDocAnchored } from './styles.js';
 import { boxGradient, paintPattern } from './resources.js';
 
 /** [id, Korean label, canvas op] — kept for older callers; see blend.js for the grouped list. */
@@ -46,7 +46,7 @@ export function newLayer(kind, props = {}) {
 // adjustments whose result at a pixel depends only on that pixel (they can redraw a rectangle alone)
 const LOCAL_ADJ = new Set(['brightness', 'levels', 'curves', 'exposure', 'vibrance', 'hueSat', 'colorBalance', 'bw', 'photoFilter', 'invert', 'posterize', 'threshold', 'gradientMap', 'desaturate', 'selectiveColor', 'channelMixer', 'replaceColor', 'colorLookup']);
 
-const styledKey = (rev, p) => `${rev}:${p.extraKey}:${p.cx},${p.cy},${p.w},${p.h}:${p.fx}:${p.fill}`;
+const styledKey = (rev, p) => `${rev}:${p.extraKey}:${p.cx},${p.cy},${p.w},${p.h}:${p.fx}:${p.fill}:${p.light || ''}`;
 const textKey = (l, rev, x, y) => `${rev}:${JSON.stringify(l.text)}:${l.rotation}:${x},${y}`;
 const shapeKey = (l, rev, x, y) => `${rev}:${JSON.stringify(l.shape)}:${l.rotation}:${x},${y}`;
 
@@ -56,7 +56,8 @@ const shapeKey = (l, rev, x, y) => `${rev}:${JSON.stringify(l.shape)}:${l.rotati
  */
 function carryCaches(l, from, dx, dy) {
   const shift = (o) => (o ? { ...o, x: o.x + dx, y: o.y + dy } : o);
-  const st = l._styled?.parts && l._styled.key === styledKey(from.rev, l._styled.parts) ? l._styled : null;
+  // effects laid out on the document (gradient not aligned with the layer, pattern not linked) change
+  const st = l._styled?.parts && l._styled.key === styledKey(from.rev, l._styled.parts) && !fxDocAnchored(l.fx) ? l._styled : null;
   const tx = l.kind === 'text' && l._text?.key === textKey(l, from.rev, from.x, from.y) ? l._text : null;
   const sh = l.kind === 'shape' && l._shape?.key === shapeKey(l, from.rev, from.x, from.y) ? l._shape : null;
   if (!st && !tx && !sh) return null;
@@ -91,7 +92,7 @@ function snapshotLayer(l) {
   return o;
 }
 
-const DOC_ARRAYS = ['selectedIds', 'guides', 'channels', 'paths', 'notes', 'counts', 'samplers', 'comps', 'frames'];
+const DOC_ARRAYS = ['selectedIds', 'guides', 'channels', 'paths', 'notes', 'counts', 'samplers', 'comps', 'frames', 'charStyles', 'paraStyles'];
 
 export class PhotoDoc {
   constructor({ name = '제목 없음', width = 1920, height = 1080, background = '#ffffff' } = {}) {
@@ -117,6 +118,9 @@ export class PhotoDoc {
     this.frameLoop = 0; // 0: forever, n: times
     this.mode = 'rgb';
     this.resolution = 72;
+    // Layer ▸ Layer Style ▸ Global Light: the light shared by effects that use it
+    this.globalAngle = 120;
+    this.globalAltitude = 30;
     this.sourceMediaId = null;
     this.rev = 0;
     this.saved = true;
@@ -306,6 +310,7 @@ export class PhotoDoc {
         l._moveFrom = before;
       }
       if (l.mask && l.mask.linked !== false) l.mask = { ...l.mask, x: l.mask.x + dx, y: l.mask.y + dy };
+      if (l.filterMask) l.filterMask = { ...l.filterMask, x: l.filterMask.x + dx, y: l.filterMask.y + dy };
       if (l.vmask && l.vmask.linked !== false) l.vmask = { ...l.vmask, dx: (l.vmask.dx || 0) + dx, dy: (l.vmask.dy || 0) + dy };
       // moving doesn't change the pixels: keep the remembered bounds, and the rendered text, shape,
       // mask and styles, just shifted (when the masks move along with the layer)
@@ -399,6 +404,7 @@ export class PhotoDoc {
       name: this.name, width: this.width, height: this.height, activeId: this.activeId, selection: this.selection, quickMask: this.quickMask || null,
       workPath: this.workPath && structuredClone(this.workPath), mode: this.mode, resolution: this.resolution,
       info: this.info ? { ...this.info } : null, hideFx: !!this.hideFx, frameIndex: this.frameIndex || 0, frameLoop: this.frameLoop || 0,
+      globalAngle: this.globalAngle ?? 120, globalAltitude: this.globalAltitude ?? 30,
       layers: this.layers.map(snapshotLayer),
     };
     for (const k of DOC_ARRAYS) st[k] = (this[k] || []).map((v) => (v && typeof v === 'object' ? { ...v } : v));
@@ -417,6 +423,8 @@ export class PhotoDoc {
     this.resolution = st.resolution || 72;
     this.info = st.info ? { ...st.info } : null;
     this.hideFx = !!st.hideFx;
+    this.globalAngle = st.globalAngle ?? 120;
+    this.globalAltitude = st.globalAltitude ?? 30;
     this.frameIndex = st.frameIndex || 0;
     this.frameLoop = st.frameLoop || 0;
     for (const k of DOC_ARRAYS) this[k] = (st[k] || []).map((v) => (v && typeof v === 'object' ? { ...v } : v));
@@ -436,7 +444,7 @@ export class PhotoDoc {
   content(layer) {
     switch (layer.kind) {
       case 'raster': return layer.canvas ? { canvas: layer.canvas, x: layer.x, y: layer.y } : null;
-      case 'text': return renderTextLayer(this, layer);
+      case 'text': return psdTextPicture(layer) || renderTextLayer(this, layer);
       case 'shape': return renderShapeLayer(layer);
       case 'fill': return renderFillLayer(this, layer);
       case 'smart': return renderSmartLayer(layer);
@@ -529,9 +537,43 @@ export class PhotoDoc {
       const clips = [];
       for (let j = i + 1; j < list.length && list[j].clip; j++) clips.push(list[j]);
       if (!this.drawable(l, o)) continue;
-      if (clips.some((c) => this.drawable(c, o)) && l.kind !== 'adjust') this.renderClipStack(ctx, l, clips, o);
-      else this.drawLayer(ctx, l, o);
+      const draw = () => {
+        if (clips.some((c) => this.drawable(c, o)) && l.kind !== 'adjust') this.renderClipStack(ctx, l, clips, o);
+        else this.drawLayer(ctx, l, o);
+      };
+      if (restrictsChannels(l)) this.withChannels(ctx, l, o, draw);
+      else draw();
     }
+  }
+
+  /**
+   * Blending Options ▸ Channels: draw a layer that may only change some of R, G and B; the unticked
+   * channels keep what was below.
+   */
+  withChannels(ctx, l, o, draw) {
+    const W = ctx.canvas.width;
+    const H = ctx.canvas.height;
+    let r = { x: 0, y: 0, w: W, h: H };
+    if (o.clip && ctx === o.root) {
+      const x0 = Math.max(0, o.clip.x);
+      const y0 = Math.max(0, o.clip.y);
+      r = { x: x0, y: y0, w: Math.min(W, o.clip.x + o.clip.w) - x0, h: Math.min(H, o.clip.y + o.clip.h) - y0 };
+    }
+    if (r.w <= 0 || r.h <= 0) return draw();
+    const before = ctx.getImageData(r.x, r.y, r.w, r.h).data;
+    draw();
+    const img = ctx.getImageData(r.x, r.y, r.w, r.h);
+    const d = img.data;
+    const ch = l.blendChannels;
+    const keep = [ch.r === false, ch.g === false, ch.b === false];
+    for (let i = 0; i < d.length; i += 4) {
+      const a1 = d[i + 3];
+      if (!a1) continue;
+      const k = before[i + 3] / a1;
+      for (let c = 0; c < 3; c++) if (keep[c]) d[i + c] = Math.min(255, Math.round(before[i + c] * k));
+    }
+    ctx.putImageData(img, r.x, r.y);
+    return undefined;
   }
 
   drawLayer(ctx, l, o, { normal = false } = {}) {
@@ -548,45 +590,73 @@ export class PhotoDoc {
     return undefined;
   }
 
-  /** A layer's pixels (with mask and styles) composited with its blend mode and opacity. */
+  /**
+   * A layer's pixels (with mask and styles) composited with its blend mode and opacity. Fill opacity
+   * fades the layer's own pixels but not its effects; with 내부 효과를 그룹으로 혼합 (blendInterior) the
+   * effects painted inside it join the layer first and take its fill and blend mode.
+   */
   drawContent(ctx, l, c, o, { normal = false, key = '' } = {}) {
     const st = this.styled(l, c, key, o);
     const mode = normal ? 'normal' : l.blend === 'pass through' ? 'normal' : l.blend;
+    const fill = l.fillOpacity ?? 1;
+    if (!normal && l.knockout && l.knockout !== 'none') this.knockOut(ctx, l, st, o);
     if (!st.passes) {
-      this.drawBody(ctx, l, st.canvas, st.x, st.y, mode, l.opacity * (l.fillOpacity ?? 1));
+      this.drawBody(ctx, l, st.canvas, st.x, st.y, mode, l.opacity * fill);
       return;
     }
+    const merged = l.blendInterior ? mergedBody(st) : null;
     for (const p of st.passes) {
-      if (p.kind === 'body') this.drawBody(ctx, l, p.canvas, st.x, st.y, mode, l.opacity);
-      else compositeOnto(ctx, p.canvas, st.x, st.y, normal ? 'normal' : p.blend, l.opacity * p.opacity);
+      if (p.kind === 'body') this.drawBody(ctx, l, merged || p.canvas, st.x, st.y, mode, l.opacity * fill);
+      else if (!(merged && p.interior)) compositeOnto(ctx, p.canvas, st.x, st.y, normal ? 'normal' : p.blend, l.opacity * p.opacity);
     }
   }
 
-  /** Composite the layer body, applying "blend if" ranges against what is below. */
+  /**
+   * Blending Options ▸ Knockout: the layer's shape shows what is under its group (shallow) or the
+   * background (deep; transparency when there is no background) instead of the layers in between.
+   * How much is knocked out follows the layer's opacity; its fill then paints on top.
+   */
+  knockOut(ctx, l, st, o) {
+    const shape = st.passes ? st.passes.find((p) => p.kind === 'body').canvas : st.canvas;
+    let K = null;
+    if (l.knockout === 'shallow' && l.parent && o.koStack?.length) K = o.koStack[o.koStack.length - 1];
+    else K = this.knockoutBackground(l, o);
+    ctx.save();
+    ctx.globalAlpha = l.opacity;
+    ctx.globalCompositeOperation = 'destination-out';
+    ctx.drawImage(shape, st.x, st.y);
+    if (K) {
+      const t = makeCanvas(shape.width, shape.height);
+      const tg = t.getContext('2d');
+      tg.drawImage(K, -st.x, -st.y);
+      tg.globalCompositeOperation = 'destination-in';
+      tg.drawImage(shape, 0, 0);
+      // the hole is filled back with the backdrop: adding premultiplied colours replaces exactly
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.drawImage(t, st.x, st.y);
+    }
+    ctx.restore();
+  }
+
+  /** The background layer drawn alone (deep knockout), or null when the document has none. */
+  knockoutBackground(l, o) {
+    const bg = this.layers[0];
+    if (!bg || bg === l || bg.parent || bg.kind !== 'raster' || bg.name !== '배경' || !bg.visible) return null;
+    if (o._koBg) return o._koBg;
+    const c = makeCanvas(this.width, this.height);
+    const cc = this.content(bg);
+    if (cc) this.drawContent(c.getContext('2d'), bg, cc, { sig: '', only: null, skipId: null, float: null }, { normal: true });
+    o._koBg = c;
+    return c;
+  }
+
+  /**
+   * Composite the layer body, applying Blend If (혼합 조건) ranges against what is below: the grey
+   * ranges and, when set, the red / green / blue ones, all at once.
+   */
   drawBody(ctx, l, canvas, x, y, mode, alpha) {
-    const bi = l.blendIf;
-    if (!bi || (bi.this[0] <= 0 && bi.this[3] >= 255 && bi.under[0] <= 0 && bi.under[3] >= 255)) {
-      compositeOnto(ctx, canvas, x, y, mode, alpha);
-      return;
-    }
-    const w = canvas.width;
-    const h = canvas.height;
-    const src = cloneCanvas(canvas);
-    const sg = src.getContext('2d');
-    const sd = sg.getImageData(0, 0, w, h);
-    const under = makeCanvas(w, h);
-    under.getContext('2d').drawImage(ctx.canvas, -x, -y);
-    const ud = under.getContext('2d').getImageData(0, 0, w, h).data;
-    const ramp = (v, [a, b, c, d]) => (v < a || v > d ? 0 : v < b ? (v - a) / Math.max(1, b - a) : v > c ? (d - v) / Math.max(1, d - c) : 1);
-    const s = sd.data;
-    for (let i = 0; i < s.length; i += 4) {
-      if (!s[i + 3]) continue;
-      const ls = 0.299 * s[i] + 0.587 * s[i + 1] + 0.114 * s[i + 2];
-      const lu = 0.299 * ud[i] + 0.587 * ud[i + 1] + 0.114 * ud[i + 2];
-      s[i + 3] *= ramp(ls, bi.this) * (ud[i + 3] ? ramp(lu, bi.under) : 1);
-    }
-    sg.putImageData(sd, 0, 0);
-    compositeOnto(ctx, src, x, y, mode, alpha);
+    const tests = blendIfTests(l.blendIf);
+    compositeOnto(ctx, tests ? blendIfApply(canvas, ctx, x, y, tests) : canvas, x, y, mode, alpha);
   }
 
   /** Content with the layer mask, vector mask and layer styles applied (cached per revision). */
@@ -594,16 +664,22 @@ export class PhotoDoc {
     const fx = l.fx || {};
     // Layer ▸ Layer Style ▸ Hide All Effects
     const fxOn = !this.hideFx && hasFx(fx);
-    const masked = (l.mask && l.mask.enabled) || (l.vmask && l.vmask.enabled !== false && l.vmask.subpaths?.length);
-    if (!fxOn && !masked) return c;
-    const parts = { extraKey, cx: c.x, cy: c.y, w: c.canvas.width, h: c.canvas.height, fx: fxOn ? JSON.stringify(fx) : '', fill: l.fillOpacity };
+    const maskOn = !!(l.mask && l.mask.enabled);
+    const vmaskOn = !!(l.vmask && l.vmask.enabled !== false && l.vmask.subpaths?.length && vectorMaskRenderer);
+    if (!fxOn && !maskOn && !vmaskOn) return c;
+    // Blending Options: 레이어 마스크로 효과 숨기기 / 벡터 마스크로 효과 숨기기 — the effects are made from
+    // the whole layer and the mask then hides them too (otherwise the mask shapes the effects)
+    const maskLate = fxOn && maskOn && !!l.maskHidesFx;
+    const vmaskLate = fxOn && vmaskOn && !!l.vmaskHidesFx;
+    const light = fxOn && fxUsesGlobalLight(fx) ? `${this.globalAngle ?? 120},${this.globalAltitude ?? 30}` : '';
+    const parts = { extraKey, cx: c.x, cy: c.y, w: c.canvas.width, h: c.canvas.height, fx: fxOn ? `${JSON.stringify(fx)}${maskLate ? 'M' : ''}${vmaskLate ? 'V' : ''}` : '', fill: '', light };
     const key = styledKey(l.rev, parts);
     if (l._styled?.key === key) return l._styled.out;
     const pad = fxOn ? fxPad(fx) : 0;
     // work only on the part of a big layer that has pixels (a small object on a page-size layer);
-    // gradient and pattern overlays are laid out on the whole layer, so those keep it
+    // gradients and patterns are laid out on the layer's bounds / origin or the document (stylePasses)
     let cut = { x: 0, y: 0, w: c.canvas.width, h: c.canvas.height };
-    if (l.kind === 'raster' && c.canvas === l.canvas && !(fxOn && (fx.gradientOverlay?.enabled || fx.patternOverlay?.enabled))) {
+    if (l.kind === 'raster' && c.canvas === l.canvas) {
       const b = this.opaqueBounds(l);
       if (!b) cut = { x: 0, y: 0, w: 1, h: 1 };
       else cut = { x: b.x - c.x, y: b.y - c.y, w: b.w, h: b.h };
@@ -613,29 +689,36 @@ export class PhotoDoc {
     const body = makeCanvas(cut.w + pad * 2, cut.h + pad * 2);
     const bg = body.getContext('2d');
     bg.drawImage(c.canvas, pad - cut.x, pad - cut.y);
-    if (l.mask && l.mask.enabled) {
-      bg.globalCompositeOperation = 'destination-in';
+    const applyMask = (g) => {
+      g.globalCompositeOperation = 'destination-in';
       // a plain mask is drawn where it is (no page-size copy); density and feather need maskAlpha
       const m = l.mask;
-      if (!m.feather && (m.density ?? 1) >= 1) bg.drawImage(m.canvas, m.x - ox, m.y - oy);
-      else bg.drawImage(maskAlpha(this, l.mask), -ox, -oy);
-      bg.globalCompositeOperation = 'source-over';
-    }
-    if (l.vmask && l.vmask.enabled !== false && l.vmask.subpaths?.length && vectorMaskRenderer) {
-      bg.globalCompositeOperation = 'destination-in';
-      bg.drawImage(vectorMaskRenderer(this, l.vmask), -ox, -oy);
-      bg.globalCompositeOperation = 'source-over';
-    }
+      if (!m.feather && (m.density ?? 1) >= 1) {
+        // outside the mask canvas counts as hidden
+        g.drawImage(m.canvas, m.x - ox, m.y - oy);
+      } else g.drawImage(maskAlpha(this, m), -ox, -oy);
+      g.globalCompositeOperation = 'source-over';
+    };
+    const applyVmask = (g) => {
+      g.globalCompositeOperation = 'destination-in';
+      g.drawImage(vectorMaskRenderer(this, l.vmask), -ox, -oy);
+      g.globalCompositeOperation = 'source-over';
+    };
+    if (maskOn && !maskLate) applyMask(bg);
+    if (vmaskOn && !vmaskLate) applyVmask(bg);
     let out;
     if (!fxOn) out = { canvas: body, x: ox, y: oy };
     else {
-      const passes = stylePasses(body, fx, { fill: l.fillOpacity ?? 1, fg: o?.fg, bg: o?.bg, globalAngle: fx.useGlobalLight && this.globalAngle != null ? this.globalAngle : null });
-      for (const p of passes) {
-        if (p.kind !== 'body' || !p.interior?.length) continue;
-        // effects painted inside the layer are blended onto the layer itself
-        const g = p.canvas.getContext('2d');
-        for (const [cv, blend, op] of p.interior) compositeOnto(g, cv, 0, 0, blend, op);
-        p.interior = null;
+      const passes = stylePasses(body, fx, {
+        fg: o?.fg, bg: o?.bg, globalAngle: this.globalAngle ?? 120, globalAltitude: this.globalAltitude ?? 30,
+        docBox: { x: -ox, y: -oy, w: this.width, h: this.height }, origin: { x: (l.x || 0) - ox, y: (l.y || 0) - oy },
+      });
+      if (maskLate || vmaskLate) {
+        for (const p of passes) {
+          const g = p.canvas.getContext('2d');
+          if (maskLate) applyMask(g);
+          if (vmaskLate) applyVmask(g);
+        }
       }
       out = { passes, x: ox, y: oy };
     }
@@ -647,6 +730,17 @@ export class PhotoDoc {
     const kids = this.children(g.id);
     const masked = (g.mask && g.mask.enabled) || (g.vmask && g.vmask.subpaths?.length);
     const passThrough = g.blend === 'pass through' && !normal;
+    // a shallow knockout inside this group shows what is under the group: remember it
+    const ko = kids.some((k) => k.knockout === 'shallow');
+    if (ko) (o.koStack ||= []).push(passThrough ? cloneCanvas(ctx.canvas) : null);
+    try {
+      this.drawGroupInner(ctx, g, o, kids, masked, passThrough, normal);
+    } finally {
+      if (ko) o.koStack.pop();
+    }
+  }
+
+  drawGroupInner(ctx, g, o, kids, masked, passThrough, normal) {
     if (passThrough && g.opacity >= 1 && !masked && !hasFx(g.fx)) {
       this.renderList(ctx, kids, o);
       return;
@@ -682,6 +776,7 @@ export class PhotoDoc {
     const W = this.width;
     const H = this.height;
     o.sig += `clip${base.id}:${base.rev};`;
+    if (base.blendClipped === false && base.kind !== 'group') return this.renderClipSeparately(ctx, base, clips, o);
     const buf = makeCanvas(W, H);
     const bgc = buf.getContext('2d');
     const above = [];
@@ -700,7 +795,8 @@ export class PhotoDoc {
         if (st.passes) {
           // shadows and glows go straight onto the document; stroke and bevel above the clipped stack
           for (const p of st.passes) {
-            if (p.kind === 'body') compositeOnto(bgc, p.canvas, st.x, st.y, 'normal', 1);
+            if (p.kind === 'body') compositeOnto(bgc, p.canvas, st.x, st.y, 'normal', base.fillOpacity ?? 1);
+            else if (p.interior) compositeOnto(bgc, p.canvas, st.x, st.y, p.blend, p.opacity);
             else if (p.kind === 'dropShadow' || p.kind === 'outerGlow') compositeOnto(ctx, p.canvas, st.x, st.y, p.blend, base.opacity * p.opacity);
             else above.push([p, st.x, st.y]);
           }
@@ -708,13 +804,52 @@ export class PhotoDoc {
       }
       if (o.float && o.float.layerId === base.id) bgc.drawImage(o.float.canvas, o.float.x, o.float.y);
     }
-    for (const c of clips) if (this.drawable(c, o)) this.drawLayer(bgc, c, o);
+    for (const c of clips) {
+      if (!this.drawable(c, o)) continue;
+      if (restrictsChannels(c)) this.withChannels(bgc, c, o, () => this.drawLayer(bgc, c, o));
+      else this.drawLayer(bgc, c, o);
+    }
     bgc.globalCompositeOperation = 'destination-in';
     if (baseAlpha) bgc.drawImage(baseAlpha, 0, 0);
     else bgc.clearRect(0, 0, W, H);
     bgc.globalCompositeOperation = 'source-over';
     this.drawBody(ctx, base, buf, 0, 0, base.blend === 'pass through' ? 'normal' : base.blend, base.opacity);
     for (const [p, x, y] of above) compositeOnto(ctx, p.canvas, x, y, p.blend, base.opacity * p.opacity);
+    return undefined;
+  }
+
+  /**
+   * Blending Options ▸ 클리핑된 레이어를 그룹으로 혼합 turned off: the base keeps its own blend mode and
+   * each clipped layer blends with everything below on its own, only inside the base's shape.
+   */
+  renderClipSeparately(ctx, base, clips, o) {
+    const W = this.width;
+    const H = this.height;
+    this.drawLayer(ctx, base, o);
+    const c = this.content(base);
+    if (!c) return;
+    const m = this.styled({ ...base, fx: {}, _styled: null }, c);
+    const shape = makeCanvas(W, H);
+    shape.getContext('2d').drawImage(m.canvas, m.x, m.y);
+    for (const cl of clips) {
+      if (!this.drawable(cl, o)) continue;
+      const t = makeCanvas(W, H);
+      const tg = t.getContext('2d');
+      if (cl.kind === 'adjust') {
+        // the adjustment works on everything below, kept inside the base
+        tg.drawImage(ctx.canvas, 0, 0);
+        this.drawAdjustment(tg, cl, `${o.sig}sep`, { fg: o.fg, bg: o.bg });
+        tg.globalCompositeOperation = 'destination-in';
+        tg.drawImage(shape, 0, 0);
+        compositeOnto(ctx, t, 0, 0, 'normal', 1);
+        continue;
+      }
+      if (restrictsChannels(cl)) this.withChannels(tg, cl, {}, () => this.drawLayer(tg, cl, o, { normal: true }));
+      else this.drawLayer(tg, cl, o, { normal: true });
+      tg.globalCompositeOperation = 'destination-in';
+      tg.drawImage(shape, 0, 0);
+      compositeOnto(ctx, t, 0, 0, cl.blend === 'pass through' ? 'normal' : cl.blend, 1);
+    }
   }
 
   drawAdjustment(ctx, l, sig, o = {}) {
@@ -738,6 +873,9 @@ export class PhotoDoc {
       }
       l._cache = { key, canvas: out };
     }
+    // Blend If on an adjustment layer: "this layer" is the adjusted picture, "underlying" the one below
+    const tests = blendIfTests(l.blendIf);
+    if (tests) out = blendIfApply(out, ctx, 0, 0, tests);
     const mode = l.blend === 'pass through' ? 'normal' : l.blend;
     if (mode === 'normal') {
       // replace, keeping what is below exactly as transparent as it was
@@ -764,14 +902,16 @@ export class PhotoDoc {
       og.globalCompositeOperation = 'destination-in';
       og.drawImage(vectorMaskRenderer(this, l.vmask), -r.x, -r.y);
     }
+    const tests = blendIfTests(l.blendIf);
+    const pic = tests ? blendIfApply(out, ctx, r.x, r.y, tests) : out;
     const mode = l.blend === 'pass through' ? 'normal' : l.blend;
     if (mode === 'normal') {
       ctx.save();
       ctx.globalAlpha = l.opacity;
       ctx.globalCompositeOperation = 'source-atop';
-      ctx.drawImage(out, r.x, r.y);
+      ctx.drawImage(pic, r.x, r.y);
       ctx.restore();
-    } else compositeOnto(ctx, out, r.x, r.y, mode, l.opacity);
+    } else compositeOnto(ctx, pic, r.x, r.y, mode, l.opacity);
   }
 
   /** Flattened image (new doc-size canvas). */
@@ -793,6 +933,97 @@ export class PhotoDoc {
     }
     return out;
   }
+}
+
+/** The body pass with the effects painted inside the layer merged into it (cached on the pass). */
+function mergedBody(st) {
+  const body = st.passes.find((p) => p.kind === 'body');
+  if (body._merged) return body._merged;
+  const c = cloneCanvas(body.canvas);
+  const g = c.getContext('2d');
+  for (const p of st.passes) if (p.interior) compositeOnto(g, p.canvas, 0, 0, p.blend, p.opacity);
+  // the effects stay inside the layer's own pixels
+  g.globalCompositeOperation = 'destination-in';
+  g.drawImage(body.canvas, 0, 0);
+  Object.defineProperty(body, '_merged', { value: c, enumerable: false, configurable: true, writable: true });
+  return c;
+}
+
+const FULL_RANGE = (r) => !r || (r[0] <= 0 && r[1] <= 0 && r[2] >= 255 && r[3] >= 255);
+/** Whether a Blend If setting does anything. */
+export function blendIfActive(bi) {
+  if (!bi) return false;
+  if (!FULL_RANGE(bi.this) || !FULL_RANGE(bi.under)) return true;
+  return ['r', 'g', 'b'].some((c) => bi[c] && (!FULL_RANGE(bi[c].this) || !FULL_RANGE(bi[c].under)));
+}
+const rampLut = (r) => {
+  const [a, b, c, d] = r;
+  const lut = new Float32Array(256);
+  for (let v = 0; v < 256; v++) lut[v] = v < a || v > d ? 0 : v < b ? (v - a) / Math.max(1, b - a) : v > c ? (d - v) / Math.max(1, d - c) : 1;
+  return lut;
+};
+const biCache = new WeakMap();
+/** [channel (-1: grey), this-layer LUT, underlying LUT or null] for every range that limits something. */
+function blendIfTests(bi) {
+  if (!blendIfActive(bi)) return null;
+  if (biCache.has(bi)) return biCache.get(bi);
+  const out = [];
+  const add = (c, r) => {
+    if (!r) return;
+    const t = FULL_RANGE(r.this) ? null : rampLut(r.this);
+    const u = FULL_RANGE(r.under) ? null : rampLut(r.under);
+    if (t || u) out.push([c, t || ONES, u]);
+  };
+  add(-1, bi);
+  add(0, bi.r);
+  add(1, bi.g);
+  add(2, bi.b);
+  biCache.set(bi, out);
+  return out;
+}
+const ONES = new Float32Array(256).fill(1);
+
+/** A copy of `canvas` (placed at x, y on ctx) faded where the Blend If ranges leave it out. */
+function blendIfApply(canvas, ctx, x, y, tests) {
+  const w = canvas.width;
+  const h = canvas.height;
+  const src = cloneCanvas(canvas);
+  const sg = src.getContext('2d');
+  const sd = sg.getImageData(0, 0, w, h);
+  const under = makeCanvas(w, h);
+  under.getContext('2d').drawImage(ctx.canvas, -x, -y);
+  const ud = under.getContext('2d').getImageData(0, 0, w, h).data;
+  const s = sd.data;
+  for (let i = 0; i < s.length; i += 4) {
+    if (!s[i + 3]) continue;
+    let k = 1;
+    for (const [c, thisLut, underLut] of tests) {
+      const vs = c < 0 ? (77 * s[i] + 150 * s[i + 1] + 29 * s[i + 2]) >> 8 : s[i + c];
+      k *= thisLut[vs];
+      if (ud[i + 3] && underLut) {
+        const vu = c < 0 ? (77 * ud[i] + 150 * ud[i + 1] + 29 * ud[i + 2]) >> 8 : ud[i + c];
+        k *= underLut[vu];
+      }
+      if (!k) break;
+    }
+    if (k < 1) s[i + 3] = Math.round(s[i + 3] * k);
+  }
+  sg.putImageData(sd, 0, 0);
+  return src;
+}
+
+/** Whether Blending Options ▸ Channels leaves out any of R, G, B for this layer. */
+export function restrictsChannels(l) {
+  const ch = l.blendChannels;
+  return !!ch && (ch.r === false || ch.g === false || ch.b === false);
+}
+
+/** A text layer opened from a PSD shows Photoshop's own picture of it until its text is changed. */
+export const psdTextKey = (l) => `${JSON.stringify(l.text)}|${l.rotation || 0}|${l.skewX || 0}`;
+function psdTextPicture(l) {
+  const p = l.psdPicture;
+  if (!p?.canvas || p.key !== psdTextKey(l)) return null;
+  return { canvas: p.canvas, x: Math.round(l.x + p.dx), y: Math.round(l.y + p.dy) };
 }
 
 /** Tight box of non-transparent pixels in a canvas. */
@@ -910,8 +1141,8 @@ export function setWarpRenderer(fn) {
   warpRenderer = fn;
 }
 
-function smartFiltered(l) {
-  const filters = (l.smart.filters || []).filter((f) => f.enabled !== false);
+function smartFiltered(l, { skip = false } = {}) {
+  const filters = skip ? [] : (l.smart.filters || []).filter((f) => f.enabled !== false);
   const key = `${JSON.stringify(filters)}`;
   const src = l.smartSrc;
   if (!filters.length || !src) return src;
@@ -919,11 +1150,11 @@ function smartFiltered(l) {
   let c = src;
   for (const f of filters) {
     const r = f.id.startsWith('adj:') ? adjustedCopy(c, f.id.slice(4), f.params) : applyFilter(c, f.id, f.params, { fg: f.params?._fg, bg: f.params?._bg });
-    if (f.opacity != null && f.opacity < 1) {
+    // the filter's blending options (mode and opacity) mix it with what came before it
+    const mode = f.blend && f.blend !== 'normal' ? f.blend : null;
+    if ((f.opacity != null && f.opacity < 1) || mode) {
       const t = cloneCanvas(c);
-      const g = t.getContext('2d');
-      g.globalAlpha = f.opacity;
-      g.drawImage(r, 0, 0);
+      compositeOnto(t.getContext('2d'), r, 0, 0, mode || 'normal', f.opacity ?? 1);
       c = t;
     } else c = r;
   }
@@ -939,29 +1170,60 @@ function adjustedCopy(c, type, params) {
   return out;
 }
 
+function placeSmart(l, src) {
+  const s = l.smart;
+  if ((s.corners || s.warp) && warpRenderer) return warpRenderer(src, s);
+  const cs = smartCorners(l);
+  const xs = cs.map((p) => p[0]);
+  const ys = cs.map((p) => p[1]);
+  const x0 = Math.floor(Math.min(...xs));
+  const y0 = Math.floor(Math.min(...ys));
+  const c = makeCanvas(Math.ceil(Math.max(...xs)) - x0 + 1, Math.ceil(Math.max(...ys)) - y0 + 1);
+  const g = c.getContext('2d');
+  const [a, b, cc, d, e, f] = s.m;
+  g.imageSmoothingQuality = 'high';
+  g.setTransform(a, b, cc, d, e - x0, f - y0);
+  g.drawImage(src, 0, 0, s.w, s.h);
+  return { canvas: c, x: x0, y: y0 };
+}
+
 function renderSmartLayer(l) {
   const s = l.smart;
   if (!s || !l.smartSrc) return null;
-  const key = `${l.rev}:${JSON.stringify(s)}`;
-  if (l._smc?.key === key && l._smc.src === l.smartSrc) return l._smc.out;
-  const src = smartFiltered(l);
-  let out;
-  if ((s.corners || s.warp) && warpRenderer) out = warpRenderer(src, s);
-  else {
-    const cs = smartCorners(l);
-    const xs = cs.map((p) => p[0]);
-    const ys = cs.map((p) => p[1]);
-    const x0 = Math.floor(Math.min(...xs));
-    const y0 = Math.floor(Math.min(...ys));
-    const c = makeCanvas(Math.ceil(Math.max(...xs)) - x0 + 1, Math.ceil(Math.max(...ys)) - y0 + 1);
+  // the Smart Filters mask lives on the layer (l.filterMask: { canvas, x, y, enabled, invert })
+  const fm = l.filterMask;
+  const masked = fm?.canvas && fm.enabled !== false && (s.filters || []).some((f) => f.enabled !== false);
+  const key = `${l.rev}:${JSON.stringify(s)}:${masked ? [fm.x, fm.y, !!fm.invert] : ''}`;
+  if (l._smc?.key === key && l._smc.src === l.smartSrc && l._smc.fm === (masked ? fm.canvas : null)) return l._smc.out;
+  let out = placeSmart(l, smartFiltered(l));
+  if (masked) {
+    // Smart Filters mask: where it is black the filters don't show (the unfiltered picture does)
+    const plain = placeSmart(l, smartFiltered(l, { skip: true }));
+    const x0 = Math.min(out.x, plain.x);
+    const y0 = Math.min(out.y, plain.y);
+    const c = makeCanvas(Math.max(out.x + out.canvas.width, plain.x + plain.canvas.width) - x0, Math.max(out.y + out.canvas.height, plain.y + plain.canvas.height) - y0);
     const g = c.getContext('2d');
-    const [a, b, cc, d, e, f] = s.m;
-    g.imageSmoothingQuality = 'high';
-    g.setTransform(a, b, cc, d, e - x0, f - y0);
-    g.drawImage(src, 0, 0, s.w, s.h);
+    const m = makeCanvas(c.width, c.height);
+    const mg = m.getContext('2d');
+    if (fm.invert) {
+      mg.fillRect(0, 0, m.width, m.height);
+      mg.globalCompositeOperation = 'destination-out';
+    }
+    mg.drawImage(fm.canvas, fm.x - x0, fm.y - y0);
+    const part = (pic, inside) => {
+      const t = makeCanvas(c.width, c.height);
+      const tg = t.getContext('2d');
+      tg.drawImage(pic.canvas, pic.x - x0, pic.y - y0);
+      tg.globalCompositeOperation = inside ? 'destination-in' : 'destination-out';
+      tg.drawImage(m, 0, 0);
+      return t;
+    };
+    g.drawImage(part(plain, false), 0, 0);
+    g.globalCompositeOperation = 'lighter';
+    g.drawImage(part(out, true), 0, 0);
     out = { canvas: c, x: x0, y: y0 };
   }
-  Object.defineProperty(l, '_smc', { value: { key, src: l.smartSrc, out }, enumerable: false, configurable: true, writable: true });
+  Object.defineProperty(l, '_smc', { value: { key, src: l.smartSrc, fm: masked ? fm.canvas : null, out }, enumerable: false, configurable: true, writable: true });
   return out;
 }
 
@@ -1051,6 +1313,11 @@ let customShapePath = null;
 export function setShapePathProvider(fn) {
   customShapePath = fn;
 }
+let shapeRenderer = null;
+/** Set by shapes2.js: shape layers with gradient / pattern fills and strokes, stroke options and arrowheads. */
+export function setShapeRenderer(fn) {
+  shapeRenderer = fn;
+}
 
 export function shapePath(s) {
   if (customShapePath) {
@@ -1099,6 +1366,11 @@ function renderShapeLayer(layer) {
   const s = layer.shape;
   const key = shapeKey(layer, layer.rev, layer.x, layer.y);
   if (layer._shape?.key === key) return layer._shape.out;
+  const drawn = shapeRenderer?.(layer, rotatedBox);
+  if (drawn) {
+    layer._shape = { key, out: drawn };
+    return drawn;
+  }
   const pad = s.stroke && s.strokeWidth ? Math.ceil(s.strokeWidth) : 0;
   const out = rotatedBox(layer, s.w, s.h, (g) => {
     const p = shapePath(s);

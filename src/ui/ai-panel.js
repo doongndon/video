@@ -28,6 +28,9 @@ const PROMPTS = [
   ['쇼츠로 바꾸기', '세로 쇼츠(9:16)로 바꾸고, 가장 흥미로운 부분만 남겨 60초 이내로 줄여 줘.'],
 ];
 
+const STATE_ICONS = { run: 'clock', done: 'check', skip: 'minus', fail: 'close' };
+const STATE_NAMES = { run: '진행 중', done: '완료', skip: '건너뜀', fail: '실패' };
+
 const keyHint = () => h('div.note', 'Gemini API 키는 Google AI Studio에서 무료로 만들 수 있습니다: ', h('a', { href: API_KEY_PAGE, target: '_blank', rel: 'noopener' }, 'aistudio.google.com/apikey'));
 
 export function createAiPanel() {
@@ -55,7 +58,9 @@ export function createAiPanel() {
   }
 
   // ---------------------------------------------------------------- whole-video edit
-  const auto = { running: false, controller: null, states: {}, summary: null };
+  const auto = { running: false, controller: null, states: {}, summary: null, paint: () => {} };
+  // the assistant chat (declared here: the whole-video edit checks it is not busy)
+  const chat = { log: [], history: [], running: false, controller: null, render: () => {}, sync: () => {}, submit: null };
 
   function autoView() {
     const prefs = loadPref('ai.auto', {});
@@ -94,7 +99,7 @@ export function createAiPanel() {
       h('div.ai-steps', stepRows.map((r) => r.row)), subOpts, extra);
     details.open = !!prefs.open;
     details.addEventListener('toggle', () => { prefs.open = details.open; savePref('ai.auto', { ...loadPref('ai.auto', {}), open: details.open }); });
-    const startBtn = h('button.primary.ai-go', { onclick: start }, '✨ 전체 편집 시작');
+    const startBtn = h('button.primary.ai-go', { onclick: start }, icon('ai', 18), h('span', '전체 편집 시작'));
     const stopBtn = h('button', { onclick: () => auto.controller?.abort(), hidden: true }, '멈추기');
     const keyNote = h('div.note');
     const result = h('div.ai-result');
@@ -103,8 +108,9 @@ export function createAiPanel() {
       for (const r of stepRows) {
         const st = auto.states[r.id];
         r.row.classList.toggle('off', !steps.has(r.id));
-        r.state.textContent = !st ? '' : { run: '⏳', done: '✓', skip: '–', fail: '✗' }[st.state];
+        r.state.replaceChildren(...(st ? [icon(STATE_ICONS[st.state] || 'minus', 14)] : []));
         r.state.className = `ai-st ${st?.state || ''}`;
+        r.state.title = st ? STATE_NAMES[st.state] || '' : '';
         r.msg.textContent = st?.msg || '';
       }
       startBtn.hidden = auto.running;
@@ -128,6 +134,7 @@ export function createAiPanel() {
 
     async function start() {
       if (auto.running) return;
+      if (chat.running) return toast('AI 도우미가 일하는 중입니다. 끝난 뒤에 시작하세요.');
       const st = AUTO_STYLES.find((x) => x.id === style);
       const len = lenSel.value === 'style' ? st.targetLen || 0 : parseInt(lenSel.value, 10) || 0;
       auto.running = true;
@@ -135,27 +142,29 @@ export function createAiPanel() {
       auto.states = {};
       auto.controller = new AbortController();
       details.open = true; // show the progress of each step
-      paint();
+      auto.paint();
       try {
-        const res = await runAutoEdit({ style, steps, targetLen: len, extra: extra.value.trim(), ...sub }, {
+        const res = await runAutoEdit({ style, steps: new Set(steps), targetLen: len, extra: extra.value.trim(), ...sub }, {
           signal: auto.controller.signal,
           onStep: (id, state, msg) => {
             const prev = auto.states[id];
             auto.states[id] = { state, msg: state === 'run' && !msg ? prev?.msg || '진행 중…' : msg };
-            paint();
+            auto.paint();
           },
         });
         const failed = Object.values(auto.states).filter((x) => x.state === 'fail').length;
-        auto.summary = { text: [res.text, failed ? `${failed}단계는 실패했습니다(위 ✗ 표시). 나머지는 적용됐습니다.` : ''].filter(Boolean).join('\n\n'), undoLabel: store.undoStack.at(-1)?.label };
+        auto.summary = { text: [res.text, failed ? `${failed}단계는 실패했습니다(위의 빨간 표시). 나머지는 적용됐습니다.` : ''].filter(Boolean).join('\n\n'), undoLabel: store.undoStack.at(-1)?.label };
       } catch (err) {
         auto.summary = { text: err?.name === 'AbortError' ? '멈췄습니다. 그때까지 한 편집은 남아 있습니다(실행 취소 한 번으로 되돌리기).' : `실패: ${err?.message || err}`, undoLabel: store.undoStack.at(-1)?.label };
       }
       auto.running = false;
       auto.controller = null;
-      paint();
+      auto.paint();
     }
 
     syncStyles();
+    // a run keeps painting whichever copy of this view is on screen (the tab may be switched meanwhile)
+    auto.paint = paint;
     refreshers.push(paint);
     return [
       h('div.ai-card',
@@ -171,7 +180,6 @@ export function createAiPanel() {
   }
 
   // ---------------------------------------------------------------- assistant chat
-  const chat = { log: [], history: [], running: false, controller: null };
 
   function chatView() {
     const logEl = h('div.ai-log', { 'aria-live': 'polite' });
@@ -198,7 +206,7 @@ export function createAiPanel() {
     }
     function renderEntry(m) {
       if (m.role === 'user') return h('div.ai-msg.user', m.text);
-      if (m.role === 'tool') return h(`div.ai-step${m.error ? '.err' : ''}`, m.error ? '✗ ' : '✓ ', h('b', m.label), m.error ? ` — ${m.error}` : m.summary ? ` — ${m.summary}` : '');
+      if (m.role === 'tool') return h(`div.ai-step${m.error ? '.err' : ''}`, icon(m.error ? 'close' : 'check', 13), h('b', m.label), m.error ? ` — ${m.error}` : m.summary ? ` — ${m.summary}` : '');
       if (m.role === 'error') return h('div.ai-msg.err', m.text);
       if (m.role === 'pending') return h('div.ai-msg.pending', m.text || '생각하는 중…');
       const msg = h('div.ai-msg.model', m.text);
@@ -215,6 +223,10 @@ export function createAiPanel() {
 
     async function submit(text = input.value.trim(), shown = null) {
       if (!text || chat.running) return;
+      if (auto.running) {
+        toast('AI 전체 편집이 진행 중입니다. 끝난 뒤에 요청하세요.');
+        return;
+      }
       if (!geminiSettings.key) {
         show('settings');
         toast('Gemini API 키를 먼저 넣으세요');
@@ -223,12 +235,11 @@ export function createAiPanel() {
       input.value = '';
       chat.running = true;
       chat.controller = new AbortController();
-      send.hidden = true;
-      stop.hidden = false;
+      chat.sync();
       chat.log.push({ role: 'user', text: shown || text });
       const pending = { role: 'pending' };
       chat.log.push(pending);
-      renderLog();
+      chat.render();
       try {
         const res = await runAssistant(text, {
           history: chat.history,
@@ -236,11 +247,11 @@ export function createAiPanel() {
           scenes: geminiSettings.scenes === 'always',
           onStatus: (t) => {
             pending.text = t;
-            renderLog();
+            chat.render();
           },
           onEvent: (ev) => {
             chat.log.splice(chat.log.indexOf(pending), 0, { role: 'tool', ...ev });
-            renderLog();
+            chat.render();
           },
         });
         chat.log.splice(chat.log.indexOf(pending), 1);
@@ -253,24 +264,24 @@ export function createAiPanel() {
       }
       chat.running = false;
       chat.controller = null;
-      send.hidden = false;
-      stop.hidden = true;
-      renderLog();
+      chat.sync();
+      chat.render();
     }
-    aiApi.ask = (text) => {
-      show('chat');
-      return submit(text);
-    };
+    // the copy of this view on screen now (a request keeps running when the tab is switched)
+    chat.render = renderLog;
+    chat.submit = submit;
 
     const status = h('div.ai-status');
     const compose = h('div.ai-compose', input, h('div.ai-compose-btns', send, stop));
-    refreshers.push(() => {
+    chat.sync = () => {
       noKey.hidden = !!geminiSettings.key;
       for (const el of [chips, logEl, compose]) el.hidden = !geminiSettings.key && !chat.log.length;
       status.textContent = geminiSettings.key ? `Gemini · ${geminiSettings.model || '모델 자동 선택'}` : '';
       send.hidden = chat.running;
       stop.hidden = !chat.running;
-    });
+    };
+    refreshers.push(chat.sync);
+    chat.sync();
     renderLog();
     return [noKey, chips, logEl, compose, h('div.ai-foot', status, clear)];
   }
@@ -499,15 +510,26 @@ export function createAiPanel() {
   const VIEWS = { auto: autoView, chat: chatView, script: scriptView, settings: settingsView };
 
   aiApi.show = (id) => show(id);
+  /** Ask the assistant from elsewhere: opens the 도우미 tab and sends the request. */
+  aiApi.ask = (text) => {
+    if (section !== 'chat') show('chat');
+    return chat.submit?.(text);
+  };
   store.on('change', refresh);
   store.on('gemini-settings', refresh);
+  // follow the playhead (the transcript's current line) at most ~8 times a second, ending on the last position
   let last = 0;
+  let trailing = 0;
   store.on('playhead', () => {
     const now = performance.now();
+    clearTimeout(trailing);
     if (now - last > 120) {
       last = now;
       refresh();
-    }
+    } else trailing = setTimeout(() => {
+      last = performance.now();
+      refresh();
+    }, 130);
   });
   show(section);
   return Object.assign(body, {

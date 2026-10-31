@@ -1,5 +1,23 @@
-// Shared photo resources: gradients (presets + rendering), patterns (built-in + user-defined),
-// custom shapes and style presets.
+// Shared photo resources: gradients (presets, user gradients, rendering with midpoints, smoothness
+// and noise gradients), patterns (built-in, defined, imported) and a small store in this browser
+// (IndexedDB) for brush tips and presets.
+
+// preferences, read and written like ui/common.js's loadPref / savePref (no UI import here)
+const loadPref = (key, fallback) => {
+  try {
+    const v = localStorage.getItem(`montage.${key}`);
+    return v == null ? fallback : JSON.parse(v);
+  } catch {
+    return fallback;
+  }
+};
+const savePref = (key, value) => {
+  try {
+    localStorage.setItem(`montage.${key}`, JSON.stringify(value));
+  } catch {
+    // storage unavailable or full
+  }
+};
 
 const mk = (w, h) => {
   const c = document.createElement('canvas');
@@ -39,33 +57,127 @@ export function resolveStopColor(c, fg = '#000000', bg = '#ffffff') {
   return c === 'fg' ? fg : c === 'bg' ? bg : c || '#000000';
 }
 
-/** 256-entry RGBA lookup for a gradient. */
-export function gradientLut(gr, { fg = '#000000', bg = '#ffffff', reverse = false } = {}) {
-  const stops = [...(gr?.stops?.length ? gr.stops : GRADIENTS[0].stops)].sort((a, b) => a.pos - b.pos);
-  const alphas = [...(gr?.alphas?.length ? gr.alphas : [{ pos: 0, a: 1 }, { pos: 1, a: 1 }])].sort((a, b) => a.pos - b.pos);
-  const cols = stops.map((s) => ({ pos: s.pos, rgb: hexRgb(resolveStopColor(s.color, fg, bg)) }));
-  const lut = new Uint8ClampedArray(256 * 4);
-  const at = (arr, t, get) => {
-    if (t <= arr[0].pos) return get(arr[0]);
-    for (let i = 1; i < arr.length; i++) {
-      if (t <= arr[i].pos) {
-        const a = arr[i - 1];
-        const b = arr[i];
-        const k = (t - a.pos) / Math.max(1e-6, b.pos - a.pos);
-        const va = get(a);
-        const vb = get(b);
-        return Array.isArray(va) ? va.map((v, j) => v + (vb[j] - v) * k) : va + (vb - va) * k;
-      }
-    }
-    return get(arr[arr.length - 1]);
+const seeded = (seed) => {
+  let v = seed >>> 0 || 1;
+  return () => {
+    v = (v * 1664525 + 1013904223) >>> 0;
+    return v / 4294967296;
   };
+};
+
+/**
+ * Where a position u (0..1 between two stops) lands after the midpoint (0..1, 0.5 = halfway) and
+ * smoothness (0..1) are applied.
+ */
+function segmentT(u, mid, smooth) {
+  const m = Math.min(0.99, Math.max(0.01, mid ?? 0.5));
+  let v = u < m ? (0.5 * u) / m : 0.5 + (0.5 * (u - m)) / (1 - m);
+  if (smooth > 0) v += (v * v * (3 - 2 * v) - v) * smooth;
+  return v;
+}
+
+/** Values of a list of stops at t: stops sorted by pos; `mid` on a stop is the midpoint before it (%). */
+function stopsAt(arr, t, get, smooth) {
+  if (t <= arr[0].pos) return get(arr[0]);
+  for (let i = 1; i < arr.length; i++) {
+    if (t <= arr[i].pos) {
+      const a = arr[i - 1];
+      const b = arr[i];
+      const u = (t - a.pos) / Math.max(1e-6, b.pos - a.pos);
+      const k = segmentT(u, (b.mid ?? 50) / 100, smooth);
+      const va = get(a);
+      const vb = get(b);
+      return Array.isArray(va) ? va.map((v, j) => v + (vb[j] - v) * k) : va + (vb - va) * k;
+    }
+  }
+  return get(arr[arr.length - 1]);
+}
+
+function hsbToRgb(hh, s, v) {
+  hh = (((hh % 1) + 1) % 1) * 6;
+  const i = Math.floor(hh);
+  const f = hh - i;
+  const p = v * (1 - s);
+  const q = v * (1 - s * f);
+  const t = v * (1 - s * (1 - f));
+  return [[v, t, p], [q, v, p], [p, v, t], [p, q, v], [t, p, v], [v, p, q]][i % 6].map((x) => x * 255);
+}
+
+function labToRgb(L, A, B) {
+  let y = (L + 16) / 116;
+  let x = A / 500 + y;
+  let z = y - B / 200;
+  const f = (t) => (t ** 3 > 0.008856 ? t ** 3 : (t - 16 / 116) / 7.787);
+  x = 0.95047 * f(x);
+  y = f(y);
+  z = 1.08883 * f(z);
+  const g = (c) => 255 * (c > 0.0031308 ? 1.055 * c ** (1 / 2.4) - 0.055 : 12.92 * c);
+  return [g(x * 3.2406 + y * -1.5372 + z * -0.4986), g(x * -0.9689 + y * 1.8758 + z * 0.0415), g(x * 0.0557 + y * -0.204 + z * 1.057)];
+}
+
+/**
+ * Photoshop's noise gradient: random colours between each channel's minimum and maximum (0..100),
+ * roughness 0..100, in RGB, HSB or Lab, optionally with random transparency.
+ */
+function noiseLut(n) {
+  const rnd = seeded(n.seed ?? 1);
+  const rough = Math.max(0, Math.min(100, n.roughness ?? 50)) / 100;
+  const model = n.model || 'rgb';
+  const min = n.min || [0, 0, 0, 0];
+  const max = n.max || [100, 100, 100, 100];
+  const count = Math.round(3 + rough * rough * 60);
+  const pts = [];
+  for (let k = 0; k <= count; k++) {
+    const ch = [0, 1, 2, 3].map((c) => (min[c] + (max[c] - min[c]) * rnd()) / 100);
+    // restrict colours: keep away from fully saturated extremes
+    if (n.restrict && model !== 'hsb') for (let c = 0; c < 3; c++) ch[c] = 0.1 + ch[c] * 0.8;
+    if (n.restrict && model === 'hsb') ch[1] *= 0.85;
+    pts.push(ch);
+  }
+  const lut = new Uint8ClampedArray(256 * 4);
   for (let i = 0; i < 256; i++) {
-    const t = reverse ? 1 - i / 255 : i / 255;
-    const [r, g, b] = at(cols, t, (s) => s.rgb);
-    lut[i * 4] = r;
-    lut[i * 4 + 1] = g;
-    lut[i * 4 + 2] = b;
-    lut[i * 4 + 3] = at(alphas, t, (s) => s.a) * 255;
+    const t = (i / 255) * count;
+    const k = Math.min(count - 1, Math.floor(t));
+    let u = t - k;
+    // low roughness: smooth blends; high roughness: sharper steps
+    u = u * u * (3 - 2 * u) * (1 - rough * 0.5) + u * rough * 0.5;
+    const ch = pts[k].map((v, c) => v + (pts[k + 1][c] - v) * u);
+    let rgb;
+    if (model === 'hsb') rgb = hsbToRgb(ch[0], ch[1], ch[2]);
+    else if (model === 'lab') rgb = labToRgb(ch[0] * 100, ch[1] * 255 - 128, ch[2] * 255 - 128);
+    else rgb = [ch[0] * 255, ch[1] * 255, ch[2] * 255];
+    lut[i * 4] = rgb[0];
+    lut[i * 4 + 1] = rgb[1];
+    lut[i * 4 + 2] = rgb[2];
+    lut[i * 4 + 3] = n.transparency ? 255 * (0.15 + 0.85 * ch[3]) : 255;
+  }
+  return lut;
+}
+
+/** 256-entry RGBA lookup for a gradient (colour and opacity stops with midpoints, or noise). */
+export function gradientLut(gr, { fg = '#000000', bg = '#ffffff', reverse = false } = {}) {
+  let lut;
+  if (gr?.type === 'noise') lut = noiseLut(gr.noise || {});
+  else {
+    const stops = [...(gr?.stops?.length ? gr.stops : GRADIENTS[0].stops)].sort((a, b) => a.pos - b.pos);
+    const alphas = [...(gr?.alphas?.length ? gr.alphas : [{ pos: 0, a: 1 }, { pos: 1, a: 1 }])].sort((a, b) => a.pos - b.pos);
+    const cols = stops.map((s) => ({ pos: s.pos, mid: s.mid, rgb: hexRgb(resolveStopColor(s.color, fg, bg)) }));
+    // Photoshop's smoothness eases each stretch between two stops a little (100% = gently S-shaped)
+    const smooth = gr?.smooth == null ? 0 : (Math.max(0, Math.min(100, gr.smooth)) / 100) * 0.5;
+    lut = new Uint8ClampedArray(256 * 4);
+    for (let i = 0; i < 256; i++) {
+      const t = i / 255;
+      const [r, g, b] = stopsAt(cols, t, (s) => s.rgb, smooth);
+      lut[i * 4] = r;
+      lut[i * 4 + 1] = g;
+      lut[i * 4 + 2] = b;
+      lut[i * 4 + 3] = stopsAt(alphas, t, (s) => s.a, smooth) * 255;
+    }
+  }
+  if (reverse) {
+    const out = new Uint8ClampedArray(lut.length);
+    for (let i = 0; i < 256; i++) for (let c = 0; c < 4; c++) out[i * 4 + c] = lut[(255 - i) * 4 + c];
+    return out;
   }
   return lut;
 }
@@ -201,4 +313,88 @@ export function paintPattern(w, h, id, scale = 100, ox = 0, oy = 0) {
   g.fillStyle = pat;
   g.fillRect(-ox, -oy, w, h);
   return c;
+}
+
+// ---------------------------------------------------------------- saved resources (IndexedDB)
+
+const RES_DB = 'montage-photo-res';
+let resDbp = null;
+function resDb() {
+  resDbp ||= new Promise((resolve, reject) => {
+    const r = indexedDB.open(RES_DB, 1);
+    r.onupgradeneeded = () => r.result.createObjectStore('kv');
+    r.onsuccess = () => resolve(r.result);
+    r.onerror = () => reject(r.error);
+  });
+  return resDbp;
+}
+async function resTx(mode, fn) {
+  const d = await resDb();
+  return new Promise((resolve, reject) => {
+    const t = d.transaction('kv', mode);
+    const req = fn(t.objectStore('kv'));
+    t.oncomplete = () => resolve(req?.result);
+    t.onerror = () => reject(t.error);
+    t.onabort = () => reject(t.error);
+  });
+}
+/** Brushes, patterns and gradients kept in this browser (survive reloads, not tied to a document). */
+export const resGet = (key) => resTx('readonly', (s) => s.get(key)).catch(() => undefined);
+export const resPut = (key, value) => resTx('readwrite', (s) => s.put(value, key));
+export const resDel = (key) => resTx('readwrite', (s) => s.delete(key)).catch(() => {});
+
+/** 'patterns' events when the pattern list changes (brush textures imported with .abr files). */
+export const resourceEvents = new EventTarget();
+export const resourcesChanged = (kind) => resourceEvents.dispatchEvent(new Event(kind));
+
+export async function blobCanvas(b) {
+  const bmp = await createImageBitmap(b);
+  const c = mk(bmp.width, bmp.height);
+  c.getContext('2d').drawImage(bmp, 0, 0);
+  bmp.close?.();
+  return c;
+}
+
+/**
+ * Keep imported patterns (brush textures from .abr files) with the Patterns panel's imported ones:
+ * in this browser's preferences, at most 512 px, the newest 60. Returns the new pattern ids.
+ */
+export function keepImportedPatterns(list) {
+  const saved = loadPref('photo.patterns.imported', []);
+  const ids = [];
+  for (const { canvas, name } of list) {
+    let c = canvas;
+    const k = Math.min(1, 512 / Math.max(c.width, c.height));
+    if (k < 1) {
+      const t = mk(c.width * k, c.height * k);
+      const tg = t.getContext('2d');
+      tg.imageSmoothingQuality = 'high';
+      tg.drawImage(c, 0, 0, t.width, t.height);
+      c = t;
+    }
+    const id = definePattern(c, String(name || '패턴').slice(0, 40));
+    saved.push({ id, name: userPatterns.get(id).name, data: c.toDataURL('image/png') });
+    ids.push(id);
+  }
+  savePref('photo.patterns.imported', saved.slice(-60));
+  resourcesChanged('patterns');
+  return ids;
+}
+
+// ---------------------------------------------------------------- user gradients
+
+/** The user's gradients (the Gradients panel's 내 그레이디언트), kept in this browser's preferences. */
+export const userGradients = () => loadPref('photo.gradients', []);
+/** Built-in presets and the user's gradients. */
+export const allGradients = () => [...GRADIENTS, ...userGradients()];
+
+/** Add gradients (real colours, not fg/bg, so they look the same later); returns them with ids. */
+export function addUserGradients(list, fg = '#000000', bg = '#ffffff') {
+  const added = list.map((g, i) => ({
+    ...structuredClone(g),
+    stops: (g.stops || []).map((s) => ({ ...s, color: resolveStopColor(s.color, fg, bg) })),
+    id: `ug${Date.now().toString(36)}${i.toString(36)}${Math.random().toString(36).slice(2, 5)}`,
+  }));
+  savePref('photo.gradients', [...userGradients(), ...added]);
+  return added;
 }

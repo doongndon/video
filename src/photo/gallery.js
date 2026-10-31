@@ -5,6 +5,7 @@
 
 import { h } from '../util.js';
 import { openModal, toast } from '../ui/common.js';
+import { icon } from '../ui/icons.js';
 import { FILTERS, applyFilter, defaultFilterParams } from './adjust.js';
 import { applyToLayer, paramEditors } from './pdialogs.js';
 import { makeCanvas } from './doc.js';
@@ -163,7 +164,7 @@ export function filterGalleryDialog(P) {
   const renderLayers = () => {
     layersEl.replaceChildren(...stack.map((e, i) => i).reverse().map((i) => {
       const e = stack[i];
-      const eye = h('button.small.ph-gal-eye', { type: 'button', title: e.enabled === false ? '켜기' : '끄기', 'aria-pressed': String(e.enabled !== false), onclick: (ev) => { ev.stopPropagation(); e.enabled = e.enabled === false; renderLayers(); draw(); } }, e.enabled === false ? '○' : '●');
+      const eye = h('button.small.ph-gal-eye', { type: 'button', title: e.enabled === false ? '켜기' : '끄기', 'aria-label': e.enabled === false ? '효과 레이어 켜기' : '효과 레이어 끄기', 'aria-pressed': String(e.enabled !== false), onclick: (ev) => { ev.stopPropagation(); e.enabled = e.enabled === false; renderLayers(); draw(); } }, icon(e.enabled === false ? 'eyeOff' : 'eye', 14));
       return h(`div.ph-gal-layer${i === cur ? '.on' : ''}`, { role: 'listitem', onclick: () => { cur = i; renderLayers(); renderSettings(); mark(); } }, eye, h('span', FILTERS[e.id]?.name || e.id));
     }));
   };
@@ -214,8 +215,15 @@ export function filterGalleryDialog(P) {
       });
       return;
     }
-    P.run('필터 갤러리', () => applyToLayer(P, (c) => applyStack(c, active, colors)));
-    P.recordStep?.({ type: 'filter', id: 'filterGallery', params: { stack: active.map((e) => ({ id: e.id, params: { ...e.params } })) } });
+    // the gallery's effects are slow on a big picture: say so before the page is busy
+    const go = () => {
+      P.run('필터 갤러리', () => applyToLayer(P, (c) => applyStack(c, active, colors)));
+      P.recordStep?.({ type: 'filter', id: 'filterGallery', params: { stack: active.map((e) => ({ id: e.id, params: { ...e.params } })) } });
+    };
+    if (src.width * src.height > 2e6) {
+      toast('필터 갤러리 적용 중…');
+      setTimeout(go, 30);
+    } else go();
   };
 
   renderLayers();

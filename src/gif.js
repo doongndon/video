@@ -139,7 +139,10 @@ export async function encodeGif(frames, w, h, fps, onProgress = () => {}) {
   for (const [r, g, b] of palette) bytes.push(r, g, b);
   // loop forever
   bytes.push(0x21, 0xff, 0x0b, ...[...'NETSCAPE2.0'].map((c) => c.charCodeAt(0)), 0x03, 0x01, 0, 0, 0);
-  const delay = Math.max(2, Math.round(100 / fps));
+  // GIF delays are whole hundredths of a second: spread the rounding over the frames so the
+  // animation keeps real time (30 fps = 3, 3, 4 … instead of always 3, which ran 11 % fast);
+  // browsers slow down delays under 2, so never go below that
+  let elapsed = 0;
   const idx = new Uint8Array(w * h);
   for (let fi = 0; fi < frames.length; fi++) {
     const f = frames[fi];
@@ -151,6 +154,8 @@ export async function encodeGif(frames, w, h, fps, onProgress = () => {}) {
         idx[p] = nearest(cl(f[i] + d), cl(f[i + 1] + d), cl(f[i + 2] + d));
       }
     }
+    const delay = Math.max(2, Math.round(((fi + 1) * 100) / fps) - elapsed);
+    elapsed += delay;
     bytes.push(0x21, 0xf9, 0x04, 0x04, delay & 255, (delay >> 8) & 255, 0, 0);
     bytes.push(0x2c);
     push16(0);

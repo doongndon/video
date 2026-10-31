@@ -283,8 +283,37 @@ export const TEXT_STYLES = [
   { id: 'note', name: '손글씨 메모', v: { font: 'Nanum Pen Script', color: '#ffffff', strokeWidth: 0, background: false, bold: false } },
   { id: 'news', name: '뉴스 헤드라인', v: { font: 'Noto Serif KR', color: '#ffffff', strokeWidth: 0, background: true, bgColor: '#b91c1c', bgOpacity: 92, bold: true } },
   { id: 'cute', name: '동글동글', v: { font: 'Dongle', color: '#ffffff', strokeColor: '#5b3cc4', strokeRel: 0.09, background: false } },
-  { id: 'neon', name: '네온', v: { font: 'Do Hyeon', color: '#9ef9ff', strokeColor: '#1e6bff', strokeRel: 0.05, background: false } },
+  { id: 'neon', name: '네온', v: { font: 'Do Hyeon', color: '#9ef9ff', strokeColor: '#1e6bff', strokeRel: 0.05, background: false, shadowOn: true, shadowColor: '#1e6bff', shadowOpacity: 90, shadowDistance: 0, shadowBlur: 18, shadowSize: 2 } },
+  { id: 'double', name: '두 겹 외곽선', v: { font: 'Black Han Sans', color: '#ffffff', strokeColor: '#ff3b6b', strokeRel: 0.07, stroke2Color: '#ffffff', stroke2Rel: 0.06, background: false } },
+  { id: 'shadow', name: '그림자 글씨', v: { color: '#ffffff', strokeWidth: 0, background: false, bold: true, shadowOn: true, shadowColor: '#000000', shadowOpacity: 80, shadowDistance: 6, shadowBlur: 10, shadowAngle: 135 } },
 ];
+
+/**
+ * The look a style starts from: every style sets the whole look, so applying one after another
+ * does not leave the previous font, outline or shadow behind.
+ */
+const BASE_LOOK = {
+  font: 'Noto Sans KR', bold: true, italic: false, fillOn: true, fillType: 'solid', color: '#ffffff', strokeWidth: 0, stroke2Width: 0, stroke3Width: 0,
+  background: false, shadowOn: false,
+};
+
+/** Write a look onto a text effect; *Rel sizes are fractions of the font size. Clears keyframes of what it sets. */
+function writeLook(tx, look) {
+  const size = evalParam(tx.params.size, 0);
+  const set = (k, v) => {
+    const p = tx.params[k];
+    if (!p) return;
+    p.value = v;
+    p.kf = null;
+  };
+  for (const [k, v] of Object.entries(look)) {
+    if (k === 'strokeRel') set('strokeWidth', Math.max(1, Math.round(size * v)));
+    else if (k === 'stroke2Rel') set('stroke2Width', Math.max(1, Math.round(size * v)));
+    else if (k === 'bgPadRel') set('bgPadding', Math.round(size * v));
+    else set(k, v);
+  }
+  if (look.background && look.bgPadRel == null) set('bgPadding', Math.round(size * 0.22));
+}
 
 export function applyTextStyle(clipIds, styleId) {
   const s = seq();
@@ -295,18 +324,157 @@ export function applyTextStyle(clipIds, styleId) {
     for (const id of clipIds) {
       const tx = s.clips[id]?.effects.find((e) => e.type === 'text');
       if (!tx) continue;
-      const size = evalParam(tx.params.size, 0);
-      for (const [k, v] of Object.entries(st.v)) {
-        if (k === 'strokeRel') {
-          tx.params.strokeWidth.value = Math.max(1, Math.round(size * v));
-          tx.params.strokeWidth.kf = null;
-        } else if (tx.params[k]) tx.params[k].value = v;
-      }
-      if (st.v.background) tx.params.bgPadding.value = Math.round(size * 0.22);
+      writeLook(tx, { ...BASE_LOOK, ...st.v });
       n++;
     }
   });
   return n;
+}
+
+// ---------------------------------------------------------------- caption styles
+
+/**
+ * 캡션 스타일: looks for a whole caption track. size is a fraction of the frame's shorter side and
+ * y the vertical position (fraction of the height); captions are centred horizontally.
+ */
+export const CAPTION_STYLES = [
+  { id: 'box', name: '기본 (반투명 검은 상자)', size: 0.05, y: 0.86, v: { bold: false, background: true, bgColor: '#000000', bgOpacity: 55, bgPadRel: 0.24, bgRadius: 8 } },
+  { id: 'shadow', name: '그림자 (상자 없음)', size: 0.05, y: 0.88, v: { bold: false, shadowOn: true, shadowColor: '#000000', shadowOpacity: 90, shadowDistance: 2, shadowBlur: 6, shadowSize: 1 } },
+  { id: 'outline', name: '흰 글씨 + 검은 외곽선', size: 0.052, y: 0.86, v: { bold: true, strokeColor: '#000000', strokeRel: 0.09 } },
+  { id: 'yellow', name: '노란 글씨 + 외곽선', size: 0.052, y: 0.86, v: { bold: true, color: '#ffe14d', strokeColor: '#000000', strokeRel: 0.09 } },
+  { id: 'bar', name: '넓은 바 (방송 자막)', size: 0.045, y: 0.88, v: { bold: false, background: true, bgColor: '#111111', bgOpacity: 78, bgPadRel: 0.45, bgRadius: 0 } },
+  { id: 'shorts', name: '쇼츠 가운데 큰 자막', size: 0.075, y: 0.64, v: { font: 'Black Han Sans', bold: false, strokeColor: '#000000', strokeRel: 0.12, shadowOn: true, shadowDistance: 4, shadowBlur: 8, shadowOpacity: 70 } },
+  { id: 'variety', name: '예능 자막 (노랑 + 두 겹 외곽선)', size: 0.06, y: 0.84, v: { font: 'Black Han Sans', bold: false, color: '#ffe14d', strokeColor: '#000000', strokeRel: 0.1, stroke2Color: '#ffffff', stroke2Rel: 0.05 } },
+  { id: 'top', name: '위쪽 자막 (반투명 상자)', size: 0.045, y: 0.12, v: { bold: false, background: true, bgColor: '#000000', bgOpacity: 55, bgPadRel: 0.24, bgRadius: 8 } },
+];
+
+/**
+ * The caption clips a caption style applies to: every text clip on the tracks of the selected text
+ * clips, or (nothing selected) on the video track holding the most text clips.
+ */
+export function captionTargets() {
+  const s = seq();
+  let tracks = [...new Set(store.selectedClips().filter((c) => c.kind === 'text').map((c) => c.trackId))];
+  if (!tracks.length) {
+    let best = null;
+    for (const t of videoTracks(s)) {
+      const n = clipsOnTrack(s, t.id).filter((c) => c.kind === 'text').length;
+      if (n && (!best || n > best.n)) best = { id: t.id, n };
+    }
+    if (best) tracks = [best.id];
+  }
+  return Object.values(s.clips).filter((c) => c.kind === 'text' && tracks.includes(c.trackId)).map((c) => c.id);
+}
+
+export function applyCaptionStyle(clipIds, styleId) {
+  const s = seq();
+  const st = CAPTION_STYLES.find((x) => x.id === styleId);
+  if (!st) return 0;
+  const U = Math.min(s.width, s.height);
+  let n = 0;
+  store.transact(`캡션 스타일: ${st.name}`, () => {
+    for (const id of clipIds) {
+      const c = s.clips[id];
+      const tx = c?.effects.find((e) => e.type === 'text');
+      if (!tx) continue;
+      tx.params.size.value = Math.round(U * st.size);
+      tx.params.size.kf = null;
+      writeLook(tx, { ...BASE_LOOK, align: 'center', ...st.v });
+      const motion = c.effects.find((e) => e.type === 'motion');
+      if (motion) {
+        for (const [k, v] of [['posX', s.width / 2], ['posY', Math.round(s.height * st.y)]]) {
+          motion.params[k].value = v;
+          motion.params[k].kf = null;
+        }
+      }
+      n++;
+    }
+  });
+  return n;
+}
+
+// ---------------------------------------------------------------- roll / crawl (반응형 디자인 - 시간 ▸ 롤)
+
+/**
+ * Make clips roll (bottom → top) or crawl (sideways) by keyframing their position, like Premiere's
+ * 롤 / 크롤 options. opts: { dir: 'roll' | 'crawlLeft' | 'crawlRight', startOff, endOff, preRoll,
+ * postRoll, easeIn, easeOut } (seconds). measure(clip) → the clip's on-screen box in sequence px
+ * { x0, y0, x1, y1 } at rest. Returns the number of clips changed.
+ */
+export function applyRollCrawl(clipIds, opts, measure) {
+  const s = seq();
+  const fd = 1 / s.fps;
+  const { dir = 'roll', startOff = true, endOff = true } = opts;
+  let n = 0;
+  store.transact(dir === 'roll' ? '롤' : '크롤', () => {
+    for (const id of clipIds) {
+      const c = s.clips[id];
+      const motion = c?.effects.find((e) => e.type === 'motion');
+      const box = c && motion ? measure(c) : null;
+      if (!box) continue;
+      const D = c.duration;
+      const roll = dir === 'roll';
+      const key = roll ? 'posY' : 'posX';
+      const p = motion.params[key];
+      // the resting position (without an earlier roll / crawl on the same axis)
+      const rest = p.kf?.length ? (p.restValue ?? p.value) : p.value;
+      const lo = roll ? box.y0 : box.x0;
+      const hi = roll ? box.y1 : box.x1;
+      const span = roll ? s.height : s.width;
+      // start / end so the box is just outside the frame (or where it rests)
+      let from;
+      let to;
+      if (roll) {
+        from = startOff ? rest + (span - lo) : rest;
+        to = endOff ? rest - hi : startOff ? rest : rest - (hi - lo);
+      } else if (dir === 'crawlLeft') {
+        from = startOff ? rest + (span - lo) : rest;
+        to = endOff ? rest - hi : startOff ? rest : rest - (hi - lo);
+      } else {
+        from = startOff ? rest - hi : rest;
+        to = endOff ? rest + (span - lo) : startOff ? rest : rest + (hi - lo);
+      }
+      const t0 = clamp(opts.preRoll || 0, 0, Math.max(0, D - fd));
+      const t1 = clamp(D - (opts.postRoll || 0), t0 + fd, D);
+      const T = t1 - t0;
+      let a = Math.max(0, opts.easeIn || 0);
+      let b = Math.max(0, opts.easeOut || 0);
+      if (a + b > T) {
+        const k = T / (a + b);
+        a *= k;
+        b *= k;
+      }
+      // constant speed in the middle; quadratic ramps keep the speed continuous at the joins
+      const vel = (to - from) / Math.max(1e-6, T - a / 2 - b / 2);
+      const kf = [{ t: t0, v: from, ease: a > 0 ? 'inQuad' : 'linear' }];
+      if (a > 0) kf.push({ t: t0 + a, v: from + (vel * a) / 2, ease: 'linear' });
+      if (b > 0) kf.push({ t: t1 - b, v: to - (vel * b) / 2, ease: 'outQuad' });
+      kf.push({ t: t1, v: to, ease: 'linear' });
+      p.kf = kf.filter((k, i) => !i || k.t > kf[i - 1].t + 1e-6).map((k) => ({ ...k, v: Math.round(k.v * 10) / 10 }));
+      p.restValue = rest;
+      p.value = rest;
+      c.roll = { dir, startOff, endOff, preRoll: opts.preRoll || 0, postRoll: opts.postRoll || 0, easeIn: opts.easeIn || 0, easeOut: opts.easeOut || 0 };
+      n++;
+    }
+  });
+  return n;
+}
+
+/** Remove a roll / crawl: the clip goes back to where it rested. */
+export function clearRollCrawl(clipIds) {
+  const s = seq();
+  store.transact('롤/크롤 지우기', () => {
+    for (const id of clipIds) {
+      const c = s.clips[id];
+      const motion = c?.effects.find((e) => e.type === 'motion');
+      if (!motion || !c.roll) continue;
+      const p = motion.params[c.roll.dir === 'roll' ? 'posY' : 'posX'];
+      p.kf = null;
+      p.value = p.restValue ?? p.value;
+      delete p.restValue;
+      delete c.roll;
+    }
+  });
 }
 
 // ---------------------------------------------------------------- stickers
@@ -315,18 +483,22 @@ export const EMOJIS = ['😀', '😂', '🤣', '🥰', '😍', '😎', '🤔', '
 
 export function addSticker(emoji, at = store.ui.playhead) {
   const s = seq();
+  // one undo step for the clip, its look and its pop-in
+  const mark = store.undoMark();
   const id = edit.addTextClip({ start: at, content: emoji, x: s.width * 0.75, y: s.height * 0.3 });
+  if (!id) return null;
   store.transact('스티커', () => {
-    const c = s.clips[id];
+    const c = store.seq.clips[id];
     if (!c) return;
     c.name = `스티커 ${emoji}`;
     c.duration = Math.min(c.duration, 3);
     const tx = c.effects.find((e) => e.type === 'text');
-    tx.params.size.value = Math.round(s.height * 0.16);
+    tx.params.size.value = Math.round(Math.min(s.width, s.height) * 0.16);
     tx.params.strokeWidth.value = 0;
     tx.params.background.value = false;
   });
   applyAnimation([id], 'in', 'pop', 0.5);
+  store.squashSince(mark, `스티커 ${emoji}`);
   return id;
 }
 
@@ -597,6 +769,8 @@ export function createSlideshow(mediaIds, { perImage = 3, transition = 'crossDis
   if (!track) return 0;
   let t = snapFrame(store.ui.playhead, s.fps);
   const placed = [];
+  // placing, framing, zooms and transitions are separate edits underneath: undo them as one step
+  const mark = store.undoMark();
   store.transact('슬라이드쇼 만들기', () => {
     for (const id of ids) {
       const m = store.project.media[id];
@@ -615,6 +789,7 @@ export function createSlideshow(mediaIds, { perImage = 3, transition = 'crossDis
       edit.applyTransition(placed[placed.length - 1], 'out', 'crossDissolve', transDur);
     }
   });
+  store.squashSince(mark, '슬라이드쇼 만들기');
   store.selectClips(placed);
   return placed.length;
 }

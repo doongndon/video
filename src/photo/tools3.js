@@ -581,8 +581,10 @@ export function installTools3(P) {
     P.menus['보기'] = () => {
       const items = origView();
       const rot = doc()?.view?.rot || 0;
-      const i = items.findIndex((x) => x?.label?.startsWith('100%'));
-      items.splice(i + 1, 0, { label: `화면 회전${rot ? ` (지금 ${rot}°)` : ''}`, disabled: !doc(), submenu: [
+      // after the zoom levels (200%, else 100%)
+      let i = items.findIndex((x) => x?.label?.startsWith('200%'));
+      if (i < 0) i = items.findIndex((x) => x?.label?.startsWith('100%'));
+      items.splice(i >= 0 ? i + 1 : items.length, 0, { label: `화면 회전${rot ? ` (지금 ${rot}°)` : ''}`, disabled: !doc(), submenu: [
         { label: '회전 보기 도구', key: 'R', action: () => P.setTool('rotateView') },
         { label: '시계 방향 15°', action: () => P.setViewRotation(rot + 15) },
         { label: '반시계 방향 15°', action: () => P.setViewRotation(rot - 15) },

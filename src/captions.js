@@ -33,7 +33,8 @@ async function loadTransformers() {
 
 /** Mix the sequence audio between start and end down to 16 kHz mono samples. */
 export async function sequenceAudio16k(seq, start, end, onProgress = () => {}) {
-  const mix = await renderAudioMix(seq, start, end, 48000, (f) => onProgress(f));
+  // a file whose sound cannot be decoded stays silent instead of stopping the recognition
+  const mix = await renderAudioMix(seq, start, end, 48000, (f) => onProgress(f), 0, new Map());
   const ctx = new OfflineAudioContext(1, Math.max(1, Math.ceil((end - start) * 16000)), 16000);
   const src = ctx.createBufferSource();
   src.buffer = mix;

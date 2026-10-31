@@ -4,7 +4,9 @@
 // (custom kernel) and video (de-interlace, NTSC colours). Registered into FILTERS like fx2.js.
 // These are our own approximations: the same settings give a similar look, not Photoshop's pixels.
 
-import { FILTERS } from './adjust.js';
+import { FILTERS, doublingBlur, keepOpaque, cloudNoise } from './adjust.js';
+import './fx4.js';
+import './camraw.js';
 import {
   mk, read, toCanvas, lum, cl, clamp, smooth, hexRgb, rng, grayOf, boxBlurF, gaussF, sobelF, noiseF,
   dirBlur, blurred, remap, kuwahara, cloneImg,
@@ -96,7 +98,7 @@ const F = {
     fn: (c) => blurred(c, 1.8),
   },
   boxBlur: {
-    name: '상자 흐림 효과', group: '흐림 효과', params: [['radius', '반경 (px)', 1, 200, 10]],
+    name: '상자 흐림 효과', group: '흐림 효과', params: [['radius', '반경 (픽셀)', 1, 2000, 10]],
     fn(c, p) {
       return toCanvas(perChannel(read(c), (a, w, h) => boxBlurF(a, w, h, p.radius, 1)));
     },
@@ -166,24 +168,38 @@ const F = {
   },
   spinBlur: {
     name: '회전 흐림 효과', group: '흐림 효과 갤러리', slow: true,
-    params: [['angle', '흐림 각도 (°)', 1, 90, 15], ['x', '중심 가로 (%)', 0, 100, 50], ['y', '중심 세로 (%)', 0, 100, 50]],
+    params: [['angle', '흐림 효과 각도 (°)', 1, 360, 15], ['x', '중심: 가로 (%)', 0, 100, 50], ['y', '중심: 세로 (%)', 0, 100, 50], ['radius', '흐림 영역 반경 (%)', 5, 300, 300]],
     fn(c, p) {
-      const out = mk(c.width, c.height);
+      const w = c.width;
+      const h = c.height;
+      const cx = (w * p.x) / 100;
+      const cy = (h * p.y) / 100;
+      const R = Math.hypot(Math.max(cx, w - cx), Math.max(cy, h - cy));
+      const ang = (clamp(p.angle, 0, 360) * Math.PI) / 180;
+      const passes = clamp(Math.ceil(Math.log2(Math.max(2, R * ang))) + 1, 2, 14);
+      const spun = keepOpaque(c, doublingBlur(c, passes, (g, s, W, H) => {
+        const ox = cx + (W - w) / 2;
+        const oy = cy + (H - h) / 2;
+        g.translate(ox, oy);
+        g.rotate((ang * s) / 2);
+        g.translate(-ox, -oy);
+      }, Math.min(w, h)));
+      const rr = (Math.min(w, h) / 2) * ((p.radius ?? 300) / 100);
+      if (rr >= R) return spun;
+      // only inside the ellipse of the given size, fading at its edge (the blur gallery's ring)
+      const out = mk(w, h);
       const g = out.getContext('2d');
-      const cx = (c.width * p.x) / 100;
-      const cy = (c.height * p.y) / 100;
-      const steps = Math.max(2, Math.min(60, Math.round(p.angle * 1.5)));
       g.drawImage(c, 0, 0);
-      for (let k = 1; k <= steps; k++) {
-        const a = (((k / steps) - 0.5) * p.angle * Math.PI) / 180;
-        g.save();
-        g.globalAlpha = 1 / (k + 1);
-        g.translate(cx, cy);
-        g.rotate(a);
-        g.translate(-cx, -cy);
-        g.drawImage(c, 0, 0);
-        g.restore();
-      }
+      const m = mk(w, h);
+      const mg = m.getContext('2d');
+      const gr = mg.createRadialGradient(cx, cy, rr * 0.85, cx, cy, rr);
+      gr.addColorStop(0, '#000');
+      gr.addColorStop(1, 'rgba(0,0,0,0)');
+      mg.fillStyle = gr;
+      mg.fillRect(0, 0, w, h);
+      mg.globalCompositeOperation = 'source-in';
+      mg.drawImage(spun, 0, 0);
+      g.drawImage(m, 0, 0);
       return out;
     },
   },
@@ -203,7 +219,7 @@ const F = {
   },
   smartSharpen: {
     name: '고급 선명 효과', group: '선명 효과', slow: true,
-    params: [['amount', '양 (%)', 1, 500, 150], ['radius', '반경 (px)', 0.1, 64, 1.5, 0.1], ['noise', '노이즈 감소 (%)', 0, 100, 10], ['remove', '제거', null, null, 'gaussian', [['gaussian', '가우시안 흐림'], ['lens', '렌즈 흐림'], ['motion', '동작 흐림']]], ['angle', '각도 (동작 흐림)', -180, 180, 0], ['shadows', '어두운 영역 페이드 (%)', 0, 100, 0], ['highlights', '밝은 영역 페이드 (%)', 0, 100, 0]],
+    params: [['amount', '양 (%)', 1, 500, 150], ['radius', '반경 (픽셀)', 0.1, 64, 1.5, 0.1], ['noise', '노이즈 감소 (%)', 0, 100, 10], ['remove', '제거', null, null, 'gaussian', [['gaussian', '가우시안 흐림'], ['lens', '렌즈 흐림'], ['motion', '동작 흐림']]], ['angle', '각도 (동작 흐림)', -180, 180, 0], ['shadows', '어두운 영역 페이드 (%)', 0, 100, 0], ['highlights', '밝은 영역 페이드 (%)', 0, 100, 0]],
     fn(c, p) {
       let b;
       if (p.remove === 'motion') b = dirBlur(c, p.angle, Math.max(2, p.radius * 3));
@@ -231,8 +247,9 @@ const F = {
   // ---- noise
   reduceNoise: {
     name: '노이즈 감소', group: '노이즈', slow: true,
-    params: [['strength', '강도', 0, 10, 6], ['details', '세부 유지 (%)', 0, 100, 60], ['color', '색상 노이즈 감소 (%)', 0, 100, 45], ['sharpen', '세부 선명하게 (%)', 0, 100, 25]],
+    params: [['strength', '강도', 0, 10, 6], ['details', '세부 묘사 유지 (%)', 0, 100, 60], ['color', '색상 노이즈 감소 (%)', 0, 100, 45], ['sharpen', '세부 선명하게 (%)', 0, 100, 25], ['jpeg', 'JPEG 비슷한 부분 제거', null, null, false, 'bool']],
     fn(c, p) {
+      if (p.jpeg && FILTERS.jpegArtifacts) c = FILTERS.jpegArtifacts.fn(c, { strength: 'medium' });
       const img = read(c);
       const { width: w, height: h, data: d } = img;
       const n = w * h;
@@ -290,12 +307,12 @@ const F = {
   // ---- distort
   displace: {
     name: '변위', group: '왜곡', slow: true,
-    params: [['sx', '가로 비율 (%)', -100, 100, 10], ['sy', '세로 비율 (%)', -100, 100, 10], ['map', '변위 맵', null, null, 'clouds', [['clouds', '구름 (매끄러운 무늬)'], ['self', '이 그림의 밝기'], ['waves', '물결']]], ['scale', '맵 크기 (px)', 4, 400, 80], ['wrap', '빈 곳', null, null, 'repeat', [['repeat', '가장자리 픽셀 반복'], ['wrap', '반대쪽으로 감싸기']]]],
+    params: [['sx', '가로 비율 (%)', -999, 999, 10], ['sy', '세로 비율 (%)', -999, 999, 10], ['map', '변위 맵', null, null, 'clouds', [['clouds', '구름 (매끄러운 무늬)'], ['self', '이 그림의 밝기 (흐리게 한 회색)'], ['waves', '물결']]], ['scale', '맵 크기 (픽셀)', 4, 400, 80], ['mapBlur', '맵 흐림 (이 그림의 밝기)', 0, 50, 2], ['wrap', '정의되지 않은 영역', null, null, 'repeat', [['wrap', '둘러싸기'], ['repeat', '가장자리 픽셀 반복']]]],
     fn(c, p) {
       const w = c.width;
       const h = c.height;
       let M;
-      if (p.map === 'self') M = grayOf(read(blurred(c, 2))).map((v) => v / 255);
+      if (p.map === 'self') M = grayOf(read(blurred(c, p.mapBlur ?? 2))).map((v) => v / 255);
       else if (p.map === 'waves') {
         M = new Float32Array(w * h);
         for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) M[y * w + x] = 0.5 + 0.5 * Math.sin((x + y * 0.6) / (p.scale / (2 * Math.PI)));
@@ -311,7 +328,7 @@ const F = {
     },
   },
   ripple: {
-    name: '잔물결', group: '왜곡', slow: true, params: [['amount', '양 (%)', -999, 999, 100], ['size', '크기', null, null, 'medium', [['small', '작게'], ['medium', '중간'], ['large', '크게']]]],
+    name: '물결', group: '왜곡', slow: true, params: [['amount', '양 (%)', -999, 999, 100], ['size', '크기', null, null, 'medium', [['small', '작게'], ['medium', '중간'], ['large', '크게']]]],
     fn(c, p) {
       const period = { small: 7, medium: 14, large: 30 }[p.size] || 14;
       const amp = (p.amount / 100) * period * 0.35;
@@ -324,7 +341,7 @@ const F = {
     },
   },
   shear: {
-    name: '기울임', group: '왜곡', slow: true, params: [['amount', '양', -100, 100, 40], ['curve', '모양', null, null, 'arc', [['arc', '활 모양'], ['s', 'S자'], ['wave', '물결'], ['line', '사선']]], ['wrap', '빈 곳', null, null, 'repeat', [['repeat', '가장자리 픽셀 반복'], ['wrap', '반대쪽으로 감싸기']]]],
+    name: '기울임', group: '왜곡', slow: true, params: [['amount', '양', -100, 100, 40], ['curve', '모양', null, null, 'arc', [['arc', '활 모양'], ['s', 'S자'], ['wave', '물결'], ['line', '사선']]], ['wrap', '정의되지 않은 영역', null, null, 'repeat', [['wrap', '둘러싸기'], ['repeat', '가장자리 픽셀 반복']]]],
     fn(c, p) {
       const w = c.width;
       const h = c.height;
@@ -434,11 +451,12 @@ const F = {
 
   // ---- render
   differenceClouds: {
-    name: '차이 구름 효과', group: '렌더', params: [['scale', '크기', 20, 600, 160]],
+    name: '구름 효과 2', group: '렌더', random: true, params: [['seed', '무작위 값', null, null, 1, 'hidden']],
     fn(c, p, { fg, bg }) {
+      // clouds blended with the picture in Difference mode (Photoshop's Clouds 2)
       const w = c.width;
       const h = c.height;
-      const N = noiseF(w, h, p.scale, 6, 23);
+      const N = p.scale ? noiseF(w, h, p.scale, 6, 23) : cloudNoise(w, h, Math.max(w, h) / 3, p.seed || 1);
       const [fr, fgc, fb] = hexRgb(fg);
       const [br, bgc, bb] = hexRgb(bg);
       const img = read(c);
@@ -457,11 +475,11 @@ const F = {
     },
   },
   fibers: {
-    name: '섬유', group: '렌더', render: true, params: [['variance', '변화', 1, 64, 16], ['strength', '강도', 1, 64, 4]],
+    name: '섬유', group: '렌더', params: [['variance', '변화', 1, 64, 16], ['strength', '강도', 1, 64, 4], ['seed', '임의화 (값을 바꾸면 다른 무늬)', 1, 999, 31]],
     fn(c, p, { fg, bg }) {
       const w = c.width;
       const h = c.height;
-      const r = rng(31);
+      const r = rng(p.seed || 31);
       // each column wanders; strength = how long a fibre runs (vertical smoothing)
       const cols = new Float32Array(w * h);
       for (let x = 0; x < w; x++) {
@@ -558,7 +576,7 @@ const F = {
   // ---- other
   customKernel: {
     name: '사용자 정의', group: '기타',
-    params: [['kernel', '5×5 값 (가운데가 이 픽셀)', null, null, [0, 0, 0, 0, 0, 0, 0, -1, 0, 0, 0, -1, 5, -1, 0, 0, 0, -1, 0, 0, 0, 0, 0, 0, 0], 'kernel'], ['scale', '나누기 (비율)', 1, 9999, 1], ['offset', '더하기 (오프셋)', -9999, 9999, 0]],
+    params: [['kernel', '5×5 값 (가운데가 이 픽셀)', null, null, [0, 0, 0, 0, 0, 0, 0, -1, 0, 0, 0, -1, 5, -1, 0, 0, 0, -1, 0, 0, 0, 0, 0, 0, 0], 'kernel'], ['scale', '비율', 1, 9999, 1], ['offset', '오프셋', -9999, 9999, 0]],
     fn(c, p) {
       const img = read(c);
       const { width: w, height: h, data: d } = img;

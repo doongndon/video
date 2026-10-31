@@ -33,8 +33,11 @@ export function photoEditor() {
   return photo;
 }
 
+let switchNo = 0;
+
 export async function setMode(mode) {
   if (mode !== 'photo') mode = 'video';
+  const my = ++switchNo;
   let P = null;
   if (mode === 'photo') {
     try {
@@ -44,6 +47,8 @@ export async function setMode(mode) {
       toast(`사진 편집기를 불러오지 못했습니다: ${err.message || err}`);
       return;
     }
+    // the photo editor loads once, which takes a moment: a later choice (영상) wins
+    if (my !== switchNo) return;
   }
   const changed = appMode.current !== mode;
   appMode.current = mode;

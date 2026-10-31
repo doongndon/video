@@ -8,7 +8,7 @@ import { mobileApi } from '../ui/mobile.js';
 import { PhotoDoc, newLayer, makeCanvas, cloneCanvas, textBox, boxCorners, unionRect } from './doc.js';
 import { History } from './history.js';
 import * as SEL from './selection.js';
-import { TOOL_BY_ID } from './tools.js';
+import { TOOLS, TOOL_BY_ID, TOOL_GROUPS } from './tools.js';
 import { ADJUSTMENTS, FILTERS } from './adjust.js';
 import './fx2.js';
 import './fx3.js';
@@ -27,6 +27,7 @@ import { installExtra3, buildCompsPanel } from './extra3.js';
 import { installViewExtras, buildNavigatorPanel, buildInfoPanel, buildHistogramPanel } from './view2.js';
 import { installPhotoAI, buildAiPanel } from './photoai.js';
 import { filterGalleryDialog } from './gallery.js';
+import { installFilters } from './filtermenu.js';
 import { installImage2 } from './image2.js';
 import { installTools3 } from './tools3.js';
 import { installView3 } from './view3.js';
@@ -37,6 +38,7 @@ import * as PT from './paths.js';
 import { Transformer, TRANSFORM_MODES, WARP_STYLES, applyM, composeM, unprojectQuad } from './transform.js';
 import { FX_NAMES } from './styles.js';
 import { buildToolbar, buildToolStrip, buildOptionsBar, buildLayersPanel, buildColorPanel, buildPropertiesPanel, buildHistoryPanel } from './panels.js';
+import { installCore2, arrangeMenus } from './core2.js';
 
 const isMobile = () => document.body.classList.contains('mobile');
 const ZOOMS = [0.02, 0.05, 0.1, 0.167, 0.25, 0.333, 0.5, 0.667, 1, 1.5, 2, 3, 4, 6, 8, 12, 16, 32];
@@ -146,7 +148,7 @@ export function createPhotoEditor(root) {
   P.newText = (o, color, extra) => newText(o, color, extra);
   P.nearestOnPath = (sps, x, y) => nearestOnPath(sps, x, y);
   // Edit ▸ Preferences (view3.js): pasteboard colour, transparency grid, brush cursor, wheel, autosave
-  P.prefs = { pasteboard: '#1f2125', checker: 'medium', checkerTone: 'light', cursor: 'outline', wheelZoom: false, autosave: true, historyMB: isMobile() ? 350 : 900, ...loadPref('photo.prefs', {}) };
+  P.prefs = { pasteboard: '#1f2125', checker: 'medium', checkerTone: 'light', cursor: 'outline', wheelZoom: false, autosave: true, historyMB: isMobile() ? 350 : 900, historyStates: 50, snapOnSave: false, units: 'px', ...loadPref('photo.prefs', {}) };
   P.exportDialog = () => (P.doc ? D.exportDialog(P) : toast('내보낼 문서가 없습니다. 먼저 사진을 열거나 새 문서를 만드세요.'));
 
   // ---------------------------------------------------------------- DOM
@@ -197,22 +199,27 @@ export function createPhotoEditor(root) {
       bar.querySelectorAll('button').forEach((b) => b.classList.toggle('on', b.dataset.id === id));
       body.replaceChildren(panels[id].el);
     };
-    for (const id of ids) {
+    const tab = (id) => {
       const b = h('button', { onclick: () => show(id) }, panels[id].title);
       b.dataset.id = id;
-      bar.append(b);
-    }
+      return b;
+    };
+    for (const id of ids) bar.append(tab(id));
     show(ids.includes(cur) ? cur : ids[0]);
     // a panel registered later (P.addPanel) gets its tab here
     const add = (id) => {
       if (ids.includes(id)) return;
       ids.push(id);
-      const b = h('button', { onclick: () => show(id) }, panels[id].title);
-      b.dataset.id = id;
-      bar.append(b);
+      bar.append(tab(id));
       if (cur === id) show(id);
     };
-    return { el: h('div.ph-pgroup', bar, body), show, ids, add };
+    /** Window ▸ Workspace: these tabs in this order, showing `pick`. */
+    const set = (list, pick) => {
+      ids.splice(0, ids.length, ...list.filter((id) => panels[id]));
+      bar.replaceChildren(...ids.map(tab));
+      show(ids.includes(pick) ? pick : ids.includes(cur) ? cur : ids[0]);
+    };
+    return { el: h('div.ph-pgroup', bar, body), show, ids, add, set, current: () => cur };
   };
   const groupsTop = sideTabs(['color', 'swatches', 'props', 'adjustments', 'ai', 'char', 'glyphs', 'history', 'presets', 'nav', 'info', 'histo']);
   const groupLayers = sideTabs(['layers', 'channels', 'paths', 'timeline', 'actions', 'comps']);
@@ -239,6 +246,8 @@ export function createPhotoEditor(root) {
       openSheet(id);
       return;
     }
+    // panels hidden with Tab / Shift+Tab come back when one is asked for (Window menu, F7…)
+    document.body.classList.remove('ph-hide-panels', 'ph-hide-side');
     if (groupsTop.ids.includes(id)) groupsTop.show(id);
     if (groupLayers.ids.includes(id)) groupLayers.show(id);
   };
@@ -288,7 +297,7 @@ export function createPhotoEditor(root) {
   // ---------------------------------------------------------------- documents
 
   P.openDoc = (doc) => {
-    doc.history = new History(doc, { budgetBytes: (P.prefs.historyMB || (isMobile() ? 350 : 900)) * 1e6 });
+    doc.history = new History(doc, { budgetBytes: (P.prefs.historyMB || (isMobile() ? 350 : 900)) * 1e6, states: P.prefs.historyStates || 50 });
     // File ▸ Revert goes back to how the document was opened (or last saved)
     doc.openState = doc.capture();
     doc.view = { zoom: 1, x: 0, y: 0 };
@@ -296,7 +305,8 @@ export function createPhotoEditor(root) {
     P.index = P.docs.length - 1;
     P.editMask = false;
     docChanged();
-    requestAnimationFrame(() => P.fit());
+    // (several opened at once: each fits when it comes up, see docChanged)
+    requestAnimationFrame(() => { if (P.doc === doc) P.fit(); });
     if (doc.importNote) toast(doc.importNote);
     return doc;
   };
@@ -312,8 +322,17 @@ export function createPhotoEditor(root) {
     const d = P.docs[i];
     if (!d) return;
     if (!d.saved && !(await confirmDialog('문서 닫기', `"${d.name}"을(를) 닫을까요? 저장하지 않은 변경은 자동 저장본에서도 지워집니다.`))) return;
+    i = P.docs.indexOf(d);
+    if (i < 0) return;
+    if (i === P.index) {
+      if (P.transform) P.applyTransform();
+      finishText();
+    }
     P.docs.splice(i, 1);
+    // closing a tab left of the active one keeps the same document active
+    if (i < P.index) P.index--;
     P.index = Math.min(P.index, P.docs.length - 1);
+    if (P.index < 0 && P.docs.length) P.index = 0;
     docChanged();
     scheduleSave();
   };
@@ -337,6 +356,8 @@ export function createPhotoEditor(root) {
   function docChanged() {
     const doc = P.doc;
     welcome.hidden = !!doc;
+    // a document opened while another was showing (or restored) fits the window when it comes up
+    if (doc && !doc.view?.fitted) P.fit();
     renderTabs();
     if (doc) TOOL_BY_ID[P.tool].activate?.(P);
     P.emit('doc');
@@ -347,10 +368,17 @@ export function createPhotoEditor(root) {
 
   P.renderTabs = () => renderTabs();
   function renderTabs() {
-    tabs.replaceChildren(...P.docs.map((d, i) => h(`div.ph-tab${i === P.index ? '.on' : ''}`, { onclick: () => P.switchDoc(i), title: `${d.name} (${d.width}×${d.height})` },
-      h('span', `${d.name}${d.saved ? '' : ' •'}`),
-      h('button.ph-tabx', { 'aria-label': '닫기', onclick: (e) => { e.stopPropagation(); P.closeDoc(i); } }, '×'))),
+    tabs.replaceChildren(...P.docs.map((d, i) => {
+      const t = h(`div.ph-tab${i === P.index ? '.on' : ''}`, { onclick: () => P.switchDoc(i), title: `${d.name} (${d.width}×${d.height})` },
+        h('span', `${d.name}${d.saved ? '' : ' •'}`),
+        h('button.ph-tabx', { 'aria-label': '닫기', onclick: (e) => { e.stopPropagation(); P.closeDoc(i); } }, '×'));
+      t.dataset.doc = d.id;
+      // a layer dragged onto a tab goes into that document (core2.js)
+      P.decorateTab?.(t, d);
+      return t;
+    }),
     h('button.ph-tabadd', { onclick: () => D.newDocDialog(P), title: '새 문서', 'aria-label': '새 문서' }, '+'));
+    P.emit('tabs');
   }
 
   // ---------------------------------------------------------------- history
@@ -1092,48 +1120,65 @@ export function createPhotoEditor(root) {
   P.warpStyles = WARP_STYLES;
   P.textBox = (l) => textBox(l);
   P.pathBounds = (sps) => PT.pathBounds(sps);
-  /** Edit ▸ Transform ▸ Again: repeat the last (affine) transform on the active layer. */
-  P.cmd.transformAgain = () => {
-    const M = P.lastTransform;
+  /** Transform a layer by a doc-space affine M (Transform Again, actions). Raw: inside a run. */
+  P.transformLayerBy = (l, M) => {
     const doc = P.doc;
-    const l = doc?.active;
-    if (!M) return toast('다시 할 변형이 없습니다');
-    if (!l || l.kind === 'adjust' || l.kind === 'fill') return undefined;
-    P.run('다시 변형', () => {
-      if (l.kind === 'raster' && l.canvas) {
-        const cs = [[l.x, l.y], [l.x + l.canvas.width, l.y], [l.x + l.canvas.width, l.y + l.canvas.height], [l.x, l.y + l.canvas.height]].map((q) => applyM(M, q));
-        const xs = cs.map((q) => q[0]);
-        const ys = cs.map((q) => q[1]);
-        const x0 = Math.floor(Math.min(...xs));
-        const y0 = Math.floor(Math.min(...ys));
-        const c = makeCanvas(Math.ceil(Math.max(...xs)) - x0 + 1, Math.ceil(Math.max(...ys)) - y0 + 1);
-        const g = c.getContext('2d');
-        g.imageSmoothingQuality = 'high';
-        const m = composeM(M, [1, 0, 0, 1, l.x, l.y]);
-        g.setTransform(m[0], m[1], m[2], m[3], m[4] - x0, m[5] - y0);
-        g.drawImage(l.canvas, 0, 0);
-        l.canvas = c;
-        l.x = x0;
-        l.y = y0;
-      } else if (l.kind === 'smart') {
-        l.smart = { ...l.smart, m: composeM(M, l.smart.m), corners: l.smart.corners?.map((q) => applyM(M, q)) || null };
-      } else if (l.kind === 'shape') {
-        P.setShapePathDoc(l, PT.mapPath(P.shapePathDoc(l), (q) => applyM(M, q)));
-      } else if (l.kind === 'text') {
-        const L = textBox(l);
-        const [cx, cy] = applyM(M, [l.x + L.w / 2, l.y + L.h / 2]);
-        const k = Math.hypot(M[0], M[1]);
-        l.text = { ...l.text, size: Math.max(1, Math.round(l.text.size * k * 10) / 10) };
-        l.rotation = ((l.rotation || 0) + (Math.atan2(M[1], M[0]) * 180) / Math.PI) % 360;
-        const L2 = textBox(l);
-        l.x = Math.round(cx - L2.w / 2);
-        l.y = Math.round(cy - L2.h / 2);
-      }
-      l._styled = null;
-      doc.touch(l);
+    if (l.kind === 'raster' && l.canvas) {
+      const cs = [[l.x, l.y], [l.x + l.canvas.width, l.y], [l.x + l.canvas.width, l.y + l.canvas.height], [l.x, l.y + l.canvas.height]].map((q) => applyM(M, q));
+      const xs = cs.map((q) => q[0]);
+      const ys = cs.map((q) => q[1]);
+      const x0 = Math.floor(Math.min(...xs));
+      const y0 = Math.floor(Math.min(...ys));
+      const c = makeCanvas(Math.ceil(Math.max(...xs)) - x0 + 1, Math.ceil(Math.max(...ys)) - y0 + 1);
+      const g = c.getContext('2d');
+      g.imageSmoothingQuality = 'high';
+      const m = composeM(M, [1, 0, 0, 1, l.x, l.y]);
+      g.setTransform(m[0], m[1], m[2], m[3], m[4] - x0, m[5] - y0);
+      g.drawImage(l.canvas, 0, 0);
+      l.canvas = c;
+      l.x = x0;
+      l.y = y0;
+    } else if (l.kind === 'smart') {
+      l.smart = { ...l.smart, m: composeM(M, l.smart.m), corners: l.smart.corners?.map((q) => applyM(M, q)) || null };
+    } else if (l.kind === 'shape') {
+      P.setShapePathDoc(l, PT.mapPath(P.shapePathDoc(l), (q) => applyM(M, q)));
+    } else if (l.kind === 'text') {
+      const L = textBox(l);
+      const [cx, cy] = applyM(M, [l.x + L.w / 2, l.y + L.h / 2]);
+      const k = Math.hypot(M[0], M[1]);
+      l.text = { ...l.text, size: Math.max(1, Math.round(l.text.size * k * 10) / 10) };
+      l.rotation = ((l.rotation || 0) + (Math.atan2(M[1], M[0]) * 180) / Math.PI) % 360;
+      const L2 = textBox(l);
+      l.x = Math.round(cx - L2.w / 2);
+      l.y = Math.round(cy - L2.h / 2);
+    } else if (l.kind === 'group') {
+      for (const d of doc.descendants(l.id)) if (d.kind !== 'group' && d.kind !== 'adjust' && d.kind !== 'fill') P.transformLayerBy(d, M);
+    }
+    if (l.mask && l.mask.linked !== false && l.kind !== 'group') {
+      const mc = makeCanvas(doc.width, doc.height);
+      const mg = mc.getContext('2d');
+      // outside the old mask stays as the mask's edge says (white masks show, black hide)
+      mg.setTransform(M[0], M[1], M[2], M[3], M[4], M[5]);
+      mg.drawImage(l.mask.canvas, l.mask.x, l.mask.y);
+      l.mask = { ...l.mask, canvas: mc, x: 0, y: 0 };
+    }
+    l._styled = null;
+    doc.touch(l);
+  };
+  const transformable = (l) => l && l.kind !== 'adjust' && l.kind !== 'fill' && !l.locked && !l.lockPos;
+  /** Edit ▸ Transform ▸ Again: repeat the last (affine) transform on the picked layers. */
+  P.cmd.transformAgain = (M = P.lastTransform, label = '다시 변형') => {
+    const doc = P.doc;
+    const ls = doc?.selectedLayers.filter(transformable) || [];
+    if (!Array.isArray(M)) M = P.lastTransform;
+    if (!M) return toast('다시 할 변형이 없습니다 (먼저 자유 변형을 한 번 적용하세요)');
+    if (!ls.length) return toast('변형할 레이어를 고르세요 (잠긴 레이어·칠·조정 레이어는 안 됩니다)');
+    P.run(typeof label === 'string' ? label : '다시 변형', () => {
+      for (const l of ls) P.transformLayerBy(l, M);
     });
     return undefined;
   };
+  // Ctrl+Alt+T (transform a copy) and Ctrl+Alt+Shift+T (again, on a copy): transform2.js
 
   // ---------------------------------------------------------------- pointer input
 
@@ -1142,24 +1187,43 @@ export function createPhotoEditor(root) {
   let panStart = null;
   const touches = new Map();
   let spaceDown = false;
+  // a tool key held down (spring-loaded tool): the tool to go back to when it is let go
+  let spring = null;
   // selection, crop and shape tools snap to guides, the grid and the canvas edges (view2.js)
   const snap = (p) => (P.snapPoint ? P.snapPoint(p, P.tool) : p);
 
-  function updateCursor() {
+  function updateCursor(e) {
     const t = TOOL_BY_ID[P.tool];
-    stage.style.cursor = spaceDown ? 'grab' : t.cursor === 'brush' ? 'crosshair' : t.cursor || 'default';
+    // Space + Ctrl (⌘): zoom in, Space + Alt: zoom out (Photoshop)
+    const z = spaceDown && e ? (e.ctrlKey || e.metaKey ? 'zoom-in' : e.altKey ? 'zoom-out' : null) : null;
+    stage.style.cursor = z || (spaceDown ? 'grab' : t.cursor === 'brush' ? 'crosshair' : t.cursor || 'default');
   }
+  /** One step of the zoom levels, keeping the point under (cx, cy) in place. */
+  const zoomStepAt = (dir, cx, cy) => {
+    const z = P.view.zoom;
+    const next = dir > 0 ? ZOOMS.find((x) => x > z * 1.001) : [...ZOOMS].reverse().find((x) => x < z / 1.001);
+    P.setZoom(next ?? z, cx, cy);
+  };
 
   stage.addEventListener('pointerdown', (e) => {
     if (!P.doc || e.button === 2) return;
     closeMenus();
     stage.setPointerCapture(e.pointerId);
+    if (spring) spring.used = true;
+    if (spaceDown && e.button === 0 && (e.ctrlKey || e.metaKey || e.altKey)) {
+      // Space + Ctrl: click to zoom in, drag sideways to zoom smoothly; Space + Alt: zoom out
+      active = 'zoomdrag';
+      panStart = { x: e.clientX, y: e.clientY, zoom: P.view.zoom, out: e.altKey && !(e.ctrlKey || e.metaKey), moved: false };
+      return;
+    }
     if (e.pointerType === 'touch') {
       touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
       if (touches.size === 2) {
         // second finger: cancel what the first one started and pinch/pan instead
         if (active === 'tool') TOOL_BY_ID[P.tool].cancel?.(P);
         if (active === 'transform') P.transform?.up();
+        if (active === 'extras') P.viewExtrasCancel?.();
+        if (active === 'xdrag') P.xdragCancel?.();
         const [a, b] = [...touches.values()];
         active = 'pinch';
         panStart = { d: Math.hypot(a.x - b.x, a.y - b.y), mx: (a.x + b.x) / 2, my: (a.y + b.y) / 2, zoom: P.view.zoom, vx: P.view.x, vy: P.view.y };
@@ -1181,7 +1245,7 @@ export function createPhotoEditor(root) {
       stage.style.cursor = 'grabbing';
       return;
     }
-    if (P.editingText && P.tool !== 'text') finishText();
+    if (P.editingText && !['text', 'verticalText', 'textMask', 'verticalTextMask'].includes(P.tool)) finishText();
     if (P.transform) {
       active = 'transform';
       P.transform.down(p, e);
@@ -1238,12 +1302,27 @@ export function createPhotoEditor(root) {
       P.viewChanged();
       return;
     }
+    if (active === 'zoomdrag') {
+      const dx = e.clientX - panStart.x;
+      if (Math.abs(dx) > 3) panStart.moved = true;
+      if (panStart.moved) P.setZoom(panStart.zoom * Math.exp(dx * 0.01), panStart.x, panStart.y);
+      return;
+    }
+    if (active === 'xdrag') {
+      P.xdragMove?.(e);
+      return;
+    }
     if (active === 'transform') {
       P.transform.move(p, e);
       return;
     }
     if (active === 'tool') {
       const t = TOOL_BY_ID[P.tool];
+      // the move tool dragged onto another document's tab: the layers go over there (core2.js)
+      if (P.tool === 'move' && P.xdragStart?.(e)) {
+        active = 'xdrag';
+        return;
+      }
       // coalesced events give smoother brush strokes
       const evs = e.getCoalescedEvents?.() || [e];
       for (const ce of evs.length ? evs : [e]) t.move?.(P, snap(P.toDoc(ce.clientX, ce.clientY)), ce);
@@ -1274,16 +1353,23 @@ export function createPhotoEditor(root) {
       // started from the move tool's handles: done when the handle is let go (like Canva)
       if (P.transform?.autoCommit) P.applyTransform();
     } else if (active === 'extras') P.viewExtrasUp(e, p);
+    else if (active === 'zoomdrag' && !panStart.moved) zoomStepAt(panStart.out ? -1 : 1, e.clientX, e.clientY);
+    else if (active === 'xdrag') P.xdragDrop?.(e);
     P.clearSnapMark?.();
     active = null;
-    updateCursor();
+    updateCursor(e);
     P.redraw();
+    // a spring-loaded tool let go of during the drag goes back now
+    if (spring?.release) springBack();
   };
   stage.addEventListener('pointerup', endPointer);
   stage.addEventListener('pointercancel', (e) => {
     if (active === 'tool') TOOL_BY_ID[P.tool].cancel?.(P);
+    if (active === 'xdrag') P.xdragCancel?.();
+    if (active === 'extras') P.viewExtrasCancel?.();
     touches.delete(e.pointerId);
     active = null;
+    if (spring?.release) springBack();
   });
   stage.addEventListener('pointerleave', () => {
     hover = null;
@@ -1291,6 +1377,8 @@ export function createPhotoEditor(root) {
   });
   stage.addEventListener('dblclick', (e) => {
     if (!P.doc) return;
+    // on a ruler: Preferences ▸ Units & Rulers
+    if (P.viewExtrasDblclick?.(e)) return;
     if (P.transform) {
       P.applyTransform();
       return;
@@ -1305,7 +1393,8 @@ export function createPhotoEditor(root) {
     else if (e.ctrlKey || e.metaKey || e.altKey) P.zoomAt(Math.exp(-e.deltaY * (e.ctrlKey && !e.metaKey && Math.abs(e.deltaY) < 50 ? 0.01 : 0.002)), e.clientX, e.clientY);
     else {
       P.doc.view.auto = false;
-      const [dx, dy] = logicalDelta(e.shiftKey ? e.deltaY : e.deltaX, e.shiftKey ? 0 : e.deltaY);
+      // Shift: sideways (macOS already turns Shift+wheel into a sideways scroll)
+      const [dx, dy] = logicalDelta(e.shiftKey ? e.deltaY || e.deltaX : e.deltaX, e.shiftKey ? 0 : e.deltaY);
       P.doc.view.x -= dx;
       P.doc.view.y -= dy;
       P.viewChanged();
@@ -1313,6 +1402,8 @@ export function createPhotoEditor(root) {
   }, { passive: false });
   stage.addEventListener('contextmenu', (e) => {
     if (!P.doc) return;
+    // on a ruler: its units
+    if (P.viewExtrasContext?.(e)) return;
     e.preventDefault();
     showMenu(P.contextMenu(), e.clientX, e.clientY);
   });
@@ -1346,66 +1437,95 @@ export function createPhotoEditor(root) {
     if (document.querySelector('.modal-backdrop')) return;
     const mod = modKey(e);
     const k = e.code;
+    const alt = e.altKey;
+    const sh = e.shiftKey;
     const done = () => {
       e.preventDefault();
       e.stopPropagation();
     };
     if (P.viewKeys?.(e, mod)) return done();
-    if (k === 'Space' && !mod) {
-      spaceDown = true;
-      updateCursor();
+    if (k === 'Space') {
+      // Space: hand tool while held; with Ctrl (⌘) or Alt the zoom tool (in / out)
+      if (!e.repeat) {
+        spaceDown = true;
+        updateCursor(e);
+      }
       done();
       return;
     }
+    if (spaceDown && /^(Control|Alt|Meta)/.test(k)) updateCursor(e);
     if (P.transform) {
       if (e.key === 'Enter') return done(), P.applyTransform();
       if (e.key === 'Escape') return done(), P.cancelTransform();
     }
     if (!mod && P.doc && TOOL_BY_ID[P.tool].onKey?.(P, e) === true) return done();
+    // a tool key held down repeats: the tool stays (Shift would otherwise race through the family)
+    if (e.repeat && !mod && !alt && /^Key[A-Z]$/.test(k)) return done();
+    const C = P.cmd;
+    const tool = (letter) => cycleKey(letter, sh);
+    const filter = (id) => (FILTERS[id] ? D.filterDialog(P, id) : null);
     const map = {
-      KeyZ: () => (mod ? (e.shiftKey ? P.redo() : P.undo()) : P.setTool('zoom')),
-      KeyY: () => (mod ? (e.shiftKey ? P.cmd.gamutWarning?.() : P.redo()) : cycle(['historyBrush', 'artHistory'], e.shiftKey)),
-      KeyA: () => (mod && e.altKey ? P.cmd.selectAllLayers() : mod ? P.cmd.selectAll() : cycle(['pathSelect', 'directSelect'], e.shiftKey)),
-      KeyP: () => (mod ? (e.shiftKey ? null : P.cmd.print?.()) : cycle(['pen', 'freePen'], e.shiftKey)),
-      KeyD: () => (mod ? (e.shiftKey ? P.cmd.reselect() : P.cmd.deselect()) : P.defaultColors()),
-      KeyI: () => (mod ? (e.shiftKey ? P.cmd.inverse() : D.adjustDialog(P, 'invert')) : cycle(['eyedropper', 'sampler', 'ruler', 'note', 'count'], e.shiftKey)),
-      KeyT: () => (mod && e.shiftKey ? P.cmd.transformAgain() : mod ? P.cmd.freeTransform() : cycle(['text', 'verticalText', 'textMask', 'verticalTextMask'], e.shiftKey)),
-      KeyJ: () => (mod && e.shiftKey ? P.cmd.layerVia(true) : mod ? P.cmd.duplicateLayer() : cycle(['heal', 'healBrush', 'patch', 'contentMove', 'remove', 'redEye'], e.shiftKey)),
-      KeyE: () => (mod && e.shiftKey && e.altKey ? P.cmd.stampVisible() : mod ? (e.shiftKey ? P.cmd.mergeVisible() : P.cmd.mergeDown()) : cycle(['eraser', 'bgEraser', 'magicEraser'], e.shiftKey)),
-      KeyN: () => (mod && e.shiftKey ? P.cmd.newLayer() : mod ? D.newDocDialog(P) : null),
-      KeyO: () => (mod ? P.cmd.open() : cycle(['dodge', 'burn', 'sponge'], e.shiftKey)),
-      KeyK: () => (mod ? P.cmd.preferences?.() : P.setTool('frame')),
-      KeyS: () => (mod ? P.cmd.saveProject() : cycle(['clone', 'patternStamp'], e.shiftKey)),
-      KeyC: () => (mod ? P.cmd.copy(e.shiftKey) : P.setTool('crop')),
-      KeyX: () => (mod && e.shiftKey ? P.cmd.liquify() : mod ? P.cmd.cut() : P.swapColors()),
-      KeyV: () => (mod ? P.cmd.paste() : P.setTool('move')),
-      KeyM: () => (mod ? D.adjustDialog(P, 'curves') : P.setTool(e.shiftKey ? (P.tool === 'rect' ? 'ellipse' : 'rect') : P.tool === 'ellipse' ? 'ellipse' : 'rect')),
-      KeyL: () => (mod && e.shiftKey ? (e.altKey ? P.cmd.autoContrast() : P.cmd.autoTone()) : mod ? D.adjustDialog(P, 'levels') : cycle(['lasso', 'polyLasso', 'magLasso'], e.shiftKey)),
-      KeyU: () => (mod ? (e.shiftKey ? D.adjustDialog(P, 'desaturate') : D.adjustDialog(P, 'hueSat')) : P.setTool('shape')),
-      KeyB: () => (mod && e.shiftKey ? P.cmd.autoColor() : mod ? D.adjustDialog(P, 'colorBalance') : cycle(['brush', 'pencil', 'colorReplace', 'mixer'], e.shiftKey)),
-      KeyG: () => (mod ? (e.altKey ? P.cmd.toggleClip() : e.shiftKey ? P.cmd.ungroup() : P.cmd.groupLayers()) : P.setTool(e.shiftKey ? (P.tool === 'gradient' ? 'bucket' : 'gradient') : P.tool === 'bucket' ? 'bucket' : 'gradient')),
-      KeyF: () => (mod ? (e.shiftKey ? P.cmd.fade() : D.repeatFilter(P)) : null),
-      KeyW: () => (mod ? null : cycle(['objSel', 'quickSel', 'wand'], e.shiftKey)),
-      KeyQ: () => (mod ? null : P.cmd.quickMask()),
-      F6: () => (e.shiftKey && !mod ? P.cmd.feather() : null),
-      KeyH: () => (mod ? null : P.setTool('hand')),
-      KeyR: () => (mod && e.altKey ? P.cmd.selectAndMask() : mod ? null : P.setTool('rotateView')),
-      Digit0: () => (mod ? P.fit() : null),
+      KeyZ: () => (mod ? (alt && !sh ? C.toggleLastState() : sh ? P.redo() : P.undo()) : tool('Z')),
+      KeyY: () => (mod ? (sh ? C.gamutWarning?.() : C.proofColors ? C.proofColors() : P.redo()) : tool('Y')),
+      KeyA: () => (mod ? (alt ? C.selectAllLayers() : sh ? filter('cameraRaw') : C.selectAll()) : tool('A')),
+      KeyP: () => (mod ? (sh || alt ? null : C.print?.()) : tool('P')),
+      KeyD: () => (mod ? (sh ? C.reselect() : C.deselect()) : P.defaultColors()),
+      KeyI: () => (mod ? (alt && sh ? C.fileInfo?.() : alt ? D.imageSizeDialog(P) : sh ? C.inverse() : D.adjustDialog(P, 'invert')) : tool('I')),
+      KeyT: () => (mod ? (alt && sh ? C.transformAgainCopy() : sh ? C.transformAgain() : alt ? C.freeTransformCopy() : C.freeTransform()) : tool('T')),
+      KeyJ: () => (mod ? (sh ? C.layerVia(true) : C.duplicateLayer()) : tool('J')),
+      KeyE: () => (mod ? (sh && alt ? C.stampVisible() : sh ? C.mergeVisible() : C.mergeDown()) : tool('E')),
+      KeyN: () => (mod ? (sh && alt ? C.newLayer() : sh ? C.newLayerDialog() : D.newDocDialog(P)) : null),
+      KeyO: () => (mod ? C.open() : tool('O')),
+      KeyK: () => (mod ? (alt && sh ? C.keyboardShortcuts() : C.preferences?.()) : tool('K')),
+      KeyS: () => (mod ? (alt && sh ? C.saveForWeb?.() : sh ? C.saveAs() : alt ? C.saveCopy() : C.saveProject()) : tool('S')),
+      KeyC: () => (mod ? (alt && sh ? C.contentAwareScale?.() : alt ? D.canvasSizeDialog(P) : C.copy(sh)) : tool('C')),
+      KeyX: () => (mod ? (sh ? C.liquify() : C.cut()) : P.swapColors()),
+      KeyV: () => (mod ? (sh && alt ? C.pasteInto?.() : sh ? (C.pasteInPlace || C.paste)() : C.paste()) : tool('V')),
+      KeyM: () => (mod ? D.adjustDialog(P, 'curves') : tool('M')),
+      KeyL: () => (mod ? (sh && alt ? C.autoContrast() : sh ? C.autoTone() : D.adjustDialog(P, 'levels')) : tool('L')),
+      KeyU: () => (mod ? (sh ? D.adjustDialog(P, 'desaturate') : D.adjustDialog(P, 'hueSat')) : tool('U')),
+      KeyB: () => (mod ? (sh && alt ? D.adjustDialog(P, 'bw') : sh ? C.autoColor() : D.adjustDialog(P, 'colorBalance')) : tool('B')),
+      KeyG: () => (mod ? (alt ? C.toggleClip() : sh ? C.ungroup() : C.groupLayers()) : tool('G')),
+      KeyF: () => (mod ? (sh ? C.fade() : D.repeatFilter(P)) : null),
+      KeyW: () => (mod ? (alt && sh ? (C.exportAs ? C.exportAs() : D.exportDialog(P)) : alt ? C.closeAll() : null) : tool('W')),
+      KeyQ: () => (mod ? null : C.quickMask()),
+      KeyH: () => (mod ? null : tool('H')),
+      KeyR: () => (mod ? (alt ? C.selectAndMask() : sh ? filter('lensCorrection') : null) : tool('R')),
+      Quote: () => (mod && sh ? C.quickExport?.() : null),
+      Slash: () => (!mod && !alt && P.doc?.active ? C.lock?.('alpha') : null),
+      Comma: () => (mod && !alt ? C.toggleLayerVisibility() : alt && !mod ? selectLayerEnd('bottom') : null),
+      Period: () => (alt && !mod ? selectLayerEnd('top') : null),
+      Tab: () => (mod ? P.switchDocStep(sh ? -1 : 1) : null),
+      F2: () => (!mod && !alt && !sh ? C.cut() : null),
+      F3: () => (!mod && !alt && !sh ? C.copy() : null),
+      F4: () => (!mod && !alt && !sh ? C.paste() : null),
+      F5: () => (mod ? null : sh ? D.fillDialog(P) : C.brushSettings()),
+      F6: () => (mod ? P.switchDocStep(sh ? -1 : 1) : sh ? C.feather() : P.showPanel('color')),
+      F7: () => (mod ? null : sh ? C.inverse() : P.showPanel('layers')),
+      F8: () => (mod || sh ? null : P.showPanel('info')),
+      F9: () => (mod || sh ? null : P.showPanel('actions')),
+      F12: () => (mod || sh || alt ? null : C.revert()),
+      Digit0: () => (mod ? (alt ? P.setZoom(1) : P.fit()) : null),
       Digit1: () => (mod ? P.setZoom(1) : null),
+      Digit2: () => (mod && alt ? (C.selectLuminosity || C.luminositySelection)() : null),
       Equal: () => (mod ? P.zoomStep(1) : null),
+      NumpadAdd: () => (mod ? P.zoomStep(1) : null),
       Minus: () => (mod ? P.zoomStep(-1) : null),
-      BracketLeft: () => (mod ? P.cmd.arrange(-1) : changeSize(e.shiftKey ? 'hardness' : 'size', -1)),
-      BracketRight: () => (mod ? P.cmd.arrange(1) : changeSize(e.shiftKey ? 'hardness' : 'size', 1)),
-      Delete: () => P.cmd.clear(),
-      Backspace: () => (e.altKey ? P.fill(P.fg, 1) : mod ? P.fill(P.bg, 1) : P.cmd.clear()),
-      Enter: () => (mod && P.getPath?.().length ? P.cmd.pathToSelection() : P.tool === 'crop' ? TOOL_BY_ID.crop.apply(P) : null),
+      NumpadSubtract: () => (mod ? P.zoomStep(-1) : null),
+      // Ctrl+[ ]: down / up one; Ctrl+Shift+[ ]: to the bottom / top; Alt+[ ]: pick the layer below /
+      // above (Shift+Alt: add it to the picked layers); no modifier: brush size (Shift: hardness)
+      BracketLeft: () => (mod ? C.arrange(sh ? 'bottom' : -1) : alt ? selectLayerStep(-1, sh) : changeSize(sh ? 'hardness' : 'size', -1)),
+      BracketRight: () => (mod ? C.arrange(sh ? 'top' : 1) : alt ? selectLayerStep(1, sh) : changeSize(sh ? 'hardness' : 'size', 1)),
+      Delete: () => clearOrDelete(),
+      Backspace: () => (P.transform ? null : sh && !mod && !alt ? D.fillDialog(P) : alt && !mod ? P.fill(P.fg, 1, sh) : mod && !alt ? P.fill(P.bg, 1, sh) : clearOrDelete()),
+      Enter: () => (mod && P.getPath?.().length ? C.pathToSelection() : P.tool === 'crop' ? TOOL_BY_ID.crop.apply(P) : null),
       Escape: () => (P.tool === 'crop' ? TOOL_BY_ID.crop.activate(P) : null),
-      ArrowLeft: () => nudge(-1, 0, e.shiftKey),
-      ArrowRight: () => nudge(1, 0, e.shiftKey),
-      ArrowUp: () => nudge(0, -1, e.shiftKey),
-      ArrowDown: () => nudge(0, 1, e.shiftKey),
+      ArrowLeft: () => nudge(-1, 0, sh),
+      ArrowRight: () => nudge(1, 0, sh),
+      ArrowUp: () => nudge(0, -1, sh),
+      ArrowDown: () => nudge(0, 1, sh),
     };
-    if (/^Digit[0-9]$/.test(k) && !mod && !e.altKey) {
+    if (/^Digit[0-9]$/.test(k) && !mod && !alt) {
       const v = k === 'Digit0' ? 100 : +k.slice(5) * 10;
       // painting tools: their own opacity; other tools (move…): the selected layers', like Photoshop
       if (TOOL_BY_ID[P.tool].options.some((o) => o[0] === 'opacity')) {
@@ -1425,23 +1545,113 @@ export function createPhotoEditor(root) {
       }
     }
     const fn = map[k];
-    if (!fn || !P.doc && !['KeyN', 'KeyO'].includes(k)) return;
+    if (!fn || !P.doc && !['KeyN', 'KeyO', 'KeyK', 'F6', 'F7', 'F8', 'F9'].includes(k)) return;
+    const before = P.tool;
     const r = fn();
-    if (r !== null) done();
+    if (r === null) return;
+    done();
+    // spring-loaded tools: a tool key held down picks the tool until it is let go
+    if (!mod && !alt && /^Key[A-Z]$/.test(k) && P.tool !== before && !spring) spring = { code: k, prev: before, t: performance.now(), used: false, release: false };
   }, true);
   window.addEventListener('keyup', (e) => {
     if (e.code === 'Space') {
       spaceDown = false;
-      updateCursor();
+      updateCursor(e);
+    } else if (spaceDown) updateCursor(e);
+    if (spring && e.code === spring.code) {
+      const tag = e.target?.tagName;
+      // typing started with the tool (a text box): it stays
+      if (P.editingText || tag === 'TEXTAREA' || tag === 'INPUT' || e.target?.isContentEditable) spring = null;
+      // held long enough to count as holding (or used while held): back to the tool from before
+      else if (spring.used || performance.now() - spring.t > 400) {
+        spring.release = true;
+        if (!active) springBack();
+      } else spring = null;
     }
   });
+  window.addEventListener('blur', () => {
+    spaceDown = false;
+    spring = null;
+  });
+  function springBack() {
+    const s = spring;
+    spring = null;
+    if (s && TOOL_BY_ID[s.prev] && P.tool !== s.prev) P.setTool(s.prev);
+  }
 
-  /** A tool key: pick the family's first tool, or the next one with Shift (like Photoshop). */
-  function cycle(ids, shift) {
+  /** A tool key: the family's last used tool, or the next one with Shift (like Photoshop). */
+  const lastOfKey = loadPref('photo.toolKeys', {});
+  P.on('tool', (id) => {
+    const key = TOOL_BY_ID[id]?.key;
+    if (key && lastOfKey[key] !== id) {
+      lastOfKey[key] = id;
+      savePref('photo.toolKeys', lastOfKey);
+    }
+  });
+  function cycleKey(letter, shift) {
+    const ids = [];
+    for (const id of TOOL_GROUPS.flat()) if (TOOL_BY_ID[id]?.key === letter && !ids.includes(id)) ids.push(id);
+    for (const t of TOOLS) if (t.key === letter && !ids.includes(t.id)) ids.push(t.id);
+    if (!ids.length) return null;
     const i = ids.indexOf(P.tool);
-    P.setTool(i < 0 ? ids[0] : shift ? ids[(i + 1) % ids.length] : P.tool);
+    if (i >= 0) {
+      if (shift) P.setTool(ids[(i + 1) % ids.length]);
+      return undefined;
+    }
+    P.setTool(ids.includes(lastOfKey[letter]) ? lastOfKey[letter] : ids[0]);
     return undefined;
   }
+  /** Delete / Backspace: clear the selected pixels, or delete the picked layers when nothing is selected. */
+  function clearOrDelete() {
+    const doc = P.doc;
+    if (!doc || P.transform) return null;
+    if (doc.selection || doc.quickMask) return P.cmd.clear();
+    if (!doc.active) return undefined;
+    if (doc.layers.length <= 1) return void toast('마지막 레이어는 지울 수 없습니다');
+    return P.cmd.deleteLayer();
+  }
+  /** Alt+[ / ]: the layer below / above in the layers panel (Shift: add it to the picked layers). */
+  function panelOrder() {
+    const doc = P.doc;
+    const out = [];
+    const walk = (pid) => {
+      const kids = doc.children(pid);
+      for (let i = kids.length - 1; i >= 0; i--) {
+        out.push(kids[i]);
+        if (kids[i].kind === 'group' && !kids[i].collapsed) walk(kids[i].id);
+      }
+    };
+    walk(null);
+    return out;
+  }
+  function selectLayerStep(dir, add) {
+    const doc = P.doc;
+    if (!doc?.active) return undefined;
+    const rows = panelOrder();
+    const i = rows.indexOf(doc.active);
+    // [ goes down the panel (towards the bottom of the stack), ] goes up
+    const next = rows[i < 0 ? 0 : i - dir];
+    if (!next) return undefined;
+    if (add) {
+      const ids = new Set([...doc.selectedLayers.map((l) => l.id), next.id]);
+      P.selectLayer(next.id);
+      doc.selectedIds = [...ids];
+      P.emit('layers');
+    } else P.selectLayer(next.id);
+    return undefined;
+  }
+  function selectLayerEnd(where) {
+    const rows = P.doc ? panelOrder() : [];
+    const l = where === 'top' ? rows[0] : rows[rows.length - 1];
+    if (l) P.selectLayer(l.id);
+    return undefined;
+  }
+  /** Ctrl+Tab / Ctrl+Shift+Tab (or Ctrl+F6): the next / previous open document. */
+  P.switchDocStep = (dir) => {
+    if (P.docs.length < 2) return undefined;
+    P.switchDoc((P.index + dir + P.docs.length) % P.docs.length);
+    return undefined;
+  };
 
   function changeSize(key, dir) {
     const t = TOOL_BY_ID[P.tool];
@@ -1512,6 +1722,11 @@ export function createPhotoEditor(root) {
   installPhotoAI(P);
   P.cmd.filterGallery = () => filterGalleryDialog(P);
   installImage2(P);
+  // Filter menu and Image ▸ Adjustments order, filter shortcuts, Image Size resampling (filtermenu.js)
+  installFilters(P);
+  // workspaces, document arrangement, copying layers between documents, Save As, New Layer dialog,
+  // shortcuts list, history options (core2.js)
+  installCore2(P, { stage, center, tabs, side, toolbar, opts, strip, groupsTop, groupLayers, panels, finishText });
   installActions(P); // last: it wraps every command so it can record them
   if (TOOL_BY_ID[savedTool]) P.tool = savedTool;
   else savePref('photo.tool', P.tool);
@@ -1520,6 +1735,8 @@ export function createPhotoEditor(root) {
   P.warpText = () => warpTextDialog(P);
   P.menus = buildMenus(P);
   for (const extend of P.extendMenus || []) extend();
+  // last: items other modules added go where Photoshop has them (File ▸ Export…)
+  arrangeMenus(P);
   P.layerMenu = () => P.menus['레이어']();
   P.contextMenu = () => [
     { label: '실행 취소', key: 'Ctrl+Z', action: () => P.undo(), disabled: !P.doc?.history.undoStack.length },
@@ -1669,6 +1886,7 @@ function installCommands(P) {
           doc.saved = true;
           doc.openState = doc.capture();
           P.renderTabs();
+          P.emit('docsaved', doc);
           toast(`${doc.name}.psd 저장${notes.length ? ` (${notes.join(', ')})` : ''}`);
         }
       });
@@ -1686,6 +1904,7 @@ function installCommands(P) {
       doc.saved = true;
       doc.openState = doc.capture();
       P.renderTabs();
+      P.emit('docsaved', doc);
       toast(`${doc.name}.mphoto 저장 (모든 레이어를 그대로 다시 열 수 있는 Montage 사진 파일)`);
     }
   };
@@ -1794,7 +2013,8 @@ function installCommands(P) {
     });
     return undefined;
   };
-  P.fill = (color, opacity = 1) => {
+  /** Fill the selection (or the layer) with a colour; `preserve`: keep transparent pixels as they are. */
+  P.fill = (color, opacity = 1, preserve = false) => {
     if (!need()) return;
     const doc = P.doc;
     const l = doc.active;
@@ -1828,7 +2048,7 @@ function installCommands(P) {
     if (!activeRaster('칠')) return;
     P.run('칠', () => {
       const g = doc.editPixels(l);
-      fillTo(g, l.x, l.y, l.lockAlpha);
+      fillTo(g, l.x, l.y, l.lockAlpha || preserve);
       l._styled = null;
     });
   };
@@ -2146,15 +2366,22 @@ function installCommands(P) {
   };
   C.reselect = () => P.doc?.lastSelection && P.run('다시 선택', () => { P.doc.selection = P.doc.lastSelection; });
   C.inverse = () => need() && P.run('선택 반전', () => { P.doc.selection = SEL.invert(P.doc); });
-  const selModify = async (label, fn, def) => {
+  /** A selection change by a number of pixels: asked for when not given (actions replay the value). */
+  const selModify = async (label, fn, def, value, again) => {
     if (!P.doc?.selection) return toast('먼저 선택 영역을 만드세요');
-    const v = await promptDialog(label, '픽셀', String(def));
-    const n = parseFloat(v);
+    if (value === undefined) {
+      const v = await promptDialog(label, '픽셀', String(def));
+      const n = parseFloat(v);
+      if (!Number.isFinite(n) || n <= 0) return undefined;
+      // through the command again, so an action being recorded keeps the value
+      return again(n);
+    }
+    const n = +value;
     if (!Number.isFinite(n) || n <= 0) return undefined;
     P.run(label, () => { P.doc.selection = fn(n); });
     return undefined;
   };
-  C.feather = () => selModify('페더', (n) => SEL.feather(P.doc, n), 10);
+  C.feather = (value) => selModify('페더', (n) => SEL.feather(P.doc, n), 10, value, (n) => P.cmd.feather(n));
   C.selectFromLayer = (l = P.doc?.active, mode = 'new') => l && P.run('레이어 모양대로 선택', () => {
     const m = SEL.fromLayer(P.doc, l);
     P.doc.selection = mode === 'new' ? m : SEL.combine(P.doc, m.canvas, mode);
@@ -2195,143 +2422,182 @@ function buildMenus(P) {
   const C = P.cmd;
   const mod = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘' : 'Ctrl+';
   const no = () => !P.doc;
-  const adjustItems = () => Object.entries(ADJUSTMENTS).map(([k, a]) => ({ label: `${a.name}${a.params.length ? '…' : ''}`, key: { levels: `${mod}L`, curves: `${mod}M`, hueSat: `${mod}U`, colorBalance: `${mod}B`, invert: `${mod}I`, desaturate: `${mod}Shift+U` }[k], disabled: no(), action: () => D.adjustDialog(P, k) }));
+  const noSel = () => !P.doc?.selection;
+  const ell = (name, more) => (more && !name.endsWith('…') ? `${name}…` : name);
+  const ADJ_KEYS = { levels: `${mod}L`, curves: `${mod}M`, hueSat: `${mod}U`, colorBalance: `${mod}B`, bw: `${mod}Alt+Shift+B`, invert: `${mod}I`, desaturate: `${mod}Shift+U` };
+  const adjustItems = () => [
+    ...Object.entries(ADJUSTMENTS).map(([k, a]) => ({ label: ell(a.name, a.params.length), key: ADJ_KEYS[k], disabled: no(), action: () => D.adjustDialog(P, k) })),
+    // Photoshop keeps Match Color with the adjustments
+    ...(C.matchColor ? ['-', { label: '색상 일치…', disabled: no(), action: () => C.matchColor() }] : []),
+  ];
   const filterGroups = () => {
     const groups = {};
     // the filter gallery's own effects live in the gallery (like Photoshop's default menu)
-    for (const [id, f] of Object.entries(FILTERS)) if (!f.gallery && !f.hidden) (groups[f.group] ||= []).push({ label: `${f.name}${f.params.length ? '…' : ''}`, disabled: no(), action: () => D.filterDialog(P, id) });
+    for (const [id, f] of Object.entries(FILTERS)) if (!f.gallery && !f.hidden) (groups[f.group] ||= []).push({ label: ell(f.name, f.params.length), disabled: no(), action: () => D.filterDialog(P, id) });
     // a group of one (Camera Raw) is a plain item, like Photoshop's
     return Object.entries(groups).map(([g, items]) => (items.length === 1 ? items[0] : { label: g, submenu: items }));
   };
+  const hist = () => P.doc?.history;
   return {
     '파일': () => [
       { label: '새로 만들기…', key: `${mod}N`, action: () => D.newDocDialog(P) },
       { label: '열기… (사진·PSD·Montage 사진 파일)', key: `${mod}O`, action: () => C.open() },
       { label: '영상 프로젝트의 이미지 열기', action: () => C.openFromVideo() },
-      { label: '포함 가져오기 (고급 개체)…', disabled: no(), action: () => C.placeEmbedded() },
-      { label: '가져오기 (새 픽셀 레이어로)…', disabled: no(), action: () => C.place() },
-      { label: '닫기', disabled: no(), action: () => P.closeDoc() },
       '-',
-      { label: 'Montage 사진 파일로 저장 (.mphoto)', key: `${mod}S`, disabled: no(), action: () => C.saveProject() },
+      { label: '닫기', disabled: no(), action: () => P.closeDoc() },
+      { label: '모두 닫기', key: `${mod}Alt+W`, disabled: no(), action: () => C.closeAll() },
+      { label: '기타 항목 닫기', disabled: P.docs.length < 2, action: () => C.closeOthers() },
+      '-',
+      { label: '저장 (Montage 사진 파일 .mphoto)', key: `${mod}S`, disabled: no(), action: () => C.saveProject() },
+      { label: '다른 이름으로 저장…', key: `${mod}Shift+S`, disabled: no(), action: () => C.saveAs() },
+      { label: '사본 저장…', key: `${mod}Alt+S`, disabled: no(), action: () => C.saveCopy() },
       { label: 'PSD로 저장 (포토샵 파일)', disabled: no(), action: () => C.savePsd() },
       { label: 'PSD로 저장 (글자·모양을 포토샵에서 고칠 수 있게, 실험적)', disabled: no(), action: () => C.savePsd({ editableText: true }) },
-      { label: '레이어를 파일로 내보내기 (PNG)…', disabled: no(), action: () => C.exportLayers() },
+      { label: '되돌리기', key: 'F12', disabled: no() || !P.doc?.openState, action: () => C.revert() },
+      '-',
       { label: '내보내기 (PNG · JPG · WebP)…', key: `${mod}Shift+Alt+W`, disabled: no(), action: () => D.exportDialog(P) },
-      { label: '자동화', submenu: [{ label: '일괄 처리… (여러 사진에 액션)', action: () => C.batch() }, { label: '액션 패널 열기', action: () => P.showPanel('actions') }] },
+      { label: '레이어를 파일로 내보내기 (PNG)…', disabled: no(), action: () => C.exportLayers() },
+      '-',
+      { label: '포함 가져오기 (고급 개체)…', disabled: no(), action: () => C.placeEmbedded() },
+      { label: '가져오기 (새 픽셀 레이어로)…', disabled: no(), action: () => C.place() },
+      '-',
+      { label: '자동화', submenu: [{ label: '일괄 처리… (여러 사진에 액션)', action: () => C.batch() }, { label: '액션 패널 열기', key: 'Alt+F9', action: () => P.showPanel('actions') }] },
       '-',
       { label: '영상 편집으로 보내기…', disabled: no(), action: () => D.sendToVideoDialog(P) },
     ],
     '편집': () => [
-      { label: `실행 취소${P.doc?.history.undoStack.length ? `: ${P.doc.history.undoStack.at(-1).label}` : ''}`, key: `${mod}Z`, disabled: !P.doc?.history.undoStack.length, action: () => P.undo() },
-      { label: `다시 실행${P.doc?.history.redoStack.length ? `: ${P.doc.history.redoStack.at(-1).label}` : ''}`, key: `${mod}Shift+Z`, disabled: !P.doc?.history.redoStack.length, action: () => P.redo() },
-      '-',
-      { label: '잘라내기', key: `${mod}X`, disabled: no(), action: () => C.cut() },
-      { label: '복사', key: `${mod}C`, disabled: no(), action: () => C.copy() },
-      { label: '병합하여 복사 (보이는 모습)', key: `${mod}Shift+C`, disabled: no(), action: () => C.copy(true) },
-      { label: '붙여넣기', key: `${mod}V`, disabled: no(), action: () => C.paste() },
-      { label: '지우기 (선택 영역)', key: 'Delete', disabled: no(), action: () => C.clear() },
+      { label: `실행 취소${hist()?.undoStack.length ? `: ${hist().undoStack.at(-1).label}` : ''}`, key: `${mod}Z`, disabled: !hist()?.undoStack.length, action: () => P.undo() },
+      { label: `다시 실행${hist()?.redoStack.length ? `: ${hist().redoStack.at(-1).label}` : ''}`, key: `${mod}Shift+Z`, disabled: !hist()?.redoStack.length, action: () => P.redo() },
+      { label: '마지막 상태 전환', key: `${mod}Alt+Z`, disabled: !hist()?.undoStack.length && !hist()?.redoStack.length, action: () => C.toggleLastState() },
       '-',
       { label: '희미하게 하기… (마지막 작업)', key: `${mod}Shift+F`, disabled: no(), action: () => C.fade() },
       '-',
-      { label: '칠…', key: 'Shift+F5', disabled: no(), action: () => D.fillDialog(P) },
-      { label: '내용 인식 채우기 (선택 영역을 주변으로)', disabled: no() || !P.doc?.selection, action: () => C.contentAwareFill() },
-      { label: '획 (선택 영역 테두리)…', disabled: no(), action: () => D.strokeDialog(P) },
-      '-',
-      { label: '자유 변형', key: `${mod}T`, disabled: no(), action: () => C.freeTransform() },
-      { label: '변형', disabled: no(), submenu: [
-        { label: '다시', key: `${mod}Shift+T`, disabled: !P.lastTransform, action: () => C.transformAgain() },
-        '-',
-        { label: '크기 조절 · 회전', action: () => C.freeTransform('free') },
-        { label: '기울이기', action: () => C.freeTransform('skew') },
-        { label: '왜곡', action: () => C.freeTransform('distort') },
-        { label: '원근', action: () => C.freeTransform('perspective') },
-        { label: '뒤틀기', action: () => C.freeTransform('warp') },
-        '-',
-        { label: '90° 시계 방향 회전', action: () => C.transformLayer('cw') },
-        { label: '90° 반시계 방향 회전', action: () => C.transformLayer('ccw') },
-        { label: '180° 회전', action: () => C.transformLayer('180') },
-        { label: '가로로 뒤집기', action: () => C.transformLayer('flipH') },
-        { label: '세로로 뒤집기', action: () => C.transformLayer('flipV') },
-      ] },
-      { label: '내용 인식 비율…', key: `${mod}Alt+Shift+C`, disabled: no(), action: () => C.contentAwareScale() },
-      { label: '퍼펫 뒤틀기…', disabled: no(), action: () => C.puppetWarp() },
-      { label: '하늘 대체…', disabled: no(), action: () => C.skyReplacement() },
+      { label: '잘라내기', key: `${mod}X`, disabled: no(), action: () => C.cut() },
+      { label: '복사', key: `${mod}C`, disabled: no(), action: () => C.copy() },
+      { label: '병합하여 복사', key: `${mod}Shift+C`, disabled: no(), action: () => C.copy(true) },
+      { label: '붙여넣기', key: `${mod}V`, disabled: no(), action: () => C.paste() },
+      { label: '지우기', key: 'Delete', disabled: no() || noSel(), action: () => C.clear() },
       '-',
       { label: '텍스트 찾기 / 바꾸기…', disabled: no(), action: () => C.findReplace() },
       '-',
+      { label: '칠…', key: 'Shift+F5', disabled: no(), action: () => D.fillDialog(P) },
+      { label: '획…', disabled: no(), action: () => D.strokeDialog(P) },
+      { label: '내용 인식 채우기 (선택 영역을 주변으로)', disabled: no() || noSel(), action: () => C.contentAwareFill() },
+      '-',
+      { label: '내용 인식 비율…', key: `${mod}Alt+Shift+C`, disabled: no(), action: () => C.contentAwareScale() },
+      { label: '퍼펫 뒤틀기…', disabled: no(), action: () => C.puppetWarp() },
+      { label: '자유 변형', key: `${mod}T`, disabled: no(), action: () => C.freeTransform() },
+      { label: '변형', disabled: no(), submenu: [
+        { label: '다시', key: `${mod}Shift+T`, disabled: !P.lastTransform, action: () => C.transformAgain() },
+        { label: '복사본을 다시 변형', key: `${mod}Alt+Shift+T`, disabled: !P.lastTransform, action: () => C.transformAgainCopy() },
+        { label: '복사본 자유 변형', key: `${mod}Alt+T`, action: () => C.freeTransformCopy() },
+        '-',
+        { label: '비율', action: () => C.freeTransform('free') },
+        { label: '회전', action: () => C.freeTransform('free') },
+        { label: '기울이기', action: () => C.freeTransform('skew') },
+        { label: '왜곡', action: () => C.freeTransform('distort') },
+        { label: '원근', action: () => C.freeTransform('perspective') },
+        '-',
+        { label: '뒤틀기', action: () => C.freeTransform('warp') },
+        '-',
+        { label: '180° 회전', action: () => C.transformLayer('180') },
+        { label: '시계 방향으로 90° 회전', action: () => C.transformLayer('cw') },
+        { label: '반시계 방향으로 90° 회전', action: () => C.transformLayer('ccw') },
+        '-',
+        { label: '가로로 뒤집기', action: () => C.transformLayer('flipH') },
+        { label: '세로로 뒤집기', action: () => C.transformLayer('flipV') },
+      ] },
+      '-',
+      { label: '하늘 대체…', disabled: no(), action: () => C.skyReplacement() },
+      '-',
       { label: '브러시 사전 설정 정의… (선택 영역의 어두운 부분)', disabled: no(), action: () => C.defineBrush() },
       { label: '패턴 정의… (선택 영역 또는 전체)', disabled: no(), action: () => C.definePattern() },
+      '-',
+      { label: '바로 가기 키…', key: `${mod}Alt+Shift+K`, action: () => C.keyboardShortcuts() },
+      { label: '환경 설정', submenu: [
+        { label: '일반…', key: `${mod}K`, action: () => C.preferences() },
+        { label: '성능 (작업 내역 · 메모리)…', action: () => C.preferences('perf') },
+        { label: '커서…', action: () => C.preferences('cursor') },
+        { label: '투명도…', action: () => C.preferences('transparency') },
+        { label: '단위와 눈금자…', action: () => C.preferences('units') },
+        { label: '안내선, 격자 및 분할 영역…', action: () => C.preferences('guides') },
+      ] },
     ],
     '이미지': () => [
+      { label: '모드', disabled: no(), submenu: [{ label: 'RGB 색상', checked: P.doc?.mode !== 'gray', action: () => toast('RGB 색상 모드입니다 (회색 음영으로 바꾼 레이어는 다시 색이 생기지 않아요)') }, { label: '회색 음영', checked: P.doc?.mode === 'gray', action: () => C.grayscale() }] },
+      '-',
       { label: '조정', disabled: no(), submenu: adjustItems },
+      '-',
       { label: '자동 톤', key: `${mod}Shift+L`, disabled: no(), action: () => C.autoTone() },
       { label: '자동 대비', key: `${mod}Alt+Shift+L`, disabled: no(), action: () => C.autoContrast() },
       { label: '자동 색상', key: `${mod}Shift+B`, disabled: no(), action: () => C.autoColor() },
-      { label: '색상 일치… (다른 사진의 색감)', disabled: no(), action: () => C.matchColor() },
-      { label: '모드', disabled: no(), submenu: [{ label: 'RGB 색상', checked: P.doc?.mode !== 'gray', action: () => toast('RGB 색상 모드입니다 (회색 음영으로 바꾼 레이어는 다시 색이 생기지 않아요)') }, { label: '회색 음영으로 바꾸기', checked: P.doc?.mode === 'gray', action: () => C.grayscale() }] },
       '-',
       { label: '이미지 크기…', key: `${mod}Alt+I`, disabled: no(), action: () => D.imageSizeDialog(P) },
       { label: '캔버스 크기…', key: `${mod}Alt+C`, disabled: no(), action: () => D.canvasSizeDialog(P) },
-      { label: '모두 나타내기 (캔버스 밖 부분까지)', disabled: no(), action: () => C.revealAll() },
-      { label: '복제 (새 문서로)', disabled: no(), action: () => C.duplicateDoc() },
       { label: '이미지 회전', disabled: no(), submenu: [
         { label: '180°', action: () => C.rotateCanvas('180') },
-        { label: '90° 시계 방향', action: () => C.rotateCanvas('cw') },
-        { label: '90° 반시계 방향', action: () => C.rotateCanvas('ccw') },
+        { label: '시계 방향으로 90°', action: () => C.rotateCanvas('cw') },
+        { label: '반시계 방향으로 90°', action: () => C.rotateCanvas('ccw') },
         '-',
         { label: '캔버스 가로로 뒤집기', action: () => C.rotateCanvas('flipH') },
         { label: '캔버스 세로로 뒤집기', action: () => C.rotateCanvas('flipV') },
       ] },
-      { label: '선택 영역으로 자르기', disabled: no() || !P.doc?.selection, action: () => C.cropToSelection() },
-      { label: '투명 영역 잘라내기 (트리밍)', disabled: no(), action: () => C.trim() },
+      { label: '자르기 (선택 영역으로)', disabled: no() || noSel(), action: () => C.cropToSelection() },
+      { label: '재단…', disabled: no(), action: () => C.trimDialog() },
+      { label: '모두 나타내기', disabled: no(), action: () => C.revealAll() },
+      '-',
+      { label: '복제…', disabled: no(), action: () => C.duplicateDoc() },
     ],
     '레이어': () => layerMenuItems(P, mod),
     // Photoshop's Type menu; modules add to it through P.extendMenus
     '문자': () => [
       { label: '패널', submenu: [{ label: '문자 · 단락 패널', action: () => P.showPanel('char') }, { label: '글리프 패널', action: () => P.showPanel('glyphs') }] },
       '-',
-      { label: '텍스트 뒤틀기…', disabled: P.doc?.active?.type !== 'text', action: () => P.warpText() },
-      { label: '작업 패스 만들기', disabled: P.doc?.active?.type !== 'text', action: () => C.textToPath?.() },
-      { label: '모양으로 변환', disabled: P.doc?.active?.type !== 'text', action: () => C.textToShape?.() },
-      { label: '문자 레이어 래스터화', disabled: P.doc?.active?.type !== 'text', action: () => C.rasterize('layer') },
+      { label: '텍스트 뒤틀기…', disabled: P.doc?.active?.kind !== 'text', action: () => P.warpText() },
+      { label: '작업 패스 만들기', disabled: P.doc?.active?.kind !== 'text', action: () => C.textToPath?.() },
+      { label: '모양으로 변환', disabled: P.doc?.active?.kind !== 'text', action: () => C.textToShape?.() },
+      { label: '문자 레이어 래스터화', disabled: P.doc?.active?.kind !== 'text', action: () => C.rasterize('layer') },
       '-',
       { label: '텍스트 찾기 / 바꾸기…', disabled: no(), action: () => C.findReplace() },
     ],
     '선택': () => [
       { label: '모두', key: `${mod}A`, disabled: no(), action: () => C.selectAll() },
-      { label: '선택 해제', key: `${mod}D`, disabled: !P.doc?.selection, action: () => C.deselect() },
+      { label: '선택 해제', key: `${mod}D`, disabled: noSel(), action: () => C.deselect() },
       { label: '다시 선택', key: `${mod}Shift+D`, disabled: !P.doc?.lastSelection, action: () => C.reselect() },
       { label: '반전', key: `${mod}Shift+I`, disabled: no(), action: () => C.inverse() },
       '-',
       { label: '모든 레이어', key: `${mod}Alt+A`, disabled: no(), action: () => C.selectAllLayers() },
       { label: '레이어 선택 해제', disabled: no(), action: () => C.deselectLayers() },
+      { label: '레이어 찾기', key: `${mod}Alt+Shift+F`, disabled: no(), action: () => P.focusLayerFilter?.() },
       '-',
-      { label: '피사체 (색 분석, 단순 추정)', disabled: no(), action: () => C.selectSubject() },
-      { label: '하늘 (단순 추정)', disabled: no(), action: () => C.selectSky() },
-      { label: '초점 영역…', disabled: no(), action: () => C.focusArea() },
       { label: '색상 범위…', disabled: no(), action: () => C.colorRange() },
+      { label: '초점 영역…', disabled: no(), action: () => C.focusArea() },
+      { label: '피사체', disabled: no(), action: () => C.selectSubject() },
+      { label: '하늘', disabled: no(), action: () => C.selectSky() },
       '-',
       { label: '선택 및 마스크…', key: `${mod}Alt+R`, disabled: no(), action: () => C.selectAndMask() },
-      { label: '수정', disabled: !P.doc?.selection, submenu: [
+      { label: '수정', disabled: noSel(), submenu: [
         { label: '테두리…', action: () => C.border() },
         { label: '매끄럽게…', action: () => C.smooth() },
         { label: '확대…', action: () => C.expand() },
         { label: '축소…', action: () => C.contract() },
         { label: '페더…', key: 'Shift+F6', action: () => C.feather() },
       ] },
-      { label: '선택 영역 확장 (마술봉 허용치)', disabled: !P.doc?.selection, action: () => C.grow() },
-      { label: '유사 영역 선택', disabled: !P.doc?.selection, action: () => C.similar() },
+      { label: '선택 영역 확장', disabled: noSel(), action: () => C.grow() },
+      { label: '유사 영역 선택', disabled: noSel(), action: () => C.similar() },
       '-',
-      { label: '선택 영역 변형', disabled: !P.doc?.selection, action: () => C.transformSelection() },
+      { label: '선택 영역 변형', disabled: noSel(), action: () => C.transformSelection() },
       '-',
       { label: '빠른 마스크 모드로 편집', key: 'Q', checked: !!P.doc?.quickMask, disabled: no(), action: () => C.quickMask() },
       '-',
       { label: '선택 영역 불러오기…', disabled: no(), action: () => C.loadSelection() },
-      { label: '선택 영역 저장…', disabled: !P.doc?.selection, action: () => C.saveSelection() },
+      { label: '선택 영역 저장…', disabled: noSel(), action: () => C.saveSelection() },
       { label: '레이어 모양대로 선택', disabled: no(), action: () => C.selectFromLayer() },
+      { label: '광도를 선택 영역으로', key: `${mod}Alt+2`, disabled: no(), action: () => (C.selectLuminosity || C.luminositySelection)() },
     ],
     '필터': () => [
       { label: '마지막 필터 다시', key: `${mod}F`, disabled: no(), action: () => D.repeatFilter(P) },
+      { label: '고급 필터용으로 변환', disabled: no() || P.doc?.active?.kind === 'smart', action: () => C.convertToSmart() },
       '-',
       { label: '필터 갤러리…', disabled: no(), action: () => C.filterGallery() },
       { label: '픽셀 유동화…', key: `${mod}Shift+X`, disabled: no(), action: () => C.liquify() },
@@ -2341,52 +2607,20 @@ function buildMenus(P) {
     '보기': () => [
       { label: '확대', key: `${mod}+`, disabled: no(), action: () => P.zoomStep(1) },
       { label: '축소', key: `${mod}-`, disabled: no(), action: () => P.zoomStep(-1) },
-      { label: '화면에 맞추기', key: `${mod}0`, disabled: no(), action: () => P.fit() },
-      { label: '100% (실제 픽셀)', key: `${mod}1`, disabled: no(), action: () => P.setZoom(1) },
+      { label: '화면 크기에 맞게 조정', key: `${mod}0`, disabled: no(), action: () => P.fit() },
+      { label: '100%', key: `${mod}1`, disabled: no(), action: () => P.setZoom(1) },
+      { label: '200%', disabled: no(), action: () => P.setZoom(2) },
       ...(P.viewMenuItems ? P.viewMenuItems(mod, no) : []),
     ],
-    '창': () => [
-      { label: '색상', action: () => P.showPanel('color') },
-      { label: '견본', action: () => P.showPanel('swatches') },
-      { label: '속성', action: () => P.showPanel('props') },
-      { label: '조정', action: () => P.showPanel('adjustments') },
-      { label: '글리프', action: () => P.showPanel('glyphs') },
-      { label: '도구 사전 설정', action: () => P.showPanel('presets') },
-      { label: '타임라인 (프레임 애니메이션)', action: () => P.showPanel('timeline') },
-      { label: '작업 내역', action: () => P.showPanel('history') },
-      { label: '레이어', action: () => P.showPanel('layers') },
-      { label: '채널', action: () => P.showPanel('channels') },
-      { label: '패스', action: () => P.showPanel('paths') },
-      { label: '내비게이터', action: () => P.showPanel('nav') },
-      { label: '정보', action: () => P.showPanel('info') },
-      { label: '히스토그램', action: () => P.showPanel('histo') },
-      { label: '액션', action: () => P.showPanel('actions') },
-      { label: '레이어 구성요소', action: () => P.showPanel('comps') },
-      { label: 'AI (자동 보정 · 편집 도우미)', action: () => P.showPanel('ai') },
-    ],
+    '창': () => P.windowMenu(),
     '도움말': () => [
+      // first: the menu bar's 단축키 button opens it
+      { label: '바로 가기 키 (단축키)…', key: `${mod}Alt+Shift+K`, action: () => C.keyboardShortcuts() },
       { label: '설명서 (모든 기능)', action: () => import('../docs/viewer.js').then((m) => m.openDocs('p-start')) },
-      { label: '사진 편집 단축키', action: () => photoShortcuts() },
       '-',
       { label: 'Montage 웹사이트 (새 탭)', action: () => window.open('index.html', '_blank', 'noopener') },
     ],
   };
-}
-
-function photoShortcuts() {
-  import('../ui/common.js').then(({ openModal }) => {
-    const rows = [
-      ['V', '이동'], ['M / Shift+M', '사각형 · 원형 선택'], ['L', '올가미'], ['W', '자동 선택(마술봉)'], ['C', '자르기'], ['I / Shift+I', '스포이드 · 색상 샘플러 · 눈금자 · 메모 · 카운트'],
-      ['J / Shift+J', '복구 도구들 (스팟 복구 · 복구 · 패치 · 내용 인식 이동 · 제거 · 적목)'], ['B / Shift+B', '브러시 · 연필 · 색상 대체 · 혼합 브러시'], ['Y / Shift+Y', '작업 내역 브러시 · 미술 작업 내역 브러시'], ['S', '복제 도장 (Alt+클릭으로 원본)'], ['E / Shift+E', '지우개 · 배경 지우개 · 자동 지우개'], ['G / Shift+G', '그레이디언트 · 페인트 통'],
-      ['O / Shift+O', '닷지 · 번 · 스펀지'], ['R', '회전 보기 (화면만 돌리기, Esc로 0°)'], ['T', '문자'], ['U', '모양'], ['K', '프레임 (사진을 넣는 모양 틀)'], ['H / Space 누른 채 끌기', '화면 이동'], ['Z', '돋보기'],
-      ['[ / ]', '브러시 크기'], ['Shift+[ / ]', '브러시 경도'], ['1~9, 0', '불투명도 10~90%, 100% (칠하기 도구는 도구의, 이동 도구 등은 레이어의)'], ['← → ↑ ↓', '이동 도구: 레이어 1픽셀 이동 (Shift: 10픽셀)'], ['X / D', '색 바꾸기 / 기본 색'],
-      ['Ctrl+Z / Ctrl+Shift+Z', '실행 취소 / 다시 실행'], ['Ctrl+A / Ctrl+D / Ctrl+Shift+I', '모두 선택 / 해제 / 반전'],
-      ['Ctrl+T', '자유 변형 (브라우저가 막으면 편집 메뉴 사용)'], ['Ctrl+J / Ctrl+E', '레이어 복제 / 아래로 병합'],
-      ['Ctrl+L / M / U / B / I', '레벨 / 곡선 / 색조·채도 / 색상 균형 / 반전'], ['Alt+Backspace / Ctrl+Backspace', '전경색 / 배경색으로 칠'],
-      ['Ctrl+0 / Ctrl+1', '화면에 맞추기 / 100%'], ['F / Tab / Shift+Tab', '화면 모드 / 도구·패널 숨기기 / 오른쪽 패널만 숨기기'], ['Ctrl+H', '선택 점선·안내선·격자 숨기기'], ['Ctrl+K', '환경 설정'], ['Ctrl+Alt+Shift+F', '레이어 찾기'], ['Ctrl+휠, Alt+휠', '확대·축소'], ['두 손가락', '휴대폰: 확대·축소·이동'],
-    ];
-    openModal({ title: '사진 편집 단축키 (macOS는 Ctrl 대신 ⌘)', width: '600px', body: [h('div.kbd-table', rows.flatMap(([k, d]) => [h('span', d), h('span.k', k)])), h('div.note', '한글 입력 상태에서도 단축키가 작동합니다 (키 위치 기준). 글자를 입력하는 칸에서는 단축키가 꺼집니다.')] });
-  });
 }
 
 /** A dirty rectangle grown to whole pixels (plus a pixel of margin) and kept inside the document. */
