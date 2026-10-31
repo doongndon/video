@@ -17,7 +17,20 @@ export const openManual = (id = appMode.isPhoto() ? 'p-start' : null) => import(
 const mod = isMac ? '⌘' : 'Ctrl+';
 
 /** Menu definitions, shared with the phone layout's menu sheet. */
-export const menubarApi = { menus: null };
+export const menubarApi = { menus: null, extenders: [] };
+
+/**
+ * Add to a video menu from another module: fn(items) → items. Call it when the module is first
+ * evaluated (before the menu bar is built); later calls apply at once.
+ */
+export function extendMenu(name, fn) {
+  const apply = (menus) => {
+    const orig = menus[name];
+    if (orig) menus[name] = () => fn(orig());
+  };
+  if (menubarApi.videoMenus) apply(menubarApi.videoMenus);
+  else menubarApi.extenders.push(apply);
+}
 
 export function createMenubar(el) {
   const sel = () => store.selectedClips();
@@ -212,6 +225,7 @@ export function createMenubar(el) {
     ],
   };
 
+  for (const apply of menubarApi.extenders) apply(menus);
   menubarApi.menus = menus;
   menubarApi.videoMenus = menus;
   el.append(h('span.brand', 'Montage'));

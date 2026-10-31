@@ -11,6 +11,16 @@ import { clamp } from './util.js';
 const FILTER_FX = new Set(['brightnessContrast', 'basicColor', 'hueShift', 'gaussianBlur', 'blackWhite', 'sepia', 'invert', 'sharpen', 'findEdges', 'posterize']);
 const TRANSFORM_FX = new Set(['dropShadow', 'hFlip', 'vFlip', 'cameraShake', 'stabilize', 'trackMatte', 'blurFill']);
 const SVG_NS = 'http://www.w3.org/2000/svg';
+
+/**
+ * Pixel effects registered by other modules (effect type → renderer). A renderer gets
+ * { canvas, ctx, w, h, v, ps, clip, tl, t } — the clip's frame so far at processing scale ps
+ * (stage pixels per source pixel, so pixel sizes in v must be multiplied by ps) — and either draws
+ * into ctx in place or returns a new canvas of the same size.
+ */
+export const PIXEL_FX = {};
+/** Transitions registered by other modules: type → (p, dir, W, H) → a plan like transitionPlan's. */
+export const TRANSITION_PLANS = {};
 let svgRoot = null;
 
 /** Smooth pseudo-random wobble in [-1, 1] (sum of incommensurate sines). */
@@ -858,6 +868,18 @@ export class Compositor {
           }
           break;
         }
+        default: {
+          const fn = PIXEL_FX[type];
+          if (!fn) break;
+          const out = fn({ canvas: cur, ctx: cctx, w, h, v, ps, clip, tl, t: (clip?.start || 0) + tl });
+          if (out && out !== cur) {
+            cctx.save();
+            cctx.globalCompositeOperation = 'copy';
+            cctx.drawImage(out, 0, 0, w, h);
+            cctx.restore();
+          }
+          break;
+        }
       }
     }
     flushFilters();
@@ -1115,6 +1137,7 @@ function dirVector(dir) {
  * and incoming (b) clip, and whether they are blended in a dissolve layer.
  */
 function transitionPlan(type, p, dir, W, H) {
+  if (TRANSITION_PLANS[type]) return TRANSITION_PLANS[type](p, dir, W, H);
   const e = p * p * (3 - 2 * p);
   const diag = Math.hypot(W, H);
   switch (type) {

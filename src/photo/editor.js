@@ -203,11 +203,25 @@ export function createPhotoEditor(root) {
       bar.append(b);
     }
     show(ids.includes(cur) ? cur : ids[0]);
-    return { el: h('div.ph-pgroup', bar, body), show, ids };
+    // a panel registered later (P.addPanel) gets its tab here
+    const add = (id) => {
+      if (ids.includes(id)) return;
+      ids.push(id);
+      const b = h('button', { onclick: () => show(id) }, panels[id].title);
+      b.dataset.id = id;
+      bar.append(b);
+      if (cur === id) show(id);
+    };
+    return { el: h('div.ph-pgroup', bar, body), show, ids, add };
   };
   const groupsTop = sideTabs(['color', 'swatches', 'props', 'adjustments', 'ai', 'char', 'glyphs', 'history', 'presets', 'nav', 'info', 'histo']);
   const groupLayers = sideTabs(['layers', 'channels', 'paths', 'timeline', 'actions', 'comps']);
   const side = h('div.ph-side', groupsTop.el, groupLayers.el);
+  /** Register a panel from a module: a tab in the upper ('top') or layers ('layers') column, a sheet on phones. */
+  P.addPanel = (id, title, el, where = 'top') => {
+    panels[id] = { title, el };
+    (where === 'layers' ? groupLayers : groupsTop).add(id);
+  };
   // phone: a sheet that shows one panel at a time
   const sheetBody = h('div.ph-sheet-body');
   const sheetTitle = h('b');
