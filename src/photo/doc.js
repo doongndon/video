@@ -306,6 +306,11 @@ export class PhotoDoc {
           if (r === null || area === null) area = null;
           else if (r) area = area ? unionRect(area, r) : r;
         }
+        // an artboard's rectangle (and background) moves with its layers
+        if (l.artboard) {
+          l.artboard = { ...l.artboard, x: l.artboard.x + dx, y: l.artboard.y + dy };
+          area = null;
+        }
       } else {
         const r0 = this.movedArea(l);
         const before = { rev: l.rev, x: l.x, y: l.y };
@@ -471,6 +476,7 @@ export class PhotoDoc {
       const b = layer.kind === 'text' ? textBox(layer) : { w: layer.shape.w, h: layer.shape.h };
       return { x: layer.x, y: layer.y, w: b.w, h: b.h, rotation: layer.rotation || 0 };
     }
+    if (layer.kind === 'group' && layer.artboard) return { x: layer.artboard.x, y: layer.artboard.y, w: layer.artboard.w, h: layer.artboard.h, rotation: 0 };
     if (layer.kind === 'group') {
       const bs = this.descendants(layer.id).filter((d) => d.kind !== 'group' && d.kind !== 'adjust').map((d) => this.opaqueBounds(d)).filter(Boolean);
       if (!bs.length) return null;
@@ -739,6 +745,7 @@ export class PhotoDoc {
   }
 
   drawGroup(ctx, g, o, { normal = false } = {}) {
+    if (g.artboard) return this.drawArtboard(ctx, g, o);
     const kids = this.children(g.id);
     const masked = (g.mask && g.mask.enabled) || (g.vmask && g.vmask.subpaths?.length);
     const passThrough = g.blend === 'pass through' && !normal;
@@ -776,8 +783,43 @@ export class PhotoDoc {
     this.drawContent(ctx, g, { canvas: buf, x: 0, y: 0 }, o, { normal, key: `g${o.sig}` });
   }
 
+  /** An artboard (대지, artboards.js): its background, then its layers cut to its rectangle. */
+  drawArtboard(ctx, g, o) {
+    const a = g.artboard;
+    const fill = a.bg === 'transparent' ? null : a.bg === 'black' ? '#000000' : a.bg === 'custom' ? a.color || '#ffffff' : '#ffffff';
+    o.sig += `ab${a.x},${a.y},${a.w},${a.h},${fill};`;
+    // one scratch canvas, reused (artboards don't nest, and it is drawn out right away)
+    let buf = this._abBuf;
+    if (!buf || buf.width !== this.width || buf.height !== this.height) {
+      buf = makeCanvas(this.width, this.height);
+      Object.defineProperty(this, '_abBuf', { value: buf, enumerable: false, configurable: true, writable: true });
+    }
+    const bg = buf.getContext('2d');
+    bg.setTransform(1, 0, 0, 1, 0, 0);
+    bg.globalAlpha = 1;
+    bg.globalCompositeOperation = 'source-over';
+    bg.clearRect(0, 0, buf.width, buf.height);
+    if (fill) {
+      bg.fillStyle = fill;
+      bg.fillRect(a.x, a.y, a.w, a.h);
+    }
+    this.renderList(bg, this.children(g.id), o);
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(a.x, a.y, a.w, a.h);
+    ctx.clip();
+    ctx.drawImage(buf, 0, 0);
+    ctx.restore();
+  }
+
   /** A group drawn on its own (isolated, normal blend) as a doc-size canvas. */
   renderGroupAlone(g) {
+    if (g.artboard) {
+      const c = makeCanvas(this.width, this.height);
+      const cg = c.getContext('2d');
+      this.drawArtboard(cg, g, { sig: `alone${g.id}`, only: null, skipId: null, float: null, root: cg });
+      return c;
+    }
     const buf = makeCanvas(this.width, this.height);
     this.renderList(buf.getContext('2d'), this.children(g.id), { sig: `alone${g.id}`, only: null, skipId: null, float: null });
     return buf;

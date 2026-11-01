@@ -17,13 +17,17 @@ import * as IO from './io.js';
 
 const isMobile = () => document.body.classList.contains('mobile');
 
-/** Window ▸ Workspace presets: which panels sit in the upper and the layers column, in what order. */
+/**
+ * Window ▸ Workspace presets: the dock's panel groups top to bottom, the tab shown in each (the first
+ * unless `show` names one). 필수 is Photoshop's Essentials: [Color, Swatches, Gradients, Patterns],
+ * [Properties, Adjustments], [Layers, Channels, Paths].
+ */
 const WORKSPACES = [
-  ['essentials', '필수 (기본값)', { top: ['color', 'swatches', 'gradients', 'patterns', 'props', 'adjustments', 'ai', 'char', 'para', 'glyphs', 'history', 'presets', 'nav', 'info', 'histo'], layers: ['layers', 'channels', 'paths', 'timeline', 'actions', 'comps'], showTop: 'color', showLayers: 'layers' }],
-  ['photo', '사진', { top: ['histo', 'nav', 'props', 'adjustments', 'info', 'history', 'color', 'swatches', 'ai'], layers: ['layers', 'channels', 'paths', 'actions', 'comps', 'timeline'], showTop: 'histo', showLayers: 'layers' }],
-  ['painting', '페인팅', { top: ['brushSettings', 'brushes', 'color', 'swatches', 'presets', 'history', 'nav', 'props'], layers: ['layers', 'channels', 'paths', 'actions'], showTop: 'brushSettings', showLayers: 'layers' }],
-  ['graphic', '그래픽 및 웹', { top: ['char', 'para', 'glyphs', 'charStyles', 'paraStyles', 'props', 'shapes', 'styles', 'color', 'swatches', 'info'], layers: ['layers', 'comps', 'paths', 'channels', 'actions'], showTop: 'char', showLayers: 'layers' }],
-  ['motion', '동작', { top: ['timeline', 'props', 'color', 'swatches', 'char', 'history'], layers: ['layers', 'channels', 'paths', 'actions', 'comps'], showTop: 'timeline', showLayers: 'layers' }],
+  ['essentials', '필수 (기본값)', { groups: [['color', 'swatches', 'gradients', 'patterns'], ['props', 'adjustments'], ['layers', 'channels', 'paths']] }],
+  ['photo', '사진', { groups: [['histo', 'nav', 'info'], ['props', 'adjustments', 'history'], ['layers', 'channels', 'paths']] }],
+  ['painting', '페인팅', { groups: [['brushSettings', 'brushes', 'cloneSource'], ['color', 'swatches', 'history'], ['layers', 'channels', 'paths']] }],
+  ['graphic', '그래픽 및 웹', { groups: [['char', 'para', 'glyphs'], ['props', 'shapes', 'styles', 'color', 'swatches'], ['layers', 'comps', 'paths']] }],
+  ['motion', '동작', { groups: [['timeline', 'props'], ['color', 'swatches', 'char', 'history'], ['layers', 'channels', 'paths']] }],
 ];
 
 /** Neutral colours for the New Layer dialog's "fill with … neutral colour" (dodge and burn layers). */
@@ -58,37 +62,18 @@ export function installCore2(P, ui) {
 
   // ---------------------------------------------------------------- workspaces
 
-  // where each panel lives by default (modules add theirs with P.addPanel)
-  const home = {};
-  for (const id of ui.groupsTop.ids) home[id] = 'top';
-  for (const id of ui.groupLayers.ids) home[id] = 'layers';
-  const addPanel = P.addPanel;
-  P.addPanel = (id, title, el, where = 'top') => {
-    home[id] = where === 'layers' ? 'layers' : 'top';
-    addPanel(id, title, el, where);
-  };
   let workspace = loadPref('photo.workspace', 'essentials');
-  /** Window ▸ Workspace: arrange the panels like the preset (`reset`: also the tabs shown). */
+  /** Window ▸ Workspace: lay the dock out like the preset (also how a workspace is reset). */
   P.setWorkspace = (id, { quiet = false } = {}) => {
     const ws = WORKSPACES.find((w) => w[0] === id);
     if (!ws) return;
-    const { top, layers, showTop, showLayers } = ws[2];
-    const all = Object.keys(ui.panels);
-    const topIds = top.filter((x) => ui.panels[x]);
-    const layerIds = layers.filter((x) => ui.panels[x] && !topIds.includes(x));
-    // panels the preset doesn't mention stay in their usual column, after the preset's ones
-    for (const x of all) {
-      if (topIds.includes(x) || layerIds.includes(x)) continue;
-      (home[x] === 'layers' ? layerIds : topIds).push(x);
-    }
-    ui.groupsTop.set(topIds, showTop);
-    ui.groupLayers.set(layerIds, showLayers);
+    ui.dock.set(ws[2].groups, ws[2].groups.map((g) => g[0]));
+    if (ui.dock.collapsed) ui.dock.setCollapsed(false);
     workspace = id;
     savePref('photo.workspace', id);
     document.body.classList.remove('ph-hide-panels', 'ph-hide-side');
     if (!quiet) toast(`작업 영역: ${ws[1]}`);
   };
-  if (workspace !== 'essentials' && !isMobile()) setTimeout(() => P.setWorkspace(workspace, { quiet: true }), 0);
 
   // ---------------------------------------------------------------- copying layers between documents
 
@@ -759,7 +744,11 @@ export function installCore2(P, ui) {
   const panelItems = () => Object.entries(ui.panels)
     .map(([id, p]) => ({ id, label: PANEL_NAMES[id] || p.title }))
     .sort((a, b) => a.label.localeCompare(b.label, 'ko'))
-    .map(({ id, label }) => ({ label, key: PANEL_KEYS[id], checked: !isMobile() && (ui.groupsTop.current() === id || ui.groupLayers.current() === id), action: () => P.showPanel(id) }));
+    .map(({ id, label }) => {
+      // like Photoshop, a panel showing in the dock is ticked; choosing it again closes it
+      const on = !isMobile() && ui.dock.visible(id);
+      return { label, key: PANEL_KEYS[id], checked: on, action: () => (on ? ui.dock.close(id) : P.showPanel(id)) };
+    });
   P.windowPanelLabels = () => panelItems().map((x) => x.label);
   P.windowMenu = () => [
     { label: '정돈', submenu: [

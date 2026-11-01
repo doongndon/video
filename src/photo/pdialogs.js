@@ -1,7 +1,7 @@
 // Photo editor dialogs. Each takes the editor API `P`.
 
 import { h, clamp } from '../util.js';
-import { openModal, formRow, toast } from '../ui/common.js';
+import { openModal, formRow, toast, loadPref, savePref } from '../ui/common.js';
 import { makeCanvas, cloneCanvas } from './doc.js';
 import { ADJUSTMENTS, defaultParams, applyAdjustment, FILTERS, defaultFilterParams, applyFilter, visibleParams } from './adjust.js';
 import { EXPORT_TYPES } from './io.js';
@@ -10,17 +10,6 @@ import { GRADIENTS, GRADIENT_STYLES, gradientSwatch, listPatterns, resolveStopCo
 import { CUSTOM_EDITORS, histOf, ensureAdjStyle, curvesGraph } from './adjui.js';
 import { cameraRawDialog } from './camraw.js';
 import { createColorPicker } from './colorpicker.js';
-
-export const DOC_PRESETS = [
-  ['1920x1080', '유튜브·동영상 1920 × 1080', 1920, 1080],
-  ['1080x1920', '쇼츠·릴스·스토리 1080 × 1920', 1080, 1920],
-  ['1080x1080', '인스타 정사각형 1080 × 1080', 1080, 1080],
-  ['1080x1350', '인스타 세로 1080 × 1350', 1080, 1350],
-  ['1280x720', '유튜브 썸네일 1280 × 720', 1280, 720],
-  ['1200x628', '웹 배너·링크 1200 × 628', 1200, 628],
-  ['2480x3508', 'A4 인쇄 (300ppi) 2480 × 3508', 2480, 3508],
-  ['800x600', '작은 그림 800 × 600', 800, 600],
-];
 
 const num = (value, min, max, step = 1, w = '90px') => h('input', { type: 'number', value, min, max, step, style: { width: w } });
 const sel = (opts, value) => {
@@ -49,44 +38,102 @@ const fmtSize = (w, hh) => {
 
 // ---------------------------------------------------------------- new document
 
+/** File ▸ New categories and their presets: [name, width px, height px, ppi, unit shown]. */
+export const DOC_CATEGORIES = [
+  ['photo', '사진', [
+    ['가로 4 × 6', 1800, 1200, 300, 'in'], ['가로 5 × 7', 2100, 1500, 300, 'in'], ['가로 8 × 10', 3000, 2400, 300, 'in'],
+    ['세로 4 × 6', 1200, 1800, 300, 'in'], ['세로 5 × 7', 1500, 2100, 300, 'in'], ['세로 8 × 10', 2400, 3000, 300, 'in'], ['정사각형 5 × 5', 1500, 1500, 300, 'in'],
+  ]],
+  ['print', '인쇄', [
+    ['A4', 2480, 3508, 300, 'mm'], ['A3', 3508, 4961, 300, 'mm'], ['A5', 1748, 2480, 300, 'mm'], ['B5', 2079, 2953, 300, 'mm'],
+    ['레터', 2550, 3300, 300, 'in'], ['리걸', 2550, 4200, 300, 'in'], ['타블로이드', 3300, 5100, 300, 'in'], ['명함 (90 × 50 mm)', 1063, 591, 300, 'mm'],
+  ]],
+  ['art', '아트 및 일러스트레이션', [
+    ['기본 Photoshop 크기', 2100, 1500, 300, 'in'], ['포스터', 5400, 7200, 300, 'in'], ['정사각형 그림', 3000, 3000, 300, 'px'], ['1920 × 1080', 1920, 1080, 72, 'px'], ['엽서', 1800, 1200, 300, 'in'],
+  ]],
+  ['web', '웹', [
+    ['웹 대형', 1920, 1080, 72, 'px'], ['웹 일반', 1366, 768, 72, 'px'], ['웹 중간', 1280, 800, 72, 'px'], ['웹 최소 크기', 1024, 768, 72, 'px'], ['MacBook Pro', 1440, 900, 72, 'px'],
+    ['유튜브 썸네일', 1280, 720, 72, 'px'], ['웹 배너 · 링크 미리 보기', 1200, 628, 72, 'px'],
+  ]],
+  ['mobile', '모바일', [
+    ['iPhone 15 Pro', 1179, 2556, 72, 'px'], ['iPhone 15 Pro Max', 1290, 2796, 72, 'px'], ['Android 1080p', 1080, 1920, 72, 'px'], ['iPad Pro 12.9"', 2048, 2732, 72, 'px'],
+    ['인스타그램 정사각형', 1080, 1080, 72, 'px'], ['인스타그램 세로', 1080, 1350, 72, 'px'], ['쇼츠 · 릴스 · 스토리', 1080, 1920, 72, 'px'],
+  ]],
+  ['film', '필름 및 비디오', [
+    ['HDTV 1080p', 1920, 1080, 72, 'px'], ['HDTV 720p', 1280, 720, 72, 'px'], ['UHD 4K', 3840, 2160, 72, 'px'], ['세로 영상 1080 × 1920', 1080, 1920, 72, 'px'], ['NTSC DV', 720, 480, 72, 'px'], ['PAL D1/DV', 720, 576, 72, 'px'],
+  ]],
+];
+const ND_UNITS = [['px', '픽셀'], ['in', '인치'], ['cm', '센티미터'], ['mm', '밀리미터'], ['pt', '포인트']];
+
+/** File ▸ New (Ctrl+N): Photoshop's dialog with preset categories and the preset details on the right. */
 export function newDocDialog(P) {
-  const name = h('input', { type: 'text', value: `제목 없음-${P.docs.length + 1}`, style: { width: '100%' } });
-  const preset = sel([...DOC_PRESETS.map(([id, t]) => [id, t]), ['custom', '직접 입력']], '1920x1080');
-  const st = { w: 1920, h: 1080, res: 72 };
-  const w = num(1920, 0.01, 30000, 'any');
-  const hh = num(1080, 0.01, 30000, 'any');
-  const unit = unitSel('px', UNITS.filter(([u]) => u !== 'percent'));
-  const res = num(72, 1, 9999, 1, '80px');
+  const recent = loadPref('photo.recentSizes', []);
+  const st = { w: 1920, h: 1080, res: 72, unit: 'px', name: `제목 없음-${P.docs.length + 1}` };
+  const cats = [['recent', '최근 항목', recent.map((r) => [r.label || `${r.w} × ${r.h}`, r.w, r.h, r.res, r.unit || 'px'])], ...DOC_CATEGORIES];
+  let cat = recent.length ? 'recent' : 'photo';
+  let picked = null;
+  const tabs = h('div.ph-nd-tabs', { role: 'tablist' });
+  const grid = h('div.ph-nd-grid', { role: 'listbox', 'aria-label': '사전 설정' });
+  const sub = h('div.ph-nd-sub');
+  // details
+  const name = h('input.ph-nd-name', { type: 'text', value: st.name, 'aria-label': '문서 이름' });
+  const w = num(1920, 0.01, 300000, 'any', '100%');
+  const hh = num(1080, 0.01, 300000, 'any', '100%');
+  const unit = sel(ND_UNITS, 'px');
+  const res = num(72, 1, 9999, 'any', '100%');
   const resUnit = sel([['in', '픽셀/인치'], ['cm', '픽셀/센티미터']], 'in');
-  const orient = sel([['portrait', '세로'], ['landscape', '가로']], 'landscape');
-  const bg = sel([['#ffffff', '흰색'], ['#000000', '검정'], ['bg', '배경색'], ['fg', '전경색'], ['transparent', '투명'], ['custom', '사용자 정의…']], '#ffffff');
+  const portrait = h('button.ph-ibtn', { title: '세로', 'aria-label': '세로', type: 'button' }, h('i.ph-nd-ori', { style: { width: '9px', height: '13px', border: '1.5px solid currentColor', display: 'block' } }));
+  const landscape = h('button.ph-ibtn', { title: '가로', 'aria-label': '가로', type: 'button' }, h('i.ph-nd-ori', { style: { width: '13px', height: '9px', border: '1.5px solid currentColor', display: 'block' } }));
+  const artboard = chk(false, '대지');
+  const mode = sel([['rgb', 'RGB 색상'], ['bitmap', '비트맵'], ['gray', '회색 음영'], ['cmyk', 'CMYK 색상'], ['lab', 'Lab 색상']], 'rgb');
+  const bits = sel([['8', '8비트'], ['16', '16비트'], ['32', '32비트']], '8');
+  for (const s of [mode, bits]) [...s.options].forEach((o, i) => { if (i) o.disabled = true; });
+  const bg = sel([['#ffffff', '흰색'], ['#000000', '검정'], ['bg', '배경색'], ['transparent', '투명'], ['custom', '사용자 정의…']], '#ffffff');
   const bgColor = h('input', { type: 'color', value: '#808080', hidden: true, 'aria-label': '배경 색' });
   bg.addEventListener('change', () => { bgColor.hidden = bg.value !== 'custom'; });
-  const ppi = () => (resUnit.value === 'cm' ? +res.value * 2.54 : +res.value) || 72;
-  const show = () => {
+  const info = h('div.ph-nd-note');
+  const ppi = () => (resUnit.value === 'cm' ? (+res.value || 28.35) * 2.54 : +res.value || 72);
+  const showSize = () => {
     w.value = roundUnit(fromPx(st.w, unit.value, ppi(), st.w), unit.value);
     hh.value = roundUnit(fromPx(st.h, unit.value, ppi(), st.h), unit.value);
-    orient.value = st.w >= st.h ? 'landscape' : 'portrait';
+    portrait.classList.toggle('on', st.h > st.w);
+    landscape.classList.toggle('on', st.w >= st.h);
+    info.textContent = `${Math.round(st.w)} × ${Math.round(st.h)} 픽셀 · ${fmtSize(st.w, st.h)}`;
   };
-  preset.addEventListener('change', () => {
-    const p = DOC_PRESETS.find((x) => x[0] === preset.value);
-    if (!p) return;
-    st.w = p[2];
-    st.h = p[3];
-    if (p[0] === '2480x3508') res.value = resUnit.value === 'cm' ? 118.11 : 300;
-    show();
-  });
-  w.addEventListener('input', () => {
-    st.w = toPx(+w.value || 1, unit.value, ppi(), st.w);
-    preset.value = 'custom';
-    orient.value = st.w >= st.h ? 'landscape' : 'portrait';
-  });
-  hh.addEventListener('input', () => {
-    st.h = toPx(+hh.value || 1, unit.value, ppi(), st.h);
-    preset.value = 'custom';
-    orient.value = st.w >= st.h ? 'landscape' : 'portrait';
-  });
-  unit.addEventListener('change', show);
+  const card = (p) => {
+    const [label, pw, ph, pres, pu] = p;
+    const k = 56 / Math.max(pw, ph);
+    const b = h(`button.ph-nd-card${picked === p ? '.on' : ''}`, { role: 'option', 'aria-selected': String(picked === p), title: label },
+      h('i', { style: { width: `${Math.max(6, Math.round(pw * k))}px`, height: `${Math.max(6, Math.round(ph * k))}px` } }),
+      h('b', label),
+      h('span', pu === 'px' ? `${pw} × ${ph} 픽셀 @ ${pres}ppi` : `${roundUnit(fromPx(pw, pu, pres, pw), pu)} × ${roundUnit(fromPx(ph, pu, pres, ph), pu)} ${ND_UNITS.find((u) => u[0] === pu)[1]} @ ${pres}ppi`));
+    b.addEventListener('click', () => pick(p));
+    b.addEventListener('dblclick', () => { pick(p); create(); m.close(); });
+    return b;
+  };
+  const paint = () => {
+    tabs.replaceChildren(...cats.map(([id, label]) => h(`button${id === cat ? '.on' : ''}`, { role: 'tab', 'aria-selected': String(id === cat), type: 'button', onclick: () => { cat = id; paint(); } }, label)));
+    const list = cats.find((c) => c[0] === cat)[2];
+    sub.textContent = cat === 'recent' ? `최근에 쓴 크기 (${list.length})` : `빈 문서 사전 설정 (${list.length})`;
+    grid.replaceChildren(...list.map(card), ...(list.length ? [] : [h('div.empty-hint', '아직 만든 문서가 없습니다. 다른 탭에서 사전 설정을 고르세요.')]));
+  };
+  const pick = (p) => {
+    picked = p;
+    const [, pw, ph, pres, pu] = p;
+    st.w = pw;
+    st.h = ph;
+    res.value = resUnit.value === 'cm' ? Math.round((pres / 2.54) * 100) / 100 : pres;
+    unit.value = pu;
+    showSize();
+    paint();
+  };
+  const typed = () => {
+    picked = null;
+    grid.querySelectorAll('.on').forEach((x) => x.classList.remove('on'));
+  };
+  w.addEventListener('input', () => { st.w = toPx(+w.value || 1, unit.value, ppi(), st.w); typed(); portrait.classList.toggle('on', st.h > st.w); landscape.classList.toggle('on', st.w >= st.h); info.textContent = `${Math.round(st.w)} × ${Math.round(st.h)} 픽셀 · ${fmtSize(st.w, st.h)}`; });
+  hh.addEventListener('input', () => { st.h = toPx(+hh.value || 1, unit.value, ppi(), st.h); typed(); portrait.classList.toggle('on', st.h > st.w); landscape.classList.toggle('on', st.w >= st.h); info.textContent = `${Math.round(st.w)} × ${Math.round(st.h)} 픽셀 · ${fmtSize(st.w, st.h)}`; });
+  unit.addEventListener('change', showSize);
   resUnit.addEventListener('change', () => {
     res.value = Math.round((resUnit.value === 'cm' ? +res.value / 2.54 : +res.value * 2.54) * 100) / 100;
   });
@@ -96,31 +143,59 @@ export function newDocDialog(P) {
       st.w = toPx(+w.value || 1, unit.value, ppi(), st.w);
       st.h = toPx(+hh.value || 1, unit.value, ppi(), st.h);
     }
+    showSize();
   });
-  orient.addEventListener('change', () => {
-    if ((orient.value === 'landscape') !== st.w >= st.h) [st.w, st.h] = [st.h, st.w];
-    show();
-  });
-  show();
-  openModal({
+  const orient = (land) => {
+    if (land !== st.w >= st.h) [st.w, st.h] = [st.h, st.w];
+    showSize();
+  };
+  portrait.addEventListener('click', () => orient(false));
+  landscape.addEventListener('click', () => orient(true));
+  const field = (label, ...ctl) => h('label.ph-nd-field', h('span', label), ...ctl);
+  // the first card of the opening tab is picked, or 1920 × 1080 when nothing was made yet
+  const first = cats.find((c) => c[0] === cat)[2][0];
+  if (cat === 'recent' && first) pick(first);
+  else {
+    showSize();
+    paint();
+  }
+  let made = false;
+  const create = () => {
+    if (made) return true;
+    const W = clamp(Math.round(st.w || 1), 1, 30000);
+    const H = clamp(Math.round(st.h || 1), 1, 30000);
+    if (W * H > 80e6) {
+      toast('너무 큰 문서입니다 (최대 약 8000만 픽셀)');
+      return false;
+    }
+    made = true;
+    const b = bg.value === 'bg' ? P.bg : bg.value === 'custom' ? bgColor.value : bg.value;
+    const r = Math.max(1, Math.round(ppi() * 100) / 100);
+    P.newDoc({ name: name.value.trim() || '제목 없음', width: W, height: H, background: b, ...(artboard.box.checked ? { artboard: true } : {}) });
+    if (P.doc) P.doc.resolution = r;
+    const label = picked && cat !== 'recent' ? picked[0] : `${W} × ${H}`;
+    savePref('photo.recentSizes', [{ label, w: W, h: H, res: r, unit: unit.value }, ...recent.filter((x) => !(x.w === W && x.h === H && x.res === r))].slice(0, 12));
+    return true;
+  };
+  const m = openModal({
     title: '새 문서',
-    width: '500px',
-    body: [formRow('이름', name), formRow('사전 설정', preset), formRow('폭', w, unit), formRow('높이', hh), formRow('방향', orient), formRow('해상도', res, resUnit), formRow('배경 내용', bg, bgColor), formRow('색상 모드', h('span', 'RGB 색상 · 8비트'))],
-    buttons: [{ label: '취소' }, {
-      label: '만들기', primary: true, action: () => {
-        const W = clamp(Math.round(st.w || 1), 1, 30000);
-        const H = clamp(Math.round(st.h || 1), 1, 30000);
-        if (W * H > 80e6) {
-          toast('너무 큰 문서입니다 (최대 약 8000만 픽셀)');
-          return false;
-        }
-        const b = bg.value === 'fg' ? P.fg : bg.value === 'bg' ? P.bg : bg.value === 'custom' ? bgColor.value : bg.value;
-        P.newDoc({ name: name.value.trim() || '제목 없음', width: W, height: H, background: b });
-        if (P.doc) P.doc.resolution = Math.max(1, Math.round(ppi() * 100) / 100);
-        return true;
-      },
-    }],
+    width: '880px',
+    body: [h('div.ph-nd',
+      h('div.ph-nd-left', tabs, sub, grid),
+      h('div.ph-nd-right',
+        h('h4', '사전 설정 세부 정보'),
+        name,
+        field('폭', h('span.ph-nd-pair', w, unit)),
+        field('높이', h('span.ph-nd-pair', hh, h('span.ph-nd-row', h('span', { style: { fontSize: 'var(--fs-xs)', color: 'var(--text-faint)' } }, '방향'), h('span.ph-nd-orient', portrait, landscape)))),
+        info,
+        h('div.ph-nd-row', artboard.el),
+        field('해상도', h('span.ph-nd-pair', res, resUnit)),
+        field('색상 모드', h('span.ph-nd-pair', mode, bits)),
+        h('div.ph-nd-note', '이 편집기는 RGB 8비트로 작업합니다. CMYK·16비트는 포토샵에서 쓰세요.'),
+        field('배경 내용', h('span.ph-nd-bg', bg, bgColor))))],
+    buttons: [{ label: '닫기' }, { label: '만들기', primary: true, action: create }],
   });
+  setTimeout(() => grid.querySelector('.on')?.scrollIntoView({ block: 'nearest' }), 0);
 }
 
 // ---------------------------------------------------------------- image / canvas size

@@ -70,7 +70,8 @@ export function installView3(P) {
       s.value = String(value);
       return s;
     };
-    const paste = sel(pr.pasteboard, [['#1f2125', '어두운 회색 (기본)'], ['#000000', '검정'], ['#535353', '중간 회색'], ['#a0a0a0', '밝은 회색'], ['#ffffff', '흰색']]);
+    const themePaste = P.themePasteboard?.() || '#1f2125';
+    const paste = sel(pr.pasteboard, [[themePaste, '테마 기본값'], ['#000000', '검정'], ['#535353', '중간 회색'], ['#a0a0a0', '밝은 회색'], ['#ffffff', '흰색']]);
     const checker = sel(pr.checker, [['small', '작게'], ['medium', '보통'], ['large', '크게']]);
     const tone = sel(pr.checkerTone, [['light', '밝게'], ['mid', '중간'], ['dark', '어둡게']]);
     const cursor = sel(pr.cursor, [['outline', '브러시 크기 윤곽'], ['both', '윤곽 + 가운데 십자'], ['cross', '정밀 (십자만)']]);
@@ -88,6 +89,7 @@ export function installView3(P) {
       return el;
     };
     const body = [
+      ...(P.themeControl ? [part('interface', '인터페이스', formRow('색상 테마', P.themeControl()), h('div.note', 'Shift+F1 / Shift+F2로 더 어둡게 / 더 밝게 바꿀 수 있습니다.'))] : []),
       part('general', '화면',
         formRow('캔버스 바깥 색', paste),
         h('label.ph-prow', wheel, h('span', '마우스 휠로 확대·축소 (끄면 휠은 화면 이동, Ctrl+휠·Alt+휠로 확대)')),
@@ -111,7 +113,8 @@ export function installView3(P) {
       body,
       buttons: [
         { label: '기본값', action: () => {
-          Object.assign(P.prefs, { pasteboard: '#1f2125', checker: 'medium', checkerTone: 'light', cursor: 'outline', wheelZoom: false, autosave: true, historyStates: 50, snapOnSave: false, units: 'px' });
+          P.setTheme?.(2);
+          Object.assign(P.prefs, { pasteboard: P.themePasteboard?.() || '#1f2125', checker: 'medium', checkerTone: 'light', cursor: 'outline', wheelZoom: false, autosave: true, historyStates: 50, snapOnSave: false, units: 'px' });
           savePref('photo.prefs', P.prefs);
           guides?.reset();
           for (const d of P.docs) if (d.history) {

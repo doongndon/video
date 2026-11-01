@@ -39,6 +39,9 @@ import { Transformer, TRANSFORM_MODES, WARP_STYLES, applyM, composeM, unprojectQ
 import { FX_NAMES } from './styles.js';
 import { buildToolbar, buildToolStrip, buildOptionsBar, buildLayersPanel, buildColorPanel, buildPropertiesPanel, buildHistoryPanel } from './panels.js';
 import { installCore2, arrangeMenus } from './core2.js';
+import { installLearn } from './learn.js';
+import { installTheme, buildHome, rememberFile, recentMenu } from './psui.js';
+import { installArtboards } from './artboards.js';
 
 const isMobile = () => document.body.classList.contains('mobile');
 const ZOOMS = [0.02, 0.05, 0.1, 0.167, 0.25, 0.333, 0.5, 0.667, 1, 1.5, 2, 3, 4, 6, 8, 12, 16, 32];
@@ -104,6 +107,15 @@ export function createPhotoEditor(root) {
     P.emit('opts');
     P.overlay();
   };
+  /** Tool Preset picker ▸ Reset Tool / Reset All Tools: the options back to their defaults. */
+  P.resetToolOptions = (id = null) => {
+    const keys = id ? [TOOL_BY_ID[id]?.optionsFrom || id] : Object.keys(toolOpts).filter((k) => k !== '_v');
+    for (const k of keys) delete toolOpts[k];
+    savePref('photo.opts', toolOpts);
+    P.emit('opts');
+    P.overlay();
+    toast(id ? '도구를 기본 설정으로 되돌렸습니다' : '모든 도구를 기본 설정으로 되돌렸습니다');
+  };
   P.setTool = (id) => {
     if (!TOOL_BY_ID[id]) return;
     if (P.transform) P.applyTransform();
@@ -154,17 +166,11 @@ export function createPhotoEditor(root) {
   // ---------------------------------------------------------------- DOM
   const view = h('canvas.ph-view');
   const over = h('canvas.ph-over');
-  const welcome = h('div.ph-welcome',
-    h('h2', '사진 편집'),
-    h('p', '사진을 열거나 새 문서를 만들어 시작하세요. 레이어, 선택, 브러시, 조정, 필터, 글자, PSD 열기/저장을 쓸 수 있습니다.'),
-    h('div.inline',
-      h('button.primary', { onclick: () => D.newDocDialog(P) }, '새 문서…'),
-      h('button', { onclick: () => P.cmd.open() }, '파일 열기… (사진·PSD)'),
-      h('button', { onclick: () => P.cmd.openFromVideo() }, '영상 프로젝트의 이미지 열기')),
-    h('p.note', '파일을 여기로 끌어 놓아도 열립니다.'));
+  // the home screen while no document is open (psui.js)
+  const welcome = buildHome(P, { newDoc: () => D.newDocDialog(P), open: () => P.cmd.open(), openFromVideo: () => P.cmd.openFromVideo() });
   const stage = h('div.ph-stage', view, over, welcome);
   const tabs = h('div.ph-tabs');
-  const status = h('div.ph-status');
+  const status = h('div.ph-status', { hidden: true });
   const toolbar = buildToolbar(P);
   const strip = buildToolStrip(P);
   const opts = buildOptionsBar(P);
@@ -189,50 +195,204 @@ export function createPhotoEditor(root) {
     comps: { title: '레이어 구성요소', el: buildCompsPanel(P) },
     ai: { title: 'AI', el: buildAiPanel(P) },
   };
-  const sideTabs = (ids) => {
-    let cur = loadPref(`photo.side.${ids[0]}`, ids[0]);
-    const bar = h('div.ph-ptabs');
-    const body = h('div.ph-pbody');
-    const show = (id) => {
-      cur = id;
-      savePref(`photo.side.${ids[0]}`, id);
-      bar.querySelectorAll('button').forEach((b) => b.classList.toggle('on', b.dataset.id === id));
-      body.replaceChildren(panels[id].el);
-    };
-    const tab = (id) => {
-      const b = h('button', { onclick: () => show(id) }, panels[id].title);
-      b.dataset.id = id;
-      return b;
-    };
-    for (const id of ids) bar.append(tab(id));
-    show(ids.includes(cur) ? cur : ids[0]);
-    // a panel registered later (P.addPanel) gets its tab here
-    const add = (id) => {
-      if (ids.includes(id)) return;
-      ids.push(id);
-      bar.append(tab(id));
-      if (cur === id) show(id);
-    };
-    /** Window ▸ Workspace: these tabs in this order, showing `pick`. */
-    const set = (list, pick) => {
-      ids.splice(0, ids.length, ...list.filter((id) => panels[id]));
-      bar.replaceChildren(...ids.map(tab));
-      show(ids.includes(pick) ? pick : ids.includes(cur) ? cur : ids[0]);
-    };
-    return { el: h('div.ph-pgroup', bar, body), show, ids, add, set, current: () => cur };
+  // ---- the right dock: Photoshop's panel groups (tabs, a panel menu ≡ on each tab bar, collapse to icons)
+  P.panelMenus = P.panelMenus || {};
+  // the group a panel opened from the Window menu joins when no group has it (0: first, 1: second, -1: last)
+  const PANEL_HOME = { layers: -1, channels: -1, paths: -1, timeline: -1, actions: -1, comps: -1, props: 1, adjustments: 1, char: 1, para: 1, charStyles: 1, paraStyles: 1, glyphs: 1, ai: 1, presets: 1, history: 1, brushSettings: 1, brushes: 1, cloneSource: 1, styles: 1, shapes: 1 };
+  const PANEL_ICONS = { color: 'drop', swatches: 'swatches', gradients: 'gradTool', patterns: 'grid', props: 'sliders', adjustments: 'fillAdjust', layers: 'copy', channels: 'channels', paths: 'pathSelect', history: 'clock', char: 'type', para: 'paraLeft', charStyles: 'type', paraStyles: 'paraLeft', glyphs: 'glyph', presets: 'presets', nav: 'zoomIn', info: 'info', histo: 'bars', actions: 'play', comps: 'folder', ai: 'ai', timeline: 'film', brushes: 'brush', brushSettings: 'sliders', styles: 'sparkle', shapes: 'shape', cloneSource: 'stamp', learn: 'book' };
+  P.dockLayout = (name) => ({
+    essentials: [['color', 'swatches', 'gradients', 'patterns'], ['props', 'adjustments'], ['layers', 'channels', 'paths']],
+  })[name];
+  const savedDock = loadPref('photo.dock', null);
+  // where each panel's module asked for it ('top' or 'layers')
+  const homeOf = { layers: 'layers', channels: 'layers', paths: 'layers', timeline: 'layers', actions: 'layers', comps: 'layers' };
+  const dock = { groups: [], collapsed: !!savedDock?.collapsed, pop: null };
+  const dockBody = h('div.ph-dock-body');
+  const collapseBtn = h('button.ph-dock-toggle', { onclick: () => dock.setCollapsed(!dock.collapsed) });
+  const dockIcons = h('div.ph-dock-icons', { role: 'toolbar', 'aria-label': '패널 아이콘' });
+  const saveDock = () => savePref('photo.dock', { groups: dock.groups.map((G) => G.ids), cur: dock.groups.map((G) => G.cur), size: dock.groups.map((G) => G.size || 0), collapsed: dock.collapsed });
+  const panelMenu = (G, anchor) => {
+    const id = G.cur;
+    const own = id && P.panelMenus[id]?.();
+    // panels with their own menu button (Channels, Swatches, Actions…) open that menu
+    const btn = !own && id ? panels[id].el.querySelector('[aria-label$="패널 메뉴"], [aria-label="액션 메뉴"], [aria-label="견본 메뉴"], [aria-label="타임라인 메뉴"]') : null;
+    const r = anchor.getBoundingClientRect();
+    const tail = [
+      { label: '닫기', disabled: !id, action: () => dock.close(id) },
+      { label: '탭 그룹 닫기', action: () => { for (const x of [...G.live()]) dock.close(x); } },
+    ];
+    if (btn) {
+      btn.click();
+      return;
+    }
+    showMenu([...(own || []), ...(own?.length ? ['-'] : []), ...tail], r.right - 220, r.bottom + 2);
   };
-  const groupsTop = sideTabs(['color', 'swatches', 'props', 'adjustments', 'ai', 'char', 'glyphs', 'history', 'presets', 'nav', 'info', 'histo']);
-  const groupLayers = sideTabs(['layers', 'channels', 'paths', 'timeline', 'actions', 'comps']);
-  const side = h('div.ph-side', groupsTop.el, groupLayers.el);
-  /** Register a panel from a module: a tab in the upper ('top') or layers ('layers') column, a sheet on phones. */
+  const makeGroup = (ids, cur, size = 0) => {
+    const G = { ids: [...ids], cur: cur || ids[0] || null, size };
+    const bar = h('div.ph-ptabs', { role: 'tablist' });
+    const menuBtn = h('button.ph-pmenu', { title: '패널 메뉴', 'aria-label': '패널 메뉴' }, icon('menu', 13));
+    menuBtn.addEventListener('click', () => panelMenu(G, menuBtn));
+    const body = h('div.ph-pbody');
+    G.el = h('div.ph-pgroup', h('div.ph-ptabbar', bar, menuBtn), body);
+    G.live = () => G.ids.filter((id) => panels[id]);
+    G.render = () => {
+      const live = G.live();
+      if (!live.includes(G.cur)) G.cur = live[0] || null;
+      bar.replaceChildren(...live.map((id) => {
+        const b = h(`button${id === G.cur ? '.on' : ''}`, { role: 'tab', 'aria-selected': String(id === G.cur), onclick: () => G.show(id) }, panels[id].title);
+        b.dataset.id = id;
+        return b;
+      }));
+      G.el.hidden = !live.length;
+      G.el.style.flex = G.size && G !== dock.groups[dock.groups.length - 1] ? `0 0 ${G.size}px` : '';
+      // on phones a panel lives in the sheet while it is open there
+      if (G.cur && body.firstChild !== panels[G.cur].el && !panels[G.cur].el.closest('.ph-sheet.open')) body.replaceChildren(panels[G.cur].el);
+      if (!G.cur) body.replaceChildren();
+    };
+    G.show = (id) => {
+      if (!G.ids.includes(id)) return;
+      G.cur = id;
+      G.render();
+      saveDock();
+    };
+    return G;
+  };
+  /** Lay the dock out: groups of panel ids (unregistered ids wait for their panel), `picks`: the tab shown in each. */
+  dock.set = (groups, picks = [], sizes = []) => {
+    dock.groups = groups.map((ids, i) => makeGroup(ids, picks[i], sizes[i]));
+    renderDock();
+    saveDock();
+  };
+  dock.find = (id) => dock.groups.find((G) => G.ids.includes(id));
+  dock.visible = (id) => !!dock.find(id) && dock.find(id).cur === id && !dock.collapsed;
+  dock.close = (id) => {
+    const G = dock.find(id);
+    if (!G) return;
+    G.ids = G.ids.filter((x) => x !== id);
+    G.render();
+    renderDock();
+    saveDock();
+  };
+  /** Bring a panel up in the dock, adding it to its usual group when no group has it. */
+  dock.open = (id) => {
+    let G = dock.find(id);
+    if (!G) {
+      const k = PANEL_HOME[id] ?? (homeOf[id] === 'layers' ? -1 : 0);
+      const live = dock.groups.filter((x) => x.live().length);
+      G = (k < 0 ? live[live.length - 1] : live[Math.min(k, live.length - 1)]) || dock.groups[0];
+      if (!G) {
+        dock.groups.push(makeGroup([]));
+        G = dock.groups[0];
+      }
+      G.ids.push(id);
+      renderDock();
+    }
+    G.show(id);
+    if (dock.collapsed) openPop(G);
+  };
+  const renderDock = () => {
+    const parts = [];
+    dock.groups.forEach((G, i) => {
+      G.render();
+      if (i && !G.el.hidden && parts.length) parts.push(resizer(dock.groups.slice(0, i).reverse().find((x) => !x.el.hidden)));
+      parts.push(G.el);
+    });
+    if (!dock.pop) dockBody.replaceChildren(...parts.filter(Boolean));
+    side.classList.toggle('collapsed', dock.collapsed);
+    // collapsed: one icon per panel, a line between groups
+    const icons = [];
+    for (const G of dock.groups) {
+      const live = G.live();
+      if (!live.length) continue;
+      if (icons.length) icons.push(h('div.ph-dock-sep'));
+      for (const id of live) {
+        const b = h(`button.ph-dock-icon${dock.pop === G && G.cur === id ? '.on' : ''}`, { title: panels[id].title, 'aria-label': panels[id].title, onclick: () => {
+          if (dock.pop === G && G.cur === id) return closePop();
+          G.show(id);
+          return openPop(G);
+        } }, icon(PANEL_ICONS[id] || 'menu', 18));
+        icons.push(b);
+      }
+    }
+    dockIcons.replaceChildren(...icons);
+    syncCollapseBtn();
+  };
+  // the line between two groups: drag to give the upper one more or less room
+  const resizer = (G) => {
+    if (!G) return null;
+    const r = h('div.ph-dock-resize', { role: 'separator', 'aria-orientation': 'horizontal', title: '끌어서 패널 높이 바꾸기' });
+    r.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      r.setPointerCapture(e.pointerId);
+      const start = e.clientY;
+      const h0 = G.el.getBoundingClientRect().height;
+      const move = (ev) => {
+        G.size = clamp(Math.round(h0 + ev.clientY - start), 60, Math.max(80, side.getBoundingClientRect().height - 160));
+        G.el.style.flex = `0 0 ${G.size}px`;
+      };
+      const up = () => {
+        r.removeEventListener('pointermove', move);
+        saveDock();
+      };
+      r.addEventListener('pointermove', move);
+      r.addEventListener('pointerup', up, { once: true });
+      r.addEventListener('pointercancel', up, { once: true });
+    });
+    return r;
+  };
+  // collapsed to icons: a group pops out beside the icon column
+  const popEl = h('div.ph-dock-pop', { hidden: true });
+  const openPop = (G) => {
+    dock.pop = G;
+    popEl.replaceChildren(G.el);
+    G.el.style.flex = '';
+    popEl.hidden = false;
+    renderDock();
+  };
+  const closePop = () => {
+    if (!dock.pop) return;
+    dock.pop = null;
+    popEl.hidden = true;
+    renderDock();
+  };
+  document.addEventListener('pointerdown', (e) => {
+    if (dock.pop && !popEl.contains(e.target) && !dockIcons.contains(e.target) && !e.target.closest?.('.menu, .modal-backdrop, .ph-pop')) closePop();
+  }, true);
+  dock.setCollapsed = (on) => {
+    closePop();
+    dock.collapsed = !!on;
+    renderDock();
+    saveDock();
+    P.redraw();
+  };
+  function syncCollapseBtn() {
+    collapseBtn.replaceChildren(icon(dock.collapsed ? 'dblChevL' : 'dblChevR', 10));
+    collapseBtn.title = dock.collapsed ? '패널 확장' : '아이콘으로 축소';
+    collapseBtn.setAttribute('aria-label', collapseBtn.title);
+  }
+  const side = h('div.ph-side', h('div.ph-dock-head', collapseBtn), dockBody, dockIcons, popEl);
+  P.dock = dock;
+  /** Register a panel from a module: a tab in the upper ('top') or layers ('layers') group, a sheet on phones. */
   P.addPanel = (id, title, el, where = 'top') => {
     panels[id] = { title, el };
-    (where === 'layers' ? groupLayers : groupsTop).add(id);
+    homeOf[id] = where;
+    // the default layout names panels before their modules register them
+    if (dock.find(id)) renderDock();
   };
+  {
+    const ess = P.dockLayout('essentials');
+    if (savedDock?.groups?.length) dock.set(savedDock.groups, savedDock.cur, savedDock.size);
+    else dock.set(ess);
+  }
   // phone: a sheet that shows one panel at a time
   const sheetBody = h('div.ph-sheet-body');
   const sheetTitle = h('b');
-  const sheet = h('div.ph-sheet', h('div.ph-sheet-head', sheetTitle, h('button.m-icon', { 'aria-label': '닫기', onclick: () => closeSheet() }, icon('close', 20))), sheetBody);
+  // the panel's menu (≡), as on the dock's tab bar
+  const sheetMenu = h('button.m-icon', { 'aria-label': '패널 메뉴', hidden: true, onclick: () => {
+    const r = sheetMenu.getBoundingClientRect();
+    showMenu(P.panelMenus[sheet.dataset.panel]?.() || [], Math.max(8, r.right - 260), r.bottom + 2);
+  } }, icon('menu', 20));
+  const sheet = h('div.ph-sheet', h('div.ph-sheet-head', sheetTitle, sheetMenu, h('button.m-icon', { 'aria-label': '닫기', onclick: () => closeSheet() }, icon('close', 20))), sheetBody);
   const mnav = h('div.ph-mnav',
     ...[['layers', '레이어', 'grid'], ['props', '속성', 'sliders'], ['color', '색', 'filter'], ['adjust', '조정', 'sparkle'], ['filter', '필터', 'wand'], ['ai', 'AI', 'ai'], ['history', '내역', 'undo'], ['more', '더보기', 'more']].map(([id, label, ic]) => h('button.m-tool', { onclick: () => mobileAction(id) }, icon(ic, 20), h('span', label))));
   const center = h('div.ph-center', tabs, stage);
@@ -248,21 +408,21 @@ export function createPhotoEditor(root) {
     }
     // panels hidden with Tab / Shift+Tab come back when one is asked for (Window menu, F7…)
     document.body.classList.remove('ph-hide-panels', 'ph-hide-side');
-    if (groupsTop.ids.includes(id)) groupsTop.show(id);
-    if (groupLayers.ids.includes(id)) groupLayers.show(id);
+    if (panels[id]) dock.open(id);
   };
 
   function openSheet(id) {
     sheet.classList.add('open');
+    sheet.dataset.panel = id;
+    sheetMenu.hidden = !P.panelMenus[id];
     sheetTitle.textContent = panels[id].title;
     sheetBody.replaceChildren(panels[id].el);
     P.emit('layers');
   }
   function closeSheet() {
     sheet.classList.remove('open');
-    // panels go back to the side column
-    groupsTop.show(groupsTop.ids.find((i) => panels[i].el.isConnected) || groupsTop.ids[0]);
-    groupLayers.show(groupLayers.ids.find((i) => panels[i].el.isConnected) || 'layers');
+    // panels go back to the dock
+    renderDock();
   }
   function mobileAction(id) {
     if (panels[id]) return openSheet(id);
@@ -345,7 +505,10 @@ export function createPhotoEditor(root) {
   P.openFiles = async (files) => {
     for (const f of files) {
       try {
-        P.openDoc(await IO.openFile(f));
+        const doc = P.openDoc(await IO.openFile(f));
+        // File ▸ Open Recent and the home screen list it (psui.js)
+        doc.recentId = `${f.name}|${f.size}|${f.lastModified || 0}`;
+        setTimeout(() => rememberFile(P, f, doc), 300);
       } catch (err) {
         console.error(err);
         toast(`${f.name}: 열 수 없습니다 (${err.message || err})`);
@@ -356,6 +519,7 @@ export function createPhotoEditor(root) {
   function docChanged() {
     const doc = P.doc;
     welcome.hidden = !!doc;
+    updateStatus();
     // a document opened while another was showing (or restored) fits the window when it comes up
     if (doc && !doc.view?.fitted) P.fit();
     renderTabs();
@@ -367,11 +531,18 @@ export function createPhotoEditor(root) {
   }
 
   P.renderTabs = () => renderTabs();
+  /** Photoshop's tab title: "이름 @ 66.7%(레이어 1, RGB/8) *". */
+  const tabTitle = (d) => {
+    if (isMobile()) return `${d.name}${d.saved ? '' : ' *'}`;
+    const a = d.layer(d.activeId) || d.layers[d.layers.length - 1];
+    const what = d === P.doc && P.editMask ? '레이어 마스크/8' : d.quickMask ? '빠른 마스크/8' : 'RGB/8';
+    return `${d.name} @ ${Math.round((d.view?.zoom || 1) * 1000) / 10}%(${a ? `${a.name}, ` : ''}${what})${d.saved ? '' : ' *'}`;
+  };
   function renderTabs() {
     tabs.replaceChildren(...P.docs.map((d, i) => {
-      const t = h(`div.ph-tab${i === P.index ? '.on' : ''}`, { onclick: () => P.switchDoc(i), title: `${d.name} (${d.width}×${d.height})` },
-        h('span', `${d.name}${d.saved ? '' : ' •'}`),
-        h('button.ph-tabx', { 'aria-label': '닫기', onclick: (e) => { e.stopPropagation(); P.closeDoc(i); } }, '×'));
+      const t = h(`div.ph-tab${i === P.index ? '.on' : ''}`, { onclick: () => P.switchDoc(i), title: `${d.name} (${d.width} × ${d.height} 픽셀)` },
+        h('span', tabTitle(d)),
+        h('button.ph-tabx', { 'aria-label': `${d.name} 닫기`, title: '닫기', onclick: (e) => { e.stopPropagation(); P.closeDoc(i); } }, icon('close', 10)));
       t.dataset.doc = d.id;
       // a layer dragged onto a tab goes into that document (core2.js)
       P.decorateTab?.(t, d);
@@ -730,7 +901,10 @@ export function createPhotoEditor(root) {
         vg.save();
         vg.fillStyle = checker;
         vg.translate(x, y);
-        vg.fillRect(0, 0, w, hh);
+        // with artboards, only they show the grid; the rest of the canvas is pasteboard
+        const abs = doc.layers.filter((l) => l.artboard && !l.parent);
+        if (abs.length) for (const { artboard: a } of abs) vg.fillRect(a.x * v.zoom, a.y * v.zoom, a.w * v.zoom, a.h * v.zoom);
+        else vg.fillRect(0, 0, w, hh);
         vg.restore();
         vg.imageSmoothingEnabled = v.zoom < 2;
         // within 2× of the source size bilinear filtering is enough (and several times faster)
@@ -760,7 +934,7 @@ export function createPhotoEditor(root) {
         g.drawImage(live, x, y, w, hh);
       }
       g.strokeStyle = 'rgba(0,0,0,0.5)';
-      g.strokeRect(x - 0.5, y - 0.5, w + 1, hh + 1);
+      if (!P.artboardOverlay || !doc.layers.some((l) => l.artboard)) g.strokeRect(x - 0.5, y - 0.5, w + 1, hh + 1);
       g.restore();
     }
     viewShows = live ? '' : vkey;
@@ -774,6 +948,7 @@ export function createPhotoEditor(root) {
         og.setTransform(dpr, 0, 0, dpr, OX * dpr, OY * dpr);
       }
     }
+    P.artboardOverlay?.(og);
     TOOL_BY_ID[P.tool].overlay?.(P, og);
     // the current path stays visible (thin) with the other tools
     if (!['pen', 'freePen', 'addAnchor', 'deleteAnchor', 'convertPoint', 'pathSelect', 'directSelect'].includes(P.tool) && P.resolvePathTarget?.()?.kind && P.pathTarget?.kind !== 'shape') P.drawPathOverlay(og, { outlineOnly: true });
@@ -844,7 +1019,8 @@ export function createPhotoEditor(root) {
     const r = stage.getBoundingClientRect();
     // hidden (video mode): fit when the stage shows up
     if (r.width < 20 || r.height < 20) return;
-    const pad = isMobile() ? 16 : 40;
+    // artboards keep room for their names above them
+    const pad = (isMobile() ? 16 : 40) + (doc.layers.some((l) => l.artboard) ? 40 : 0);
     // a turned view (Rotate View) fits the turned picture
     const rot = doc.view?.rot || 0;
     const a = (rot * Math.PI) / 180;
@@ -892,14 +1068,75 @@ export function createPhotoEditor(root) {
     P.setZoom(next ?? z);
   };
 
+  // ---- the status bar: the zoom (type a value), the document information chosen from its ▸ menu
+  const STATUS_ITEMS = [['size', '문서 크기'], ['profile', '문서 프로필'], ['dims', '문서 치수'], ['res', '해상도'], ['tool', '현재 도구']];
+  let statusShow = loadPref('photo.statusShow', 'size');
+  const zoomField = h('input.ph-zoomin', { type: 'text', 'aria-label': '확대/축소 비율', title: '확대/축소 비율 (값을 넣고 Enter)', spellcheck: false });
+  zoomField.addEventListener('focus', () => zoomField.select());
+  zoomField.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Enter') {
+      const v = parseFloat(zoomField.value);
+      if (P.doc && v > 0) P.setZoom(clamp(v / 100, 0.01, 32));
+      zoomField.blur();
+    } else if (e.key === 'Escape') zoomField.blur();
+  });
+  zoomField.addEventListener('blur', () => {
+    lastStatus = '';
+    updateStatus();
+  });
+  const infoText = h('span');
+  const infoBtn = h('button.ph-sinfo', { title: '문서 정보 · 눌러서 보여 줄 항목 고르기', 'aria-label': '문서 정보 표시 항목' }, infoText, h('span.ph-caret'));
+  infoBtn.addEventListener('click', () => {
+    const r = infoBtn.getBoundingClientRect();
+    showMenu(STATUS_ITEMS.map(([k, label]) => ({ label, checked: statusShow === k, action: () => {
+      statusShow = k;
+      savePref('photo.statusShow', k);
+      lastStatus = '';
+      updateStatus();
+    } })), r.left, Math.max(8, r.top - 30 - STATUS_ITEMS.length * 28));
+  });
+  const stateText = h('span.ph-sstate');
+  status.append(zoomField, infoBtn, stateText);
+  const mb = (bytes) => (bytes >= 1048576 ? `${(bytes / 1048576).toFixed(bytes >= 1048576 * 100 ? 0 : 1)}M` : `${Math.max(1, Math.round(bytes / 1024))}K`);
+  const docInfo = (doc) => {
+    const res = doc.resolution || 72;
+    if (statusShow === 'profile') return '문서 프로필: sRGB IEC61966-2.1 (8bpc)';
+    if (statusShow === 'dims') return `${doc.width} 픽셀 × ${doc.height} 픽셀 (${Math.round(res * 100) / 100} ppi)`;
+    if (statusShow === 'res') return `해상도: ${Math.round(res * 100) / 100} 픽셀/인치`;
+    if (statusShow === 'tool') return toolLabel();
+    // Photoshop's "문서: flattened/with layers"
+    let layered = 0;
+    for (const l of doc.layers) if (l.canvas) layered += l.canvas.width * l.canvas.height * 4;
+    return `문서: ${mb(doc.width * doc.height * 3)}/${mb(Math.max(layered, doc.width * doc.height * 3))}`;
+  };
+  const toolLabel = () => {
+    const t = TOOL_BY_ID[P.tool];
+    const base = t.name.replace(/\s*\(.*\)$/, '');
+    return /도구$/.test(base) ? base : `${base} 도구`;
+  };
+  let lastStatus = '';
   function updateStatus() {
     const doc = P.doc;
     if (!doc) {
-      status.textContent = '';
+      if (lastStatus !== 'none') status.hidden = true;
+      lastStatus = 'none';
       return;
     }
-    const t = TOOL_BY_ID[P.tool];
-    status.textContent = `${Math.round(doc.view.zoom * 1000) / 10}% · ${doc.width} × ${doc.height} px · ${hover ? `${Math.floor(hover.x)}, ${Math.floor(hover.y)}` : ''} · ${t.name}${doc.selection ? ' · 선택 영역 있음' : ''}${P.editMask ? ' · 마스크 편집 중' : ''}${doc.quickMask ? ' · 빠른 마스크' : ''}${P.chState?.().active ? ' · 알파 채널 편집 중' : ''}`;
+    const zoom = `${Math.round(doc.view.zoom * 10000) / 100}%`;
+    const info = docInfo(doc);
+    const state = `${hover ? `${Math.floor(hover.x)}, ${Math.floor(hover.y)} px` : ''}${doc.selection ? ' · 선택 영역 있음' : ''}${P.editMask ? ' · 마스크 편집 중' : ''}${doc.quickMask ? ' · 빠른 마스크' : ''}${P.chState?.().active ? ' · 알파 채널 편집 중' : ''}`;
+    const tabT = tabTitle(doc);
+    const key = `${zoom}|${info}|${state}|${tabT}`;
+    if (key === lastStatus) return;
+    lastStatus = key;
+    status.hidden = false;
+    if (document.activeElement !== zoomField) zoomField.value = zoom;
+    infoText.textContent = info;
+    stateText.textContent = state.replace(/^ · /, '');
+    // the active tab's title follows the zoom and the active layer
+    const span = tabs.querySelector('.ph-tab.on > span');
+    if (span && span.textContent !== tabT) span.textContent = tabT;
   }
 
   // ---------------------------------------------------------------- helpers for tools
@@ -1751,12 +1988,18 @@ export function createPhotoEditor(root) {
   installPhotoAI(P);
   P.cmd.filterGallery = () => filterGalleryDialog(P);
   installImage2(P);
+  // artboards: the Artboard tool, Layer ▸ New ▸ 대지…, export per artboard (artboards.js)
+  installArtboards(P);
   // Filter menu and Image ▸ Adjustments order, filter shortcuts, Image Size resampling (filtermenu.js)
   installFilters(P);
   // workspaces, document arrangement, copying layers between documents, Save As, New Layer dialog,
   // shortcuts list, history options (core2.js)
-  installCore2(P, { stage, center, tabs, side, toolbar, opts, strip, groupsTop, groupLayers, panels, finishText });
+  installCore2(P, { stage, center, tabs, side, toolbar, opts, strip, dock, panels, finishText });
+  // Window ▸ Learn: hands-on practice lessons (learn.js)
+  installLearn(P);
   installActions(P); // last: it wraps every command so it can record them
+  // interface colour themes (after view2.js, which sets the first P.viewKeys)
+  installTheme(P);
   if (TOOL_BY_ID[savedTool]) P.tool = savedTool;
   else savePref('photo.tool', P.tool);
   P.emit('tool', P.tool);
@@ -1897,7 +2140,7 @@ function installCommands(P) {
     if (!imgs.length) return toast('영상 프로젝트에 불러온 이미지가 없습니다');
     const items = imgs.map((m) => ({ label: m.name, action: () => P.openCanvas(IO.canvasFromImage(getRuntime(m.id).image), m.name.replace(/\.[^.]+$/, ''), m.id) }));
     if (isMobile() && mobileApi.listSheet) return mobileApi.listSheet('영상 프로젝트의 이미지', items);
-    const r = document.querySelector('.ph-welcome button:last-child')?.getBoundingClientRect() || { left: 40, bottom: 120 };
+    const r = document.querySelector('.ph-home-video')?.getBoundingClientRect() || { left: 40, bottom: 120 };
     showMenu(items, r.left, r.bottom + 4);
     return undefined;
   };
@@ -2145,6 +2388,7 @@ function installCommands(P) {
       for (const l of doc.layers) {
         l.x -= r.x;
         l.y -= r.y;
+        if (l.artboard) l.artboard = { ...l.artboard, x: l.artboard.x - r.x, y: l.artboard.y - r.y };
         if (l.mask) l.mask = { ...l.mask, x: l.mask.x - r.x, y: l.mask.y - r.y };
         if (deletePixels && l.kind === 'raster' && l.canvas) {
           const c = makeCanvas(r.w, r.h);
@@ -2194,6 +2438,7 @@ function installCommands(P) {
         }
         l.x = Math.round(l.x * kx);
         l.y = Math.round(l.y * ky);
+        if (l.artboard) { const a = l.artboard; l.artboard = { ...a, x: Math.round(a.x * kx), y: Math.round(a.y * ky), w: Math.max(1, Math.round(a.w * kx)), h: Math.max(1, Math.round(a.h * ky)) }; }
         if (l.mask) {
           const m = makeCanvas(W, H);
           const g = m.getContext('2d');
@@ -2486,6 +2731,7 @@ function buildMenus(P) {
     '파일': () => [
       { label: '새로 만들기…', key: `${mod}N`, action: () => D.newDocDialog(P) },
       { label: '열기… (사진·PSD·Montage 사진 파일)', key: `${mod}O`, action: () => C.open() },
+      recentMenu(P),
       { label: '영상 프로젝트의 이미지 열기', action: () => C.openFromVideo() },
       '-',
       { label: '닫기', disabled: no(), action: () => P.closeDoc() },
@@ -2527,10 +2773,10 @@ function buildMenus(P) {
       '-',
       { label: '칠…', key: 'Shift+F5', disabled: no(), action: () => D.fillDialog(P) },
       { label: '획…', disabled: no(), action: () => D.strokeDialog(P) },
-      { label: '내용 인식 채우기 (선택 영역을 주변으로)', disabled: no() || noSel(), action: () => C.contentAwareFill() },
+      { label: '내용 인식 채우기…', disabled: no() || noSel(), action: () => (C.contentAwareFillWorkspace || C.contentAwareFill)() },
       '-',
-      { label: '내용 인식 비율…', key: `${mod}Alt+Shift+C`, disabled: no(), action: () => C.contentAwareScale() },
-      { label: '퍼펫 뒤틀기…', disabled: no(), action: () => C.puppetWarp() },
+      { label: '내용 인식 비율', key: `${mod}Alt+Shift+C`, disabled: no(), action: () => C.contentAwareScale() },
+      { label: '퍼펫 뒤틀기', disabled: no(), action: () => C.puppetWarp() },
       { label: '자유 변형', key: `${mod}T`, disabled: no(), action: () => C.freeTransform() },
       { label: '변형', disabled: no(), submenu: [
         { label: '다시', key: `${mod}Shift+T`, disabled: !P.lastTransform, action: () => C.transformAgain() },

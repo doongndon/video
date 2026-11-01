@@ -1,7 +1,7 @@
 // Photo editor panels: toolbar, tool options bar, layers, colour, properties and history.
 
 import { h, clamp } from '../util.js';
-import { showMenu, toast, promptDialog, loadPref, savePref } from '../ui/common.js';
+import { showMenu, toast, promptDialog, loadPref, savePref, openModal } from '../ui/common.js';
 import { icon } from '../ui/icons.js';
 import { openFontPicker } from '../ui/font-picker.js';
 import { fontLabel } from '../fonts.js';
@@ -20,95 +20,243 @@ const SWATCHES = ['#000000', '#ffffff', '#7f7f7f', '#c0c0c0', '#ff0000', '#ff7f0
 
 // ---------------------------------------------------------------- toolbar
 
-/** The list of tools in a toolbar slot, shown beside it while hovering (like Photoshop's flyout). */
+/** Photoshop's toolbar order, by one tool of each slot. Slots it doesn't know keep their place after the slot before them. */
+const TOOL_ORDER = ['move', 'rect', 'lasso', 'objSel', 'wand', 'crop', 'frame', 'eyedropper', 'heal', 'brush', 'clone', 'historyBrush', 'eraser', 'gradient', 'blur', 'dodge', 'pen', 'text', 'pathSelect', 'shape', 'hand', 'zoom'];
+// the toolbar's sections (a line between them): move | select, crop, measure | retouch, paint | draw, type | navigate
+const SECTION_STARTS = ['rect', 'heal', 'pen', 'hand'];
+// order inside a slot where it differs from the order the tools were added in
+const IN_SLOT = { text: ['text', 'verticalText', 'verticalTextMask', 'textMask'] };
+/** Icons closer to Photoshop's for tools that share an icon with the video editor. */
+const PS_ICONS = { move: 'psMove', heal: 'spotHeal', dodge: 'dodgeTool', gradient: 'gradTool' };
+export const toolIcon = (t, size = 18) => icon(PS_ICONS[t.id] || t.icon, size);
+/** Photoshop's name for a tool: "브러시 도구", "자동 선택 도구". */
+export const toolTitle = (t) => {
+  const base = t.name.replace(/\s*\(.*\)$/, '');
+  return /도구$/.test(base) ? base : `${base} 도구`;
+};
+const toolTip = (t) => `${toolTitle(t)}${t.key ? ` (${t.key})` : ''}`;
+const LAYOUT_KEY = 'photo.toolbarLayout';
+
+/** The default slots in Photoshop's order (copies; TOOL_GROUPS itself is left as modules built it). */
+function defaultSlots() {
+  const rank = (g) => TOOL_ORDER.findIndex((id) => g.includes(id));
+  let last = -1;
+  const keyed = TOOL_GROUPS.map((g, i) => {
+    const r = rank(g);
+    const k = r >= 0 ? r : last + 0.5;
+    if (r >= 0) last = r;
+    return [k, i, g];
+  });
+  keyed.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  return keyed.map(([, , g]) => {
+    const order = IN_SLOT[g[0]];
+    return order ? [...g].sort((a, b) => (order.indexOf(a) + 1 || 99) - (order.indexOf(b) + 1 || 99)) : [...g];
+  });
+}
+
+/**
+ * The toolbar as the user arranged it (Edit Toolbar): { slots, hidden }. Tools added since (by a
+ * module) join the slot that holds the other tools of their default slot.
+ */
+export function toolbarLayout() {
+  const def = defaultSlots();
+  const saved = loadPref(LAYOUT_KEY, null);
+  if (!saved?.groups) return { slots: def, hidden: [], custom: false };
+  const known = new Set(def.flat());
+  const placed = new Set();
+  const take = (id) => known.has(id) && !placed.has(id) && placed.add(id);
+  const slots = saved.groups.map((g) => g.filter(take)).filter((g) => g.length);
+  const hidden = (saved.hidden || []).filter(take);
+  def.forEach((dg, di) => {
+    for (const id of dg) {
+      if (placed.has(id)) continue;
+      placed.add(id);
+      const mate = dg.find((x) => x !== id && slots.some((s) => s.includes(x)));
+      const slot = mate ? slots.find((s) => s.includes(mate)) : null;
+      if (slot) slot.push(id);
+      else slots.splice(Math.min(di, slots.length), 0, [id]);
+    }
+  });
+  return { slots, hidden, custom: true };
+}
+
+/** The section (0–4) a slot belongs to, from its first tool Photoshop knows (-1: unknown). */
+function sectionOf(slot) {
+  const i = Math.min(...slot.map((id) => TOOL_ORDER.indexOf(id)).filter((x) => x >= 0));
+  if (!Number.isFinite(i)) return -1;
+  return SECTION_STARTS.filter((s) => TOOL_ORDER.indexOf(s) <= i).length;
+}
+
+/** A small floating label beside a toolbar button (Photoshop's tool tip: name and shortcut). */
+function hoverTip() {
+  const el = h('div.ph-tip', { role: 'tooltip', hidden: true });
+  document.body.append(el);
+  let t = 0;
+  const hide = () => {
+    clearTimeout(t);
+    el.hidden = true;
+  };
+  return {
+    attach(b, text) {
+      b.addEventListener('pointerenter', (e) => {
+        if (e.pointerType !== 'mouse') return;
+        clearTimeout(t);
+        t = setTimeout(() => {
+          if (!b.isConnected) return;
+          el.textContent = typeof text === 'function' ? text() : text;
+          el.hidden = false;
+          const r = b.getBoundingClientRect();
+          el.style.left = `${r.right + 6}px`;
+          el.style.top = `${Math.min(r.top + r.height / 2 - el.offsetHeight / 2, window.innerHeight - el.offsetHeight - 4)}px`;
+        }, 450);
+      });
+      for (const ev of ['pointerleave', 'pointerdown']) b.addEventListener(ev, hide);
+    },
+    hide,
+  };
+}
+
+/** The list of tools in a slot (right-click or press and hold), like Photoshop's flyout. */
 function toolFlyout(P, onPick) {
   const el = h('div.ph-flyout', { role: 'menu', hidden: true });
   document.body.append(el);
-  let openT = 0;
-  let closeT = 0;
-  let cur = null;
+  let owner = null;
   const close = () => {
-    clearTimeout(openT);
     el.hidden = true;
-    cur = null;
+    owner = null;
   };
-  const show = (b, g) => {
-    cur = b;
-    el.replaceChildren(...g.map((id) => {
-      const t = TOOL_BY_ID[id];
-      return h(`button.ph-fly-item${id === P.tool ? '.on' : ''}`, { role: 'menuitem', onclick: () => { onPick(g, id); P.setTool(id); close(); } },
-        icon(t.icon, 18), h('span', t.name), t.key ? h('kbd', t.key) : null);
-    }));
-    el.hidden = false;
-    const r = b.getBoundingClientRect();
-    el.style.left = `${r.right + 4}px`;
-    el.style.top = `${Math.min(r.top, window.innerHeight - el.offsetHeight - 8)}px`;
+  const outside = (e) => {
+    if (!el.hidden && !el.contains(e.target) && !owner?.contains(e.target)) close();
   };
-  el.addEventListener('pointerenter', () => clearTimeout(closeT));
-  el.addEventListener('pointerleave', () => { closeT = setTimeout(close, 220); });
+  document.addEventListener('pointerdown', outside, true);
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !el.hidden) close(); });
   P.on('tool', close);
   return {
-    open(b, g) {
-      clearTimeout(closeT);
-      clearTimeout(openT);
-      if (!el.hidden && cur !== b) return show(b, g);
-      openT = setTimeout(() => show(b, g), 380);
-      return undefined;
+    open(b, slot) {
+      owner = b;
+      el.replaceChildren(...slot.map((id) => {
+        const t = TOOL_BY_ID[id];
+        return h(`button.ph-fly-item${id === P.tool ? '.on' : ''}`, { role: 'menuitemradio', 'aria-checked': String(id === P.tool), onclick: () => { onPick(slot, id); P.setTool(id); close(); } },
+          h('span.ph-fly-mark'), toolIcon(t, 16), h('span', toolTitle(t)), t.key ? h('kbd', t.key) : h('kbd'));
+      }));
+      el.hidden = false;
+      const r = b.getBoundingClientRect();
+      el.style.left = `${r.right + 2}px`;
+      el.style.top = `${Math.max(4, Math.min(r.top, window.innerHeight - el.offsetHeight - 8))}px`;
+      el.querySelector('.on, button')?.focus({ preventScroll: true });
     },
-    leave() {
-      clearTimeout(openT);
-      closeT = setTimeout(close, 220);
-    },
+    close,
   };
 }
 
 export function buildToolbar(P) {
-  const groupPick = new Map(TOOL_GROUPS.map((g) => [g[0], g[0]]));
-  const el = h('div.ph-tools', { role: 'toolbar', 'aria-label': '도구' });
+  const pick = new Map();
+  const slotKey = (slot) => slot.join(',');
+  const el = h('div.ph-tools', { role: 'toolbar', 'aria-label': '도구', 'aria-orientation': 'vertical' });
+  let twoCol = loadPref('photo.toolbar2', false);
+  const tip = hoverTip();
+  const fly = toolFlyout(P, (slot, id) => pick.set(slotKey(slot), id));
   // like Photoshop, the swatches open the Color Picker (colorpicker.js); the Color panel otherwise
-  const swFg = h('button.ph-sw.fg', { title: '전경색 설정 (색상 피커)', 'aria-label': '전경색', onclick: () => (P.colorPicker ? P.colorPicker('fg') : P.showPanel('color', 'fg')) });
-  const swBg = h('button.ph-sw.bg', { title: '배경색 설정 (색상 피커)', 'aria-label': '배경색', onclick: () => (P.colorPicker ? P.colorPicker('bg') : P.showPanel('color', 'bg')) });
-  const swap = h('button.ph-swap', { title: '전경/배경색 바꾸기 (X)', 'aria-label': '색 바꾸기', onclick: () => P.swapColors() }, icon('swapColors', 12));
-  const def = h('button.ph-def', { title: '기본 색 (D)', 'aria-label': '기본 색', onclick: () => P.defaultColors() }, icon('defaultColors', 12));
-  const qm = h('button.ph-tool.ph-qm', { title: '빠른 마스크 모드로 편집 (Q) · 두 번 눌러 옵션', 'aria-label': '빠른 마스크', onclick: () => P.cmd.quickMask?.(), ondblclick: () => P.cmd.quickMaskOptions?.() }, icon('quickMask', 18));
+  const swFg = h('button.ph-sw.fg', { 'aria-label': '전경색 설정', onclick: () => (P.colorPicker ? P.colorPicker('fg') : P.showPanel('color', 'fg')) });
+  const swBg = h('button.ph-sw.bg', { 'aria-label': '배경색 설정', onclick: () => (P.colorPicker ? P.colorPicker('bg') : P.showPanel('color', 'bg')) });
+  const swap = h('button.ph-swap', { 'aria-label': '전경색과 배경색 전환 (X)', onclick: () => P.swapColors() }, icon('swapColors', 11));
+  const def = h('button.ph-def', { 'aria-label': '기본 전경색과 배경색 (D)', onclick: () => P.defaultColors() }, icon('defaultColors', 10));
+  tip.attach(swFg, '전경색 설정');
+  tip.attach(swBg, '배경색 설정');
+  tip.attach(swap, '전경색과 배경색 전환 (X)');
+  tip.attach(def, '기본 전경색과 배경색 (D)');
+  const qm = h('button.ph-tool.ph-qm', { 'aria-label': '빠른 마스크 모드로 편집 (Q)', onclick: () => P.cmd.quickMask?.(), ondblclick: () => P.cmd.quickMaskOptions?.() }, icon('quickMask', 18));
+  tip.attach(qm, () => (P.doc?.quickMask ? '표준 모드로 편집 (Q)' : '빠른 마스크 모드로 편집 (Q)'));
+  const screenMenu = (b) => {
+    const m = P.screenModeMenu?.();
+    if (!m) return;
+    const r = b.getBoundingClientRect();
+    showMenu(m.submenu.filter((x) => x && x !== '-' && x.label), r.right + 2, r.top - 40);
+  };
+  const scr = h('button.ph-tool.ph-scr', { 'aria-label': '화면 모드 변경 (F)', onclick: () => P.cmd.screenMode?.() }, icon('screenMode', 18));
+  scr.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    screenMenu(scr);
+  });
+  tip.attach(scr, '화면 모드 변경 (F) · 오른쪽 클릭: 모드 고르기');
+  const more = h('button.ph-tool.ph-etb', { 'aria-label': '도구 모음 편집' }, icon('more', 16));
+  tip.attach(more, '도구 모음 편집 · 추가 도구');
+  more.addEventListener('click', () => {
+    const { hidden } = toolbarLayout();
+    const r = more.getBoundingClientRect();
+    showMenu([
+      ...(hidden.length ? [{ group: '추가 도구' }, ...hidden.map((id) => ({ label: toolTip(TOOL_BY_ID[id]), checked: id === P.tool, action: () => P.setTool(id) })), '-'] : []),
+      { label: '도구 모음 편집…', action: () => editToolbarDialog(P, render) },
+    ], r.right + 2, r.top);
+  });
   const syncQm = () => qm.classList.toggle('on', !!P.doc?.quickMask);
-  const btns = [];
-  const flyout = toolFlyout(P, (g, id) => groupPick.set(g[0], id));
-  const render = () => {
-    el.replaceChildren();
-    for (const g of TOOL_GROUPS) {
-      const cur = g.includes(P.tool) ? P.tool : groupPick.get(g[0]) || g[0];
-      const t = TOOL_BY_ID[cur];
-      const b = h(`button.ph-tool${g.includes(P.tool) ? '.on' : ''}`, {
-        title: `${t.name}${t.key ? ` (${t.key})` : ''}${g.length > 1 ? ' · 오른쪽 클릭/길게 눌러 다른 도구' : ''}`,
-        'aria-label': t.name,
-        onclick: () => P.setTool(cur),
-      }, icon(t.icon, 18), g.length > 1 ? h('span.ph-more') : null);
-      const menu = (e) => {
-        e.preventDefault();
-        const r = b.getBoundingClientRect();
-        showMenu(g.map((id) => ({ label: `${TOOL_BY_ID[id].name}${TOOL_BY_ID[id].key ? `  (${TOOL_BY_ID[id].key})` : ''}`, checked: id === P.tool, action: () => { groupPick.set(g[0], id); P.setTool(id); } })), r.right + 2, r.top);
-      };
-      if (g.length > 1) {
-        // hovering shows the hidden tools of this slot (mouse only; touch uses a long press)
-        b.addEventListener('pointerenter', (e) => { if (e.pointerType === 'mouse') flyout.open(b, g); });
-        b.addEventListener('pointerleave', (e) => { if (e.pointerType === 'mouse') flyout.leave(); });
-        b.addEventListener('contextmenu', menu);
-        let timer = null;
-        b.addEventListener('pointerdown', (e) => { timer = setTimeout(() => menu(e), 500); });
-        b.addEventListener('pointerup', () => clearTimeout(timer));
-        b.addEventListener('pointerleave', () => clearTimeout(timer));
+  const longPress = (b, fn) => {
+    let timer = 0;
+    let fired = false;
+    b.addEventListener('pointerdown', (e) => {
+      fired = false;
+      if (e.button) return;
+      timer = setTimeout(() => {
+        fired = true;
+        fn();
+      }, 450);
+    });
+    for (const ev of ['pointerup', 'pointerleave', 'pointercancel']) b.addEventListener(ev, () => clearTimeout(timer));
+    // the click that ends a long press only opened the list
+    b.addEventListener('click', (e) => {
+      if (fired) {
+        e.stopImmediatePropagation();
+        fired = false;
       }
-      btns.push(b);
-      el.append(b);
-    }
-    el.append(h('div.ph-colors', swBg, swFg, swap, def), qm);
+    }, true);
+  };
+  longPress(scr, () => screenMenu(scr));
+  const render = () => {
+    const { slots } = toolbarLayout();
+    el.classList.toggle('two', twoCol);
+    const cols = h('button.ph-tools-cols', { 'aria-label': twoCol ? '한 열로 보기' : '두 열로 보기', onclick: () => { twoCol = !twoCol; savePref('photo.toolbar2', twoCol); render(); P.redraw(); } }, icon(twoCol ? 'dblChevL' : 'dblChevR', 10));
+    tip.attach(cols, twoCol ? '한 열로 보기' : '두 열로 보기');
+    const items = [h('div.ph-tools-head', cols)];
+    let sec = 0;
+    slots.forEach((slot, i) => {
+      const s = sectionOf(slot);
+      if (i && s >= 0 && s !== sec) items.push(h('div.ph-tools-sep'));
+      if (s >= 0) sec = s;
+      const cur = slot.includes(P.tool) ? P.tool : slot.includes(pick.get(slotKey(slot))) ? pick.get(slotKey(slot)) : slot[0];
+      const t = TOOL_BY_ID[cur];
+      const b = h(`button.ph-tool${slot.includes(P.tool) ? '.on' : ''}`, {
+        'aria-label': toolTip(t),
+        'aria-pressed': String(slot.includes(P.tool)),
+        'aria-haspopup': slot.length > 1 ? 'menu' : null,
+        'data-tool': cur,
+      }, toolIcon(t), slot.length > 1 ? h('span.ph-more') : null);
+      tip.attach(b, () => toolTip(TOOL_BY_ID[b.dataset.tool]));
+      b.addEventListener('click', (e) => {
+        // Alt+click goes through the tools of the slot, like Photoshop
+        if (e.altKey && slot.length > 1) {
+          const next = slot[(slot.indexOf(cur) + 1) % slot.length];
+          pick.set(slotKey(slot), next);
+          return P.setTool(next);
+        }
+        return P.setTool(cur);
+      });
+      if (slot.length > 1) {
+        b.addEventListener('contextmenu', (e) => {
+          e.preventDefault();
+          fly.open(b, slot);
+        });
+        longPress(b, () => fly.open(b, slot));
+      }
+      items.push(b);
+    });
+    items.push(h('div.ph-tools-sep'), more, h('div.ph-tools-sep'), h('div.ph-colors', swBg, swFg, swap, def), qm, scr);
+    el.replaceChildren(...items);
     syncQm();
     swFg.style.background = P.fg;
     swBg.style.background = P.bg;
   };
   P.on('tool', (id) => {
-    for (const g of TOOL_GROUPS) if (g.includes(id)) groupPick.set(g[0], id);
+    for (const slot of toolbarLayout().slots) if (slot.includes(id)) pick.set(slotKey(slot), id);
     render();
   });
   P.on('color', () => {
@@ -118,15 +266,140 @@ export function buildToolbar(P) {
   P.on('quickmask', syncQm);
   P.on('history', syncQm);
   P.on('layers', syncQm);
+  P.editToolbar = () => editToolbarDialog(P, render);
+  P.renderToolbar = render;
   render();
   return el;
+}
+
+/**
+ * Edit ▸ Toolbar (the ⋯ button): drag tools between slots, into a new slot (the gaps between them)
+ * or into Extra Tools to hide them. Each row's menu does the same without dragging.
+ */
+function editToolbarDialog(P, rerender) {
+  const L = toolbarLayout();
+  let slots = L.slots.map((s) => [...s]);
+  let hidden = [...L.hidden];
+  let dragId = null;
+  const left = h('div.ph-etb-list', { 'aria-label': '도구 모음' });
+  const right = h('div.ph-etb-list.extra', { 'aria-label': '추가 도구' });
+  const take = (id) => {
+    for (const s of slots) {
+      const i = s.indexOf(id);
+      if (i >= 0) s.splice(i, 1);
+    }
+    hidden = hidden.filter((x) => x !== id);
+  };
+  const tidy = () => {
+    slots = slots.filter((s) => s.length);
+  };
+  // where: { slot, index } | { newSlot: at } | { hidden: index } (indices as painted: emptied slots go after)
+  const move = (id, where) => {
+    const from = slots.findIndex((s) => s.includes(id));
+    const oldIdx = from >= 0 ? slots[from].indexOf(id) : hidden.indexOf(id);
+    take(id);
+    if (where.hidden != null) {
+      const k = from < 0 && oldIdx < where.hidden ? where.hidden - 1 : where.hidden;
+      hidden.splice(Math.min(k, hidden.length), 0, id);
+    } else if (where.newSlot != null) slots.splice(where.newSlot, 0, [id]);
+    else {
+      const s = slots[where.slot];
+      let k = where.index ?? s.length;
+      if (from === where.slot && oldIdx < k) k--;
+      s.splice(Math.min(k, s.length), 0, id);
+    }
+    tidy();
+    paint();
+  };
+  const dropZone = (el, where) => {
+    el.addEventListener('dragover', (e) => {
+      if (!dragId) return;
+      e.preventDefault();
+      e.stopPropagation();
+      el.classList.add('drop');
+    });
+    el.addEventListener('dragleave', () => el.classList.remove('drop'));
+    el.addEventListener('drop', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      el.classList.remove('drop');
+      if (dragId) move(dragId, typeof where === 'function' ? where(e) : where);
+      dragId = null;
+    });
+  };
+  const row = (id, where) => {
+    const t = TOOL_BY_ID[id];
+    const menuBtn = h('button.ph-etb-mbtn', { 'aria-label': `${toolTitle(t)} 옮기기`, title: '옮기기' }, icon('more', 12));
+    const r = h('div.ph-etb-row', { draggable: 'true' }, toolIcon(t, 16), h('span', toolTitle(t)), h('kbd', t.key || ''), menuBtn);
+    r.addEventListener('dragstart', (e) => {
+      dragId = id;
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', id);
+    });
+    r.addEventListener('dragend', () => { dragId = null; });
+    // dropped on a row: before or after it in the same list
+    dropZone(r, (e) => {
+      const b = r.getBoundingClientRect();
+      const after = e.clientY > b.top + b.height / 2;
+      return where.hidden != null ? { hidden: where.hidden + (after ? 1 : 0) } : { slot: where.slot, index: where.index + (after ? 1 : 0) };
+    });
+    menuBtn.addEventListener('click', () => {
+      const b = menuBtn.getBoundingClientRect();
+      const si = where.slot;
+      showMenu([
+        { label: '추가 도구로 옮기기', disabled: where.hidden != null, action: () => move(id, { hidden: hidden.length }) },
+        { label: '도구 모음에 새 칸으로', action: () => move(id, { newSlot: si != null ? si + 1 : slots.length }) },
+        { label: '위 칸과 합치기', disabled: !(si > 0), action: () => move(id, { slot: si - 1 }) },
+        { label: '아래 칸과 합치기', disabled: si == null || si >= slots.length - 1, action: () => move(id, { slot: si + 1 }) },
+      ], b.left, b.bottom + 2);
+    });
+    return r;
+  };
+  const gap = (at) => {
+    const g = h('div.ph-etb-gap', { title: '여기에 놓으면 새 칸' });
+    dropZone(g, { newSlot: at });
+    return g;
+  };
+  const paint = () => {
+    const items = [gap(0)];
+    slots.forEach((s, si) => {
+      const box = h('div.ph-etb-slot', ...s.map((id, index) => row(id, { slot: si, index })));
+      dropZone(box, { slot: si });
+      items.push(box, gap(si + 1));
+    });
+    left.replaceChildren(...items);
+    right.replaceChildren(...hidden.map((id, i) => row(id, { hidden: i })), ...(hidden.length ? [] : [h('div.empty-hint', '도구를 여기로 끌어 놓으면 도구 모음에서 숨깁니다')]));
+  };
+  dropZone(right, () => ({ hidden: hidden.length }));
+  paint();
+  openModal({
+    title: '도구 모음 사용자 정의',
+    width: '640px',
+    body: [
+      h('div.note', '도구를 끌어서 칸의 순서를 바꾸거나 다른 칸과 묶으세요. 오른쪽 "추가 도구"로 옮긴 도구는 도구 모음에서 숨겨지고 ⋯ 단추에서 고를 수 있습니다.'),
+      h('div.ph-etb', h('div.ph-etb-col', h('div.ph-sub', '도구 모음'), left), h('div.ph-etb-col', h('div.ph-sub', '추가 도구'), right)),
+    ],
+    buttons: [
+      { label: '기본값 복원', action: () => { const d = defaultSlots(); slots = d; hidden = []; paint(); return false; } },
+      { label: '추가 도구 지우기', action: () => { for (const id of hidden) slots.push([id]); hidden = []; paint(); return false; } },
+      { label: '취소' },
+      { label: '완료', primary: true, action: () => {
+        const d = defaultSlots();
+        const same = !hidden.length && slots.length === d.length && slots.every((s, i) => s.join() === d[i].join());
+        savePref(LAYOUT_KEY, same ? null : { groups: slots, hidden });
+        rerender();
+        P.redraw();
+        return true;
+      } },
+    ],
+  });
 }
 
 /** Phone: one scrolling strip with every tool. */
 export function buildToolStrip(P) {
   const el = h('div.ph-strip', { role: 'toolbar', 'aria-label': '도구' });
   const render = () => {
-    el.replaceChildren(...TOOLS.map((t) => h(`button.ph-stool${t.id === P.tool ? '.on' : ''}`, { onclick: () => P.setTool(t.id), 'aria-label': t.name, title: t.name }, icon(t.icon, 20), h('span', t.name.replace(/ \(.*\)/, '')))));
+    el.replaceChildren(...TOOLS.map((t) => h(`button.ph-stool${t.id === P.tool ? '.on' : ''}`, { onclick: () => P.setTool(t.id), 'aria-label': t.name, title: t.name }, toolIcon(t, 20), h('span', t.name.replace(/ \(.*\)/, '')))));
     el.querySelector('.on')?.scrollIntoView({ inline: 'center', block: 'nearest' });
   };
   P.on('tool', render);
@@ -135,6 +408,70 @@ export function buildToolStrip(P) {
 }
 
 // ---------------------------------------------------------------- options bar
+
+const SEL_MODES = [['new', 'selNew', '새 선택'], ['add', 'selAdd', '선택 영역에 추가 (Shift)'], ['sub', 'selSub', '선택 영역에서 빼기 (Alt)'], ['inter', 'selInter', '선택 영역과 교차 (Shift+Alt)']];
+
+/** A popover under `anchor` that closes on a click outside it or Esc. */
+export function popover(anchor, ...content) {
+  document.querySelectorAll('.ph-pop').forEach((p) => p.close?.());
+  // measured at the top left so its width isn't squeezed by where it would land
+  const el = h('div.ph-pop', { style: { left: '0px', top: '0px' } }, ...content);
+  document.body.append(el);
+  const r = anchor.getBoundingClientRect();
+  el.style.left = `${Math.max(4, Math.min(r.left, window.innerWidth - el.offsetWidth - 4))}px`;
+  el.style.top = `${Math.min(r.bottom + 4, window.innerHeight - el.offsetHeight - 4)}px`;
+  const out = (e) => { if (!el.contains(e.target) && !anchor.contains(e.target)) el.close(); };
+  const key = (e) => { if (e.key === 'Escape') el.close(); };
+  el.close = () => {
+    el.remove();
+    document.removeEventListener('pointerdown', out, true);
+    document.removeEventListener('keydown', key, true);
+  };
+  setTimeout(() => {
+    document.addEventListener('pointerdown', out, true);
+    document.addEventListener('keydown', key, true);
+  }, 0);
+  return el;
+}
+
+/** The far left of the options bar: the tool's icon, which opens the Tool Preset picker. */
+function presetPicker(P, t) {
+  const b = h('button.ph-tname', { 'aria-label': `${toolTitle(t)} · 도구 사전 설정 피커`, title: '도구 사전 설정 피커' }, toolIcon(t, 18), h('span.ph-tname-text', t.name), h('span.ph-caret'));
+  b.addEventListener('click', () => {
+    if (document.querySelector('.ph-pop.ph-tpp')) return document.querySelector('.ph-pop.ph-tpp').close();
+    let only = loadPref('photo.toolPresets.only', true);
+    const list = h('div.ph-tpp-list');
+    const paint = () => {
+      const all = (P.toolPresetList?.() || []).filter((p) => TOOL_BY_ID[p.tool] && (!only || p.tool === P.tool));
+      list.replaceChildren(...all.map((p) => h('button.ph-tpp-row', { onclick: () => { P.applyToolPreset?.(p); pop.close(); } }, toolIcon(TOOL_BY_ID[p.tool], 15), h('span', p.name))),
+        ...(all.length ? [] : [h('div.empty-hint', only ? '이 도구의 사전 설정이 없습니다' : '사전 설정이 없습니다')]));
+    };
+    const chk = h('input', { type: 'checkbox', checked: only });
+    chk.addEventListener('change', () => { only = chk.checked; savePref('photo.toolPresets.only', only); paint(); });
+    const pop = popover(b,
+      h('div.ph-tpp-head', h('b', toolTitle(t)),
+        h('button.ph-ibtn', { title: '현재 도구 설정으로 새 도구 사전 설정 만들기', 'aria-label': '새 도구 사전 설정', onclick: async () => {
+          pop.close();
+          const v = await promptDialog('새 도구 사전 설정', '이름', `${t.name} 1`);
+          if (v?.trim()) P.saveToolPreset?.(v.trim());
+        } }, icon('newLayer', 15)),
+        h('button.ph-ibtn', { title: '도구 사전 설정 메뉴', 'aria-label': '도구 사전 설정 메뉴', onclick: (e) => {
+          const r = e.currentTarget.getBoundingClientRect();
+          showMenu([
+            { label: '도구 재설정', action: () => { P.resetToolOptions?.(t.id); pop.close(); } },
+            { label: '모든 도구 재설정', action: () => { P.resetToolOptions?.(); pop.close(); } },
+            '-',
+            { label: '도구 사전 설정 패널 열기', action: () => { pop.close(); P.showPanel('presets'); } },
+          ], r.left, r.bottom + 2);
+        } }, icon('gear', 15))),
+      list,
+      h('label.ph-tpp-only', chk, h('span', '현재 도구만')));
+    pop.classList.add('ph-tpp');
+    paint();
+    return undefined;
+  });
+  return b;
+}
 
 export function buildOptionsBar(P) {
   const el = h('div.ph-opts');
@@ -172,6 +509,11 @@ export function buildOptionsBar(P) {
         const b = h('input', { type: 'checkbox', checked: !!o[key] });
         b.addEventListener('change', () => P.setOpt(t.id, key, b.checked));
         ctrls.push(h('label.ph-opt', b, h('span', label)));
+      } else if (type === 'select' && key === 'mode' && Array.isArray(list) && list.some(([v]) => v === 'inter')) {
+        // the selection tools' four mode buttons, as icons like Photoshop
+        ctrls.push(h('span.ph-selmodes', { role: 'radiogroup', 'aria-label': label }, ...SEL_MODES.map(([v, ic, name]) => h(`button.ph-ibtn${o.mode === v ? '.on' : ''}`, {
+          role: 'radio', 'aria-checked': String(o.mode === v), 'aria-label': name, title: name, onclick: () => P.setOpt(t.id, key, v),
+        }, icon(ic, 16)))));
       } else if (type === 'select') {
         if (key === 'custom' && o.type !== 'custom') continue;
         if (key === 'sides' && !['polygon', 'star'].includes(o.type)) continue;
@@ -286,8 +628,11 @@ export function buildOptionsBar(P) {
     if (P.doc?.active?.mask && ['brush', 'pencil', 'eraser', 'bucket', 'gradient'].includes(t.id)) {
       ctrls.push(h('span.ph-opt.ph-hint', P.editMask ? '마스크에 칠하는 중 (검정=숨김, 흰색=보임)' : ''));
     }
-    // leadButtons: controls Photoshop shows first (the brush preset picker)
-    el.replaceChildren(h('span.ph-tname', icon(t.icon, 16), t.name), ...(t.leadButtons?.(P) || []).filter(Boolean), ...ctrls);
+    // Select and Mask… sits at the right end of the bar, as in Photoshop
+    for (const c of ctrls) if (c?.tagName === 'BUTTON' && c.textContent.startsWith('선택 및 마스크')) c.classList.add('ph-right');
+    // the tool preset picker (the tool's icon) first, then leadButtons: controls Photoshop shows
+    // next (the brush preset picker)
+    el.replaceChildren(presetPicker(P, t), ...(t.leadButtons?.(P) || []).filter(Boolean), ...ctrls);
   };
   P.on('tool', render);
   P.on('opts', render);
@@ -362,6 +707,26 @@ function thumb(P, l, which = 'content') {
     g.arc(w / 2, hh / 2, r, -Math.PI / 2, Math.PI / 2);
     g.closePath();
     g.fill();
+  } else if (l.kind === 'group' && l.artboard) {
+    // an artboard: Photoshop's artboard mark (a frame with crop-like ticks)
+    g.restore();
+    const k = S / 40;
+    g.strokeStyle = '#b8bcc6';
+    g.lineWidth = Math.max(1, 1.6 * k);
+    g.strokeRect(12 * k, 12 * k, 16 * k, 16 * k);
+    g.beginPath();
+    for (const v of [12, 28]) {
+      g.moveTo(v * k, 4 * k);
+      g.lineTo(v * k, 9 * k);
+      g.moveTo(v * k, 31 * k);
+      g.lineTo(v * k, 36 * k);
+      g.moveTo(4 * k, v * k);
+      g.lineTo(9 * k, v * k);
+      g.moveTo(31 * k, v * k);
+      g.lineTo(36 * k, v * k);
+    }
+    g.stroke();
+    g.save();
   } else if (l.kind === 'group') {
     g.restore();
     const k = S / 40;
@@ -423,10 +788,23 @@ export function buildLayersPanel(P) {
   const opacity = h('input.ph-num', { type: 'number', min: 0, max: 100, 'aria-label': '불투명도', title: '불투명도 (%)' });
   const opRange = h('input', { type: 'range', min: 0, max: 100, 'aria-label': '불투명도' });
   const fillNum = h('input.ph-num', { type: 'number', min: 0, max: 100, 'aria-label': '칠', title: '칠 (효과는 그대로 두고 레이어 내용만 투명하게)' });
-  const lockBtn = (kind, label, glyph) => h('button.small.ph-lock', { title: label, 'aria-label': label, 'data-lock': kind, onclick: () => P.cmd.lock(kind) }, glyph);
-  const locks = [lockBtn('alpha', '투명 픽셀 잠그기 (칠한 곳에만 칠하기)', icon('lockAlpha', 13)), lockBtn('pixels', '이미지 픽셀 잠그기 (칠하기 막기)', icon('brush', 13)), lockBtn('position', '위치 잠그기 (옮기기 막기)', icon('move', 13)), lockBtn('all', '모두 잠그기', icon('lock', 13))];
+  const lockBtn = (kind, label, glyph) => h('button.ph-ibtn.ph-lock', { title: label, 'aria-label': label, 'data-lock': kind, onclick: () => P.cmd.lock(kind) }, glyph);
+  const locks = [lockBtn('alpha', '투명 픽셀 잠그기 (칠한 곳에만 칠하기) · /', icon('lockAlpha', 14)), lockBtn('pixels', '이미지 픽셀 잠그기 (칠하기 막기)', icon('lockPixels', 14)), lockBtn('position', '위치 잠그기 (옮기기 막기)', icon('lockPos', 14)), lockBtn('all', '모두 잠그기', icon('lock', 14))];
+  // Photoshop's "불투명도: 100% ▾": a number with a slider that drops down from the arrow
+  const dropSlider = (num, range, label) => {
+    const arrow = h('button.ph-dropbtn', { 'aria-label': `${label} 슬라이더`, title: label }, icon('chevDown', 10));
+    arrow.addEventListener('click', () => {
+      if (range.closest('.ph-pop')) return range.closest('.ph-pop').close();
+      const pop = popover(num, range);
+      pop.classList.add('ph-slpop');
+      range.focus();
+      return undefined;
+    });
+    return h('span.ph-numdrop', num, h('small', '%'), arrow);
+  };
+  const fillRange = h('input', { type: 'range', min: 0, max: 100, 'aria-label': '칠' });
   const list = h('div.ph-layers', { role: 'tree', 'aria-label': '레이어', 'aria-multiselectable': 'true' });
-  const footBtn = (ic, label, fn) => h('button.small', { title: label, 'aria-label': label, onclick: fn }, typeof ic === 'string' && ic.length > 2 ? icon(ic, 15) : ic);
+  const footBtn = (ic, label, fn) => h(`button.ph-ibtn${ic === 'fx' ? '.ph-fxbtn' : ''}`, { title: label, 'aria-label': label.replace(/ \(.*$/, ''), onclick: fn }, typeof ic === 'string' && ic.length > 2 ? icon(ic, 16) : ic);
   const menuAt = (e, items) => {
     const r = e.currentTarget.getBoundingClientRect();
     showMenu(items, r.left, r.top - 4);
@@ -435,64 +813,94 @@ export function buildLayersPanel(P) {
     footBtn('link', '레이어 연결', () => (P.doc?.active?.linkId ? P.cmd.unlink() : P.cmd.link())),
     footBtn('fx', '레이어 스타일 추가', (e) => menuAt(e, [{ label: '혼합 옵션…', action: () => P.cmd.layerStyle('blending') }, '-', ...FX_ORDER.map((k) => ({ label: `${FX_NAMES[k]}…`, action: () => P.cmd.layerStyle(k) }))])),
     footBtn('mask', '레이어 마스크 추가 (선택 영역이 있으면 그 부분만 보이게 · Alt: 숨기기)', (e) => (P.cmd.addMaskMode ? P.cmd.addMaskMode(e.altKey ? 'hideSel' : 'revealSel') : P.cmd.addMask(e.altKey))),
-    footBtn('fillAdjust', '새 칠 또는 조정 레이어', (e) => menuAt(e, P.newFillOrAdjustMenu())),
-    footBtn('folderPlus', '새 그룹 (Ctrl+G: 고른 레이어로 그룹 만들기)', () => P.cmd.newGroup()),
-    footBtn('plus', '새 레이어', () => P.cmd.newLayer()),
+    footBtn('fillAdjust', '새 칠 또는 조정 레이어 만들기', (e) => menuAt(e, P.newFillOrAdjustMenu())),
+    footBtn('folder', '새 그룹 만들기 (Ctrl+G: 고른 레이어로 그룹 만들기)', () => P.cmd.newGroup()),
+    footBtn('newLayer', '새 레이어 만들기 (Shift+Ctrl+N: 대화 상자)', () => P.cmd.newLayer()),
     footBtn('trash', '레이어 삭제', () => P.cmd.deleteLayer()));
   const head = h('div.ph-lhead');
   // find layers by name or kind (Photoshop's layer filter); kept out of `head` so typing keeps focus
-  const fq = h('input.ph-lfind', { type: 'search', placeholder: '레이어 찾기', 'aria-label': '레이어 이름으로 찾기' });
-  const fk = h('select.ph-lkind', { 'aria-label': '종류로 거르기', title: '종류로 거르기' },
-    [['all', '모든 종류'], ['raster', '이미지'], ['adjust', '조정 · 칠'], ['text', '글자'], ['shape', '모양'], ['smart', '고급 개체'], ['group', '그룹 · 프레임'], ['fx', '효과 있음'], ['hidden', '숨김']].map(([v, n]) => h('option', { value: v }, n)));
-  for (const c of [fq, fk]) c.addEventListener('input', () => render());
+  // Photoshop's filter row: a filter type, then the kind icons (or a name field), and an on/off switch
+  const fq = h('input.ph-lfind', { type: 'search', placeholder: '레이어 이름', 'aria-label': '레이어 이름으로 찾기' });
+  const fk = h('select.ph-lkind', { 'aria-label': '필터 유형', title: '필터 유형' },
+    [['kind', '종류'], ['name', '이름'], ['fx', '효과'], ['group', '그룹 · 프레임'], ['hidden', '숨김 레이어']].map(([v, n]) => h('option', { value: v }, n)));
   const KINDS = {
     raster: (l) => l.kind === 'raster', adjust: (l) => l.kind === 'adjust' || l.kind === 'fill', text: (l) => l.kind === 'text', shape: (l) => l.kind === 'shape',
     smart: (l) => l.kind === 'smart', group: (l) => l.kind === 'group', fx: (l) => hasFx(l.fx), hidden: (l) => !l.visible,
   };
+  const kindsOn = new Set();
+  let filterSwitch = true;
+  const kindBtns = [['raster', 'layerPixel', '픽셀 레이어 필터'], ['adjust', 'layerAdjust', '조정 레이어 필터'], ['text', 'layerType', '문자 레이어 필터'], ['shape', 'layerShape', '모양 레이어 필터'], ['smart', 'layerSmart', '고급 개체 필터']]
+    .map(([k, ic, label]) => h('button.ph-ibtn.ph-kind', { title: label, 'aria-label': label, 'aria-pressed': 'false', onclick: (e) => {
+      if (kindsOn.has(k)) kindsOn.delete(k);
+      else kindsOn.add(k);
+      e.currentTarget.classList.toggle('on', kindsOn.has(k));
+      e.currentTarget.setAttribute('aria-pressed', String(kindsOn.has(k)));
+      render();
+    } }, icon(ic, 14)));
+  const kindRow = h('span.ph-lkinds', ...kindBtns);
+  const sw = h('button.ph-ibtn.ph-fswitch.on', { title: '레이어 필터 켜기/끄기', 'aria-label': '레이어 필터 켜기/끄기', 'aria-pressed': 'true', onclick: () => {
+    filterSwitch = !filterSwitch;
+    sw.classList.toggle('on', filterSwitch);
+    sw.setAttribute('aria-pressed', String(filterSwitch));
+    render();
+  } }, icon('filterSwitch', 16));
+  const syncFilterRow = () => {
+    kindRow.hidden = fk.value !== 'kind';
+    fq.hidden = fk.value !== 'name';
+  };
+  fk.addEventListener('change', () => {
+    syncFilterRow();
+    if (fk.value === 'name') fq.focus();
+    render();
+  });
+  fq.addEventListener('input', () => render());
+  syncFilterRow();
   P.focusLayerFilter = () => {
     P.showPanel('layers');
+    fk.value = 'name';
+    syncFilterRow();
+    if (!filterSwitch) sw.click();
     fq.focus();
     fq.select();
   };
   let filterOn = false;
-  // the panel menu (≡): Photoshop's layers panel menu with Panel Options (thumbnail size)
-  const panelMenu = h('button.small.ph-lmenu', {
-    title: '레이어 패널 메뉴', 'aria-label': '레이어 패널 메뉴',
-    onclick: (e) => {
-      const r = e.currentTarget.getBoundingClientRect();
-      const C = P.cmd;
-      const no = !P.doc;
-      showMenu([
-        { label: '새 레이어…', disabled: no, action: () => C.newLayer() },
-        { label: '레이어 복제…', disabled: no, action: () => C.duplicateLayerDialog() },
-        { label: '레이어 삭제', disabled: no, action: () => C.deleteLayer() },
-        '-',
-        { label: '새 그룹…', disabled: no, action: () => C.newGroup() },
-        { label: '레이어에서 새 그룹…', disabled: no, action: () => C.groupLayers() },
-        '-',
-        { label: '고급 개체로 변환', disabled: no, action: () => C.convertToSmart() },
-        { label: '레이어 속성…', disabled: no, action: () => C.layerProperties() },
-        { label: '혼합 옵션…', disabled: no, action: () => C.layerStyle('blending') },
-        '-',
-        { label: '클리핑 마스크 만들기', key: 'Ctrl+Alt+G', disabled: no, action: () => C.toggleClip() },
-        { label: '아래로 병합', key: 'Ctrl+E', disabled: no, action: () => C.mergeDown() },
-        { label: '보이는 레이어 병합', key: 'Ctrl+Shift+E', disabled: no, action: () => C.mergeVisible() },
-        { label: '이미지 병합', disabled: no, action: () => C.flatten() },
-        '-',
-        { label: '패널 옵션: 축소판 크기', submenu: THUMB_SIZES.map(([n, label]) => ({
-          label, checked: thumbSize === n,
-          action: () => {
-            thumbSize = n;
-            savePref('photo.layerThumb', n);
-            render();
-          },
-        })) },
-        { label: '모든 그룹 닫기', disabled: no, action: () => { for (const x of P.doc.layers) if (x.kind === 'group') x.collapsed = true; P.emit('layers'); } },
-      ], r.left, r.bottom + 2);
-    },
-  }, icon('menu', 14));
-  const el = h('div.ph-panel.layers', h('div.ph-lfilter', icon('zoom', 13), fq, fk, panelMenu), head, list, foot);
+  // the panel menu (≡ on the dock's tab bar): Photoshop's layers panel menu with Panel Options
+  P.panelMenus = P.panelMenus || {};
+  P.panelMenus.layers = () => {
+    const C = P.cmd;
+    const no = !P.doc;
+    return [
+      { label: '새 레이어…', disabled: no, action: () => C.newLayer() },
+      { label: '레이어 복제…', disabled: no, action: () => C.duplicateLayerDialog() },
+      { label: '레이어 삭제', disabled: no, action: () => C.deleteLayer() },
+      '-',
+      { label: '새 그룹…', disabled: no, action: () => C.newGroup() },
+      { label: '레이어에서 새 그룹…', disabled: no, action: () => C.groupLayers() },
+      '-',
+      { label: '고급 개체로 변환', disabled: no, action: () => C.convertToSmart() },
+      { label: '레이어 속성…', disabled: no, action: () => C.layerProperties() },
+      { label: '혼합 옵션…', disabled: no, action: () => C.layerStyle('blending') },
+      '-',
+      { label: '클리핑 마스크 만들기', key: 'Ctrl+Alt+G', disabled: no, action: () => C.toggleClip() },
+      { label: '아래로 병합', key: 'Ctrl+E', disabled: no, action: () => C.mergeDown() },
+      { label: '보이는 레이어 병합', key: 'Ctrl+Shift+E', disabled: no, action: () => C.mergeVisible() },
+      { label: '이미지 병합', disabled: no, action: () => C.flatten() },
+      '-',
+      { label: '패널 옵션: 축소판 크기', submenu: THUMB_SIZES.map(([n, label]) => ({
+        label, checked: thumbSize === n,
+        action: () => {
+          thumbSize = n;
+          savePref('photo.layerThumb', n);
+          render();
+        },
+      })) },
+      { label: '모든 그룹 닫기', disabled: no, action: () => { for (const x of P.doc.layers) if (x.kind === 'group') x.collapsed = true; P.emit('layers'); } },
+    ];
+  };
+  const el = h('div.ph-panel.layers', h('div.ph-lfilter', fk, kindRow, fq, sw), head, list, foot);
 
+  const opDrop = dropSlider(opacity, opRange, '불투명도');
+  const fillDrop = dropSlider(fillNum, fillRange, '칠');
   let opBefore = null;
   const setNum = (key, v, done) => {
     const l = P.doc?.active;
@@ -515,6 +923,8 @@ export function buildLayersPanel(P) {
   opRange.addEventListener('change', () => setNum('opacity', +opRange.value, true));
   opacity.addEventListener('change', () => setNum('opacity', +opacity.value, true));
   fillNum.addEventListener('input', () => { if (fillNum.value !== '') setNum('fillOpacity', +fillNum.value, false); });
+  fillRange.addEventListener('input', () => { fillNum.value = fillRange.value; setNum('fillOpacity', +fillRange.value, false); });
+  fillRange.addEventListener('change', () => setNum('fillOpacity', +fillRange.value, true));
   fillNum.addEventListener('change', () => setNum('fillOpacity', +fillNum.value, true));
   const onBlend = () => {
     const d = P.doc;
@@ -867,21 +1277,28 @@ export function buildLayersPanel(P) {
     opRange.value = opacity.value;
     fillNum.value = Math.round((a?.fillOpacity ?? 1) * 100);
     fillNum.disabled = !a || a.kind === 'group' || a.kind === 'adjust';
+    fillRange.value = fillNum.value;
+    fillRange.disabled = fillNum.disabled;
     for (const b of locks) {
       const key = { alpha: 'lockAlpha', pixels: 'lockPixels', position: 'lockPos', all: 'locked' }[b.dataset.lock];
       b.classList.toggle('on', !!a?.[key]);
     }
     head.replaceChildren(
-      h('div.ph-lrow', blend, h('label.ph-op', { style: { flex: '1 1 210px' } }, h('span', { style: { whiteSpace: 'nowrap' } }, '불투명도'), opRange, opacity)),
-      h('div.ph-lrow', h('span.ph-lockl', '잠그기:'), ...locks, h('label.ph-op.fill', h('span', { style: { whiteSpace: 'nowrap' } }, '칠'), fillNum)));
+      h('div.ph-lrow', blend, h('label.ph-op', h('span', '불투명도:'), opDrop)),
+      h('div.ph-lrow', h('span.ph-lockl', '잠그기:'), h('span.ph-locks', ...locks), h('label.ph-op.fill', h('span', '칠:'), fillDrop)));
     const rows = [];
     dblActions.clear();
     const q = fq.value.trim().toLowerCase();
-    const kind = fk.value;
-    if (q || kind !== 'all') {
+    const mode = fk.value;
+    const test = !filterSwitch ? null
+      : mode === 'name' ? (q ? (l) => l.name.toLowerCase().includes(q) : null)
+        : mode === 'kind' ? (kindsOn.size ? (l) => [...kindsOn].some((k) => KINDS[k](l)) : null)
+          : KINDS[mode];
+    el.classList.toggle('filtered', !!test);
+    if (test) {
       // a flat list of the matching layers, top first
       filterOn = true;
-      for (const l of [...doc.layers].reverse()) if ((!q || l.name.toLowerCase().includes(q)) && (kind === 'all' || KINDS[kind](l))) rowsFor(l, 0, rows);
+      for (const l of [...doc.layers].reverse()) if (test(l)) rowsFor(l, 0, rows);
       filterOn = false;
       if (!rows.length) rows.push(h('div.empty-hint', '맞는 레이어가 없습니다'));
     } else renderLevel(null, 0, rows);
@@ -1058,6 +1475,8 @@ export function buildPropertiesPanel(P) {
         h('div.ph-prow', h('span', '배율'), h('span.mono', `${Math.round(scale * 1000) / 10}%  ${Math.round((Math.atan2(b, a) * 180) / Math.PI)}°`)),
         h('div.ph-prow', h('button.small', { onclick: () => P.cmd.editSmartContents(l) }, '내용 편집'), h('button.small', { onclick: () => P.cmd.replaceSmartContents() }, '내용 바꾸기…'), h('button.small', { onclick: () => P.cmd.exportSmartContents() }, '내용 내보내기')),
         h('div.ph-prow', h('button.small', { onclick: () => P.cmd.rasterize() }, '래스터화 (일반 레이어로)'), h('button.small', { onclick: () => P.cmd.freeTransform() }, '변형')));
+    } else if (l.kind === 'group' && l.artboard && P.artboardProps) {
+      rows.push(...P.artboardProps(l), h('div.ph-prow', h('button.small', { onclick: () => P.cmd.ungroup() }, '대지 그룹 해제')));
     } else if (l.kind === 'group') {
       rows.push(h('div.ph-sub', `그룹 · 레이어 ${doc.descendants(l.id).length}개`), h('div.ph-prow', h('button.small', { onclick: () => P.cmd.mergeGroup() }, '그룹 병합'), h('button.small', { onclick: () => P.cmd.ungroup() }, '그룹 해제')));
     } else {

@@ -463,6 +463,13 @@ export function buildToolPresetsPanel(P) {
     toast(`도구 사전 설정: ${p.name}`);
     return undefined;
   };
+  // the options bar's Tool Preset picker (panels.js) shows and adds to the same list
+  P.toolPresetList = () => presets;
+  P.saveToolPreset = (name) => {
+    presets.push({ name, tool: P.tool, opts: { ...P.opts(P.tool) } });
+    save();
+    render();
+  };
   const render = () => {
     const shown = presets.filter((p) => TOOL_BY_ID[p.tool] && (!onlyCurrent || p.tool === P.tool));
     list.replaceChildren(...shown.map((p) => {

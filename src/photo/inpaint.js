@@ -150,9 +150,10 @@ function downsample(L) {
 
 /**
  * Content-aware fill in place. data: RGBA w×h; hole[i] = 1 where pixels are rebuilt.
- * avoid[i] = 1 marks pixels that may not be copied from (optional).
+ * avoid[i] = 1 marks pixels that may not be copied from (optional). colorAdapt (0..1): how far a
+ * patch's brightness and colour may shift to match where it goes (Photoshop's 색상 조정).
  */
-export function inpaint(data, w, h, hole, { avoid = null, seed = 7 } = {}) {
+export function inpaint(data, w, h, hole, { avoid = null, seed = 7, colorAdapt = 0 } = {}) {
   const rand = rng(seed);
   const img = new Float32Array(data.length);
   for (let i = 0; i < data.length; i++) img[i] = data[i];
@@ -213,6 +214,34 @@ export function inpaint(data, w, h, hole, { avoid = null, seed = 7 } = {}) {
         if (hs(Math.max(0, x - r), Math.max(0, y - r), Math.min(W, x + r + 1), Math.min(H, y + r + 1))) targets.push(y * W + x);
       }
     }
+    // colour adaptation: patches are compared (and copied) with their mean colour moved towards
+    // the target's, so a darker or lighter source with the right texture can still be used
+    const ca = colorAdapt > 0 ? colorAdapt : 0;
+    const mean = ca ? new Float32Array(W * H * 3) : null;
+    const means = () => {
+      const t = new Float32Array(W * H);
+      const n = P;
+      for (let c = 0; c < 3; c++) {
+        // separable box mean of channel c over the patch (clamped at the edges)
+        for (let y = 0; y < H; y++) {
+          let acc = 0;
+          for (let x = -r; x <= r; x++) acc += I[(y * W + Math.min(W - 1, Math.max(0, x))) * 4 + c];
+          for (let x = 0; x < W; x++) {
+            t[y * W + x] = acc / n;
+            acc += I[(y * W + Math.min(W - 1, x + r + 1)) * 4 + c] - I[(y * W + Math.max(0, x - r)) * 4 + c];
+          }
+        }
+        for (let x = 0; x < W; x++) {
+          let acc = 0;
+          for (let y = -r; y <= r; y++) acc += t[Math.min(H - 1, Math.max(0, y)) * W + x];
+          for (let y = 0; y < H; y++) {
+            mean[(y * W + x) * 3 + c] = acc / n;
+            acc += t[Math.min(H - 1, y + r + 1) * W + x] - t[Math.max(0, y - r) * W + x];
+          }
+        }
+      }
+    };
+    if (ca) means();
     const nnf = new Int32Array(W * H).fill(-1);
     const nnd = new Float64Array(W * H);
     const dist = (p, s, best) => {
@@ -220,6 +249,14 @@ export function inpaint(data, w, h, hole, { avoid = null, seed = 7 } = {}) {
       const py = (p / W) | 0;
       const sx = s % W;
       const sy = (s / W) | 0;
+      let o0 = 0;
+      let o1 = 0;
+      let o2 = 0;
+      if (ca) {
+        o0 = ca * (mean[p * 3] - mean[s * 3]);
+        o1 = ca * (mean[p * 3 + 1] - mean[s * 3 + 1]);
+        o2 = ca * (mean[p * 3 + 2] - mean[s * 3 + 2]);
+      }
       let d = 0;
       for (let dy = -r; dy <= r; dy++) {
         const qy = py + dy;
@@ -229,9 +266,9 @@ export function inpaint(data, w, h, hole, { avoid = null, seed = 7 } = {}) {
           if (qx < 0 || qx >= W) continue;
           const q = (qy * W + qx) * 4;
           const t = ((sy + dy) * W + sx + dx) * 4;
-          const a = I[q] - I[t];
-          const b = I[q + 1] - I[t + 1];
-          const c = I[q + 2] - I[t + 2];
+          const a = I[q] - I[t] - o0;
+          const b = I[q + 1] - I[t + 1] - o1;
+          const c = I[q + 2] - I[t + 2] - o2;
           const e = I[q + 3] - I[t + 3];
           d += a * a + b * b + c * c + e * e;
         }
@@ -307,6 +344,9 @@ export function inpaint(data, w, h, hole, { avoid = null, seed = 7 } = {}) {
         const sx = s % W;
         const sy = (s / W) | 0;
         const wt = Math.exp(-nnd[p] / (P * P) / (2 * md));
+        const o0 = ca ? ca * (mean[p * 3] - mean[s * 3]) : 0;
+        const o1 = ca ? ca * (mean[p * 3 + 1] - mean[s * 3 + 1]) : 0;
+        const o2 = ca ? ca * (mean[p * 3 + 2] - mean[s * 3 + 2]) : 0;
         for (let dy = -r; dy <= r; dy++) {
           const qy = py + dy;
           if (qy < 0 || qy >= H) continue;
@@ -317,9 +357,9 @@ export function inpaint(data, w, h, hole, { avoid = null, seed = 7 } = {}) {
             if (!M[q]) continue;
             const t = ((sy + dy) * W + sx + dx) * 4;
             ws[q] += wt;
-            acc[q * 4] += wt * I[t];
-            acc[q * 4 + 1] += wt * I[t + 1];
-            acc[q * 4 + 2] += wt * I[t + 2];
+            acc[q * 4] += wt * (I[t] + o0);
+            acc[q * 4 + 1] += wt * (I[t + 1] + o1);
+            acc[q * 4 + 2] += wt * (I[t + 2] + o2);
             acc[q * 4 + 3] += wt * I[t + 3];
           }
         }
@@ -328,6 +368,7 @@ export function inpaint(data, w, h, hole, { avoid = null, seed = 7 } = {}) {
         if (!M[q] || !ws[q]) continue;
         for (let c = 0; c < 4; c++) I[q * 4 + c] = acc[q * 4 + c] / ws[q];
       }
+      if (ca) means();
     };
     const em = li === levels.length - 1 ? 5 : li === 0 ? 2 : 3;
     for (let k = 0; k < em; k++) {
@@ -343,4 +384,117 @@ export function inpaint(data, w, h, hole, { avoid = null, seed = 7 } = {}) {
     if (!hole[i]) continue;
     for (let c = 0; c < 4; c++) data[i * 4 + c] = img[i * 4 + c];
   }
+}
+
+// ---------------------------------------------------------------- Edit ▸ Content-Aware Fill
+
+// 회전 조정: the angles (degrees) source patches may also be taken at
+const ROTATIONS = { none: [], low: [-12, 12], medium: [-25, -12, 12, 25], high: [-45, -25, 25, 45], full: [90, 180, 270, -45, 45] };
+
+/**
+ * A turned / scaled / mirrored copy of an RGBA image (bilinear) with its no-copy mask: pixels that
+ * fall outside the original or next to a no-copy pixel may not be copied from either.
+ */
+function variant(data, w, h, avoid, { angle = 0, scale = 1, mirror = false }) {
+  const a = (angle * Math.PI) / 180;
+  const cs = Math.cos(a);
+  const sn = Math.sin(a);
+  const dw = Math.max(1, Math.round((Math.abs(w * cs) + Math.abs(h * sn)) * scale));
+  const dh = Math.max(1, Math.round((Math.abs(w * sn) + Math.abs(h * cs)) * scale));
+  const out = new Uint8ClampedArray(dw * dh * 4);
+  const av = new Uint8Array(dw * dh);
+  const cx = (w - 1) / 2;
+  const cy = (h - 1) / 2;
+  const ox = (dw - 1) / 2;
+  const oy = (dh - 1) / 2;
+  for (let y = 0; y < dh; y++) {
+    for (let x = 0; x < dw; x++) {
+      // destination → source: undo the scale, the turn, then the mirror
+      const ux = (x - ox) / scale;
+      const uy = (y - oy) / scale;
+      let sx = ux * cs + uy * sn + cx;
+      const sy = -ux * sn + uy * cs + cy;
+      if (mirror) sx = w - 1 - sx;
+      const j = y * dw + x;
+      if (sx < 0 || sy < 0 || sx > w - 1 || sy > h - 1) {
+        av[j] = 1;
+        continue;
+      }
+      const x0 = Math.min(w - 2, sx | 0);
+      const y0 = Math.min(h - 2, sy | 0);
+      const fx = sx - x0;
+      const fy = sy - y0;
+      const i = y0 * w + x0;
+      if (w < 2 || h < 2 || avoid[i] || avoid[i + 1] || avoid[i + w] || avoid[i + w + 1]) {
+        av[j] = 1;
+        continue;
+      }
+      for (let c = 0; c < 4; c++) {
+        out[j * 4 + c] = (data[i * 4 + c] * (1 - fx) + data[(i + 1) * 4 + c] * fx) * (1 - fy) + (data[(i + w) * 4 + c] * (1 - fx) + data[(i + w + 1) * 4 + c] * fx) * fy;
+      }
+    }
+  }
+  return { data: out, w: dw, h: dh, avoid: av };
+}
+
+/**
+ * Content-aware fill with Photoshop's fill settings, in place. data: RGBA w×h; hole[i] = 1 where
+ * pixels are rebuilt; sample[i] = 1 where they may be copied from (null: anywhere outside the hole).
+ * opts: colorAdapt 0..1, rotate none | low | medium | high | full, scale, mirror (booleans), seed.
+ * Turned, scaled and mirrored copies of the sampling area are stacked under the picture, so
+ * PatchMatch can take its patches from them too.
+ */
+export function contentAwareFill(data, w, h, hole, sample = null, { colorAdapt = 0, rotate = 'none', scale = false, mirror = false, seed = 7, maxArea = 5e6 } = {}) {
+  const avoid = new Uint8Array(w * h);
+  for (let i = 0; i < w * h; i++) avoid[i] = hole[i] || (sample && !sample[i]) ? 1 : 0;
+  const specs = [];
+  if (mirror) specs.push({ mirror: true });
+  for (const angle of ROTATIONS[rotate] || []) specs.push({ angle });
+  if (scale) specs.push({ scale: 0.8 }, { scale: 1.25 });
+  const parts = [];
+  let area = w * h;
+  for (const s of specs) {
+    const k = s.scale || 1;
+    if (area + w * h * k * k * 1.6 > maxArea) break;
+    const v = variant(data, w, h, avoid, s);
+    area += v.w * v.h;
+    parts.push(v);
+  }
+  if (!parts.length) {
+    inpaint(data, w, h, hole, { avoid, seed, colorAdapt });
+    return data;
+  }
+  // stack: the picture on top, then each copy, with gaps no patch may cross
+  const GAP = 8;
+  const CW = Math.max(w, ...parts.map((v) => v.w));
+  const CH = h + parts.reduce((n, v) => n + GAP + v.h, 0);
+  const all = new Uint8ClampedArray(CW * CH * 4);
+  const holeC = new Uint8Array(CW * CH);
+  const avoidC = new Uint8Array(CW * CH).fill(1);
+  const put = (d, pw, ph, av, y0, hl = null) => {
+    for (let y = 0; y < ph; y++) {
+      all.set(d.subarray(y * pw * 4, (y + 1) * pw * 4), (y0 + y) * CW * 4);
+      for (let x = 0; x < pw; x++) {
+        avoidC[(y0 + y) * CW + x] = av[y * pw + x];
+        if (hl) holeC[(y0 + y) * CW + x] = hl[y * pw + x];
+      }
+    }
+  };
+  put(data, w, h, avoid, 0, hole);
+  let y = h;
+  for (const v of parts) {
+    y += GAP;
+    put(v.data, v.w, v.h, v.avoid, y);
+    y += v.h;
+  }
+  inpaint(all, CW, CH, holeC, { avoid: avoidC, seed, colorAdapt });
+  for (let yy = 0; yy < h; yy++) {
+    for (let x = 0; x < w; x++) {
+      const i = yy * w + x;
+      if (!hole[i]) continue;
+      const j = (yy * CW + x) * 4;
+      for (let c = 0; c < 4; c++) data[i * 4 + c] = all[j + c];
+    }
+  }
+  return data;
 }

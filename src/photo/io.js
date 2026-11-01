@@ -552,6 +552,21 @@ async function decodeLinked(data) {
   }
 }
 
+// Photoshop artboards (artboards.js): background type 1 white, 2 black, 3 transparent, 4 other
+const AB_BG = [null, 'white', 'black', 'transparent', 'custom'];
+function artboardFromPsd(a) {
+  const r = a.rect || {};
+  const bg = AB_BG[a.backgroundType] || 'white';
+  const c = a.color;
+  const color = bg === 'custom' && c && 'r' in c ? rgbHex(c.r, c.g, c.b) : undefined;
+  return { x: Math.round(r.left || 0), y: Math.round(r.top || 0), w: Math.max(1, Math.round((r.right || 0) - (r.left || 0))), h: Math.max(1, Math.round((r.bottom || 0) - (r.top || 0))), bg, color };
+}
+function artboardToPsd(l) {
+  const a = l.artboard;
+  const [r, g, b] = a.bg === 'custom' ? hexRgb(a.color || '#ffffff') : a.bg === 'black' ? [0, 0, 0] : [255, 255, 255];
+  return { rect: { top: a.y, left: a.x, bottom: a.y + a.h, right: a.x + a.w }, presetName: '', color: { r, g, b }, backgroundType: Math.max(1, AB_BG.indexOf(a.bg || 'white')) };
+}
+
 export function docFromPsd(buffer, name) {
   const psd = readPsd(buffer);
   const doc = new PhotoDoc({ name, width: psd.width, height: psd.height, background: null });
@@ -568,6 +583,7 @@ export function docFromPsd(buffer, name) {
       let l;
       if (c.children) {
         l = newLayer('group', { ...common, blend: c.blendMode === 'pass through' || !c.blendMode ? 'pass through' : blendIn(c.blendMode), collapsed: c.opened === false });
+        if (c.artboard && !parent) l.artboard = artboardFromPsd(c.artboard);
         doc.layers.push(l); // placeholder position is fixed below
         walk(c.children, l.id);
         // the group entry sits above its contents
@@ -680,7 +696,7 @@ export function docToPsd(doc, { editableText = false, fg = '#000000', bg = '#fff
       mask: maskToPsd(doc, l.mask),
       vectorMask: l.vmask?.subpaths?.length ? { paths: pathsToPsd(l.vmask.subpaths.map((sp) => ({ ...sp, knots: sp.knots.map((k) => ({ ...k, in: [k.in[0] + (l.vmask.dx || 0), k.in[1] + (l.vmask.dy || 0)], p: [k.p[0] + (l.vmask.dx || 0), k.p[1] + (l.vmask.dy || 0)], out: [k.out[0] + (l.vmask.dx || 0), k.out[1] + (l.vmask.dy || 0)] })) }))), invert: !!l.vmask.invert, disable: l.vmask.enabled === false } : undefined,
     };
-    if (l.kind === 'group') return { ...base, blendMode: l.blend, opened: !l.collapsed, children: doc.children(l.id).map(layerOut).filter(Boolean) };
+    if (l.kind === 'group') return { ...base, blendMode: l.blend, opened: !l.collapsed, ...(l.artboard ? { artboard: artboardToPsd(l) } : {}), children: doc.children(l.id).map(layerOut).filter(Boolean) };
     if (l.kind === 'adjust') {
       const a = adjustToPsd(l);
       if (!a) {

@@ -1,14 +1,19 @@
-// Filter ▸ Camera Raw 필터 (Shift+Ctrl+A): Photoshop's Camera Raw panels — 기본, 곡선, 세부, 혼합,
-// 색상 그레이딩, 광학, 효과, 보정 — in a large window with its own preview, before/after views, a
-// white balance picker and 100% zoom. Our own processing (similar looks, not Adobe's pixels).
+// Filter ▸ Camera Raw 필터 (Shift+Ctrl+A): Photoshop's Camera Raw window — the 편집 panels (기본,
+// 곡선, 세부, 혼합, 색상 그레이딩, 광학, 효과, 보정 with 자동 and 흑백 on top), 마스킹 (camrawmask*.js)
+// and 사전 설정 (camrawpresets.js) on a right-hand toolbar with 확대/축소 and 손, before / after views
+// and in-window undo. Our own processing (similar looks, not Adobe's pixels).
 // The filter id stays 'cameraRaw' (actions, smart filters and the AI assistant use it); its declared
 // params are the basic ones, the other panels' settings are optional keys of the same params object.
 
 import { h } from '../util.js';
 import { openModal, toast } from '../ui/common.js';
+import { icon } from '../ui/icons.js';
 import { FILTERS, curveLut } from './adjust.js';
-import { mk, read, toCanvas, cl, clamp, smooth, rng, TO_LIN } from './fxcore.js';
+import { mk, read, toCanvas, cl, clamp, smooth, rng, TO_LIN, hexRgb } from './fxcore.js';
 import { gaussF, boxBlurF } from './fxutil.js';
+import { applyMasks, maskActive, maskAlpha } from './camrawmask.js';
+import { maskingPanel } from './camrawmaskui.js';
+import { presetsPanel } from './camrawpresets.js';
 
 // ---------------------------------------------------------------- settings
 
@@ -137,13 +142,31 @@ function parametricLut(p) {
 
 /**
  * Camera Raw on ImageData in place. `k` is the scale of this picture relative to the full-size layer
- * (previews are smaller): neighbourhood sizes follow it so the preview matches the result.
+ * (previews are smaller): neighbourhood sizes follow it so the preview matches the result. `region`
+ * (0..1 of the whole picture) says which part this image shows (zoomed views and masked parts).
  */
-export function cameraRawData(img, p0, k = 1) {
+export function cameraRawData(img, p0, k = 1, region = null) {
+  const masks = Array.isArray(p0.masks) ? p0.masks.filter(maskActive) : [];
+  if (!masks.length) return baseRaw(img, p0, k, region);
+  // masks: global settings, then each mask's local settings, then the effects (vignette, grain)
+  const orig = new Uint8ClampedArray(img.data);
+  const fx = p0.vignette || p0.grain;
+  baseRaw(img, fx ? { ...p0, vignette: 0, grain: 0 } : p0, k, region);
+  applyMasks(img, masks, { orig, k, region, raw: baseRaw, bw: p0.treatment === 'bw' || p0.profile === 'bw' });
+  if (fx) {
+    const q = { _local: true };
+    for (const key of ['vignette', 'grain', 'vigStyle', 'vigMid', 'vigRound', 'vigFeather', 'vigHigh', 'grainSize', 'grainRough']) if (p0[key] != null) q[key] = p0[key];
+    baseRaw(img, q, k, region);
+  }
+  return img;
+}
+
+function baseRaw(img, p0, k = 1, region = null) {
   const p = { ...CR_EXTRA, ...p0 };
   const { width: w, height: h, data: d } = img;
   const n = w * h;
-  const full = Math.max(w, h) / Math.max(1e-6, k);
+  const rg = region || { x: 0, y: 0, w: 1, h: 1 };
+  const full = Math.max(w / rg.w, h / rg.h) / Math.max(1e-6, k);
   // ---- 1. white balance and exposure in linear light
   const t = (p.temp || 0) / 100;
   const m = (p.tint || 0) / 100;
@@ -160,7 +183,15 @@ export function cameraRawData(img, p0, k = 1) {
   const B = new Float32Array(n);
   const lin = TO_LIN;
   const tos = (v) => (v <= 0 ? 0 : v >= 1 ? 1 : v <= 0.0031308 ? v * 12.92 : 1.055 * v ** (1 / 2.4) - 0.055);
+  // a mask's own pass without white balance or exposure leaves the light alone (no highlight roll-off)
+  const plain = p._local && !p.temp && !p.tint && !p.exposure;
   for (let i = 0; i < n; i++) {
+    if (plain) {
+      R[i] = d[i * 4] / 255;
+      G[i] = d[i * 4 + 1] / 255;
+      B[i] = d[i * 4 + 2] / 255;
+      continue;
+    }
     const o = i * 4;
     // highlights roll off softly instead of clipping hard
     const soft = (v) => (v < 0.8 ? v : 0.8 + 0.2 * (1 - Math.exp(-(v - 0.8) / 0.2)));
@@ -522,9 +553,12 @@ export function cameraRawData(img, p0, k = 1) {
     }
   }
   // ---- 6. optics (lens distortion is done on the canvas afterwards), vignettes and grain
-  const cx = w / 2;
-  const cy = h / 2;
-  const R2 = cx * cx + cy * cy;
+  // the whole picture's centre and half size, in this image's pixels
+  const hx = w / rg.w / 2;
+  const hy = h / rg.h / 2;
+  const cx = hx - rg.x * hx * 2;
+  const cy = hy - rg.y * hy * 2;
+  const R2 = hx * hx + hy * hy;
   const lensVig = (p.lensVig || 0) / 100;
   const lensMid = 0.2 + ((p.lensVigMid ?? 50) / 100) * 0.7;
   const vAmt = (p.vignette || 0) / 100;
@@ -547,8 +581,8 @@ export function cameraRawData(img, p0, k = 1) {
     for (let i = 0; i < n; i++) G2[i] /= sd;
   }
   // the vignette's ellipse: roundness 0 follows the picture, 100 is a circle
-  const ax = vRound >= 0 ? cx + (Math.min(cx, cy) - cx) * vRound : cx * (1 - vRound * 0.3);
-  const ay = vRound >= 0 ? cy + (Math.min(cx, cy) - cy) * vRound : cy * (1 - vRound * 0.3);
+  const ax = vRound >= 0 ? hx + (Math.min(hx, hy) - hx) * vRound : hx * (1 - vRound * 0.3);
+  const ay = vRound >= 0 ? hy + (Math.min(hx, hy) - hy) * vRound : hy * (1 - vRound * 0.3);
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
       const i = y * w + x;
@@ -601,12 +635,12 @@ export function cameraRawData(img, p0, k = 1) {
   return img;
 }
 
-/** The whole filter on a canvas (k: preview scale). */
-export function cameraRawCanvas(c, p, k = 1) {
+/** The whole filter on a canvas (k: preview scale, region: the part of the picture `c` shows). */
+export function cameraRawCanvas(c, p, k = 1, region = null) {
   let src = c;
-  if (p.lensDist && FILTERS.lensCorrection) src = FILTERS.lensCorrection.fn(c, { distortion: p.lensDist, scale: 100, edge: 'edge' });
+  if (p.lensDist && FILTERS.lensCorrection && !region) src = FILTERS.lensCorrection.fn(c, { distortion: p.lensDist, scale: 100, edge: 'edge' });
   const img = read(src);
-  cameraRawData(img, p, k);
+  cameraRawData(img, p, k, region);
   return toCanvas(img);
 }
 
@@ -623,20 +657,25 @@ const STYLE_ID = 'ph-camraw-style';
 function ensureStyle() {
   if (document.getElementById(STYLE_ID)) return;
   const css = `
-.cr { display: grid; grid-template-columns: minmax(0, 1fr) 330px; gap: 10px; height: min(72vh, 740px); }
+.cr { display: grid; grid-template-columns: minmax(0, 1fr) 336px 40px; gap: 8px; height: min(76vh, 800px); }
 .modal:has(.cr) { max-width: 98vw; }
 .cr-stage { position: relative; min-width: 0; min-height: 0; display: grid; grid-template-rows: minmax(0, 1fr) auto; gap: 6px; }
-.cr-view { position: relative; overflow: hidden; background: #26282d; border-radius: 6px; display: grid; place-items: center; touch-action: none; }
-.cr-view canvas { max-width: 100%; max-height: 100%; display: block; }
-.cr-view.zoom100 canvas { max-width: none; max-height: none; cursor: grab; }
-.cr-pair { display: flex; gap: 6px; width: 100%; height: 100%; align-items: center; justify-content: center; }
-.cr-pair > div { position: relative; flex: 1; min-width: 0; height: 100%; display: grid; place-items: center; }
-.cr-pair > div > span { position: absolute; left: 6px; top: 6px; font-size: var(--fs-xs); background: rgba(0,0,0,.55); color: #fff; padding: 1px 6px; border-radius: 3px; }
+.cr-view { position: relative; overflow: hidden; background: #1b1c1f; border-radius: 6px; touch-action: none; }
+.cr-disp { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
 .cr-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: var(--fs-s); }
 .cr-bar .note { font-size: var(--fs-xs); }
-.cr-bar button.on { background: var(--accent-soft); border-color: var(--accent); color: var(--value); }
+.cr-bar .grow { flex: 1; }
+.cr-bar select { max-width: 190px; }
+.cr button.on, .cr-bar button.on { background: var(--accent-soft); border-color: var(--accent); color: var(--value); }
+.cr-tools { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 2px 0; border-left: 1px solid var(--line); }
+.cr-tools .ibtn { width: 32px; height: 32px; display: grid; place-items: center; border-radius: 5px; }
+.cr-tools .ibtn.on { background: var(--accent-soft); color: var(--value); box-shadow: inset 0 0 0 1px var(--accent); }
+.cr-tools-gap { flex: 1; }
 .cr-side { overflow-y: auto; min-height: 0; display: flex; flex-direction: column; gap: 4px; padding-right: 4px; }
-.cr-hist { width: 100%; height: 80px; background: #111; border-radius: 4px; display: block; }
+.cr-ptitle { font-weight: 600; font-size: var(--fs); padding: 4px 2px 2px; display: flex; align-items: center; gap: 6px; }
+.cr-hist { width: 100%; height: 80px; background: #111; border-radius: 4px; display: block; flex: none; }
+.cr-top { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.cr-top button { flex: 1; }
 .cr-sec { border: 1px solid var(--line); border-radius: 6px; }
 .cr-sec > summary { cursor: pointer; padding: 6px 8px; font-weight: 600; font-size: var(--fs); list-style: none; display: flex; justify-content: space-between; }
 .cr-sec > summary::after { content: '▸'; color: var(--text-faint); }
@@ -653,12 +692,53 @@ function ensureStyle() {
 .cr-line { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: var(--fs-s); color: var(--text-dim); }
 .cr-wheelwrap { display: grid; place-items: center; padding: 4px 0; }
 .cr-wheel { width: 132px; height: 132px; cursor: crosshair; touch-action: none; }
-body.mobile .cr { grid-template-columns: 1fr; height: auto; }
-body.mobile .cr-view { height: 46vh; }
+.crm, .crp { display: grid; gap: 6px; }
+.crm-new { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
+.crm-new button { display: flex; align-items: center; gap: 6px; justify-content: flex-start; text-align: left; padding: 6px 8px; font-size: var(--fs-s); }
+.crm-list { display: grid; gap: 4px; }
+.crm-mask { border: 1px solid var(--line); border-radius: 6px; padding: 2px; }
+.crm-mask.sel { border-color: var(--accent); }
+.crm-row, .crm-comp { display: flex; align-items: center; gap: 6px; padding: 3px 4px; border-radius: 4px; cursor: default; font-size: var(--fs-s); }
+.crm-row { font-weight: 600; }
+.crm-name, .crm-cname { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.crm-comp { margin-left: 10px; color: var(--text-dim); }
+.crm-comp.sel { background: var(--accent-soft); color: var(--value); }
+.crm-op { width: 14px; display: inline-grid; place-items: center; color: var(--text-faint); }
+.crm-badge { font-size: var(--fs-xs); padding: 0 4px; border-radius: 3px; background: #444a55; color: #fff; font-weight: 400; }
+.crm-ib { width: 24px; height: 22px; min-height: 0; padding: 0; display: grid; place-items: center; background: transparent; border-color: transparent; }
+.crm-ib.on { color: var(--value); }
+.crm-ops { display: flex; gap: 4px; padding: 4px 4px 2px 24px; }
+.crm-ops button { padding: 2px 8px; min-height: 0; font-size: var(--fs-xs); }
+.crm-swatch { width: 22px; height: 22px; min-height: 0; padding: 0; border-radius: 4px; border: 1px solid #000; }
+.crm-colsw { width: 28px; height: 16px; border-radius: 3px; border: 1px solid var(--line); background-image: linear-gradient(45deg, #555 25%, transparent 25%, transparent 75%, #555 75%); background-size: 8px 8px; }
+.crm-head input[type=color] { width: 28px; height: 22px; padding: 0; border: none; background: none; }
+.crm-head .ph-num { width: 46px; }
+.crp-amount { border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; display: grid; gap: 4px; }
+.crp-folder { border: 1px solid var(--line); border-radius: 6px; }
+.crp-folder > summary { cursor: pointer; padding: 6px 8px; display: flex; gap: 6px; align-items: center; font-weight: 600; font-size: var(--fs); list-style: none; }
+.crp-folder > summary .note { margin-left: auto; font-weight: 400; }
+.crp-list { display: grid; gap: 4px; }
+.crp-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; padding: 4px 8px 8px; }
+.crp-tile { position: relative; display: grid; gap: 3px; padding: 4px; text-align: left; font-size: var(--fs-xs); min-height: 0; }
+.crp-tile.on { border-color: var(--accent); background: var(--accent-soft); color: var(--value); }
+.crp-thumb { aspect-ratio: 3 / 2; background: #111; border-radius: 3px; overflow: hidden; }
+.crp-thumb canvas { width: 100%; height: 100%; display: block; object-fit: cover; }
+.crp-del { position: absolute; top: 2px; right: 2px; background: rgba(0,0,0,.6); border-radius: 3px; display: grid; place-items: center; width: 18px; height: 18px; color: #fff; }
+body.mobile .cr { grid-template-columns: 1fr; grid-template-rows: auto auto auto; height: auto; }
+body.mobile .cr-view { height: 44vh; }
+body.mobile .cr-tools { flex-direction: row; border-left: none; border-top: 1px solid var(--line); padding-top: 4px; }
+body.mobile .cr-tools-gap { flex: 0 0 12px; }
 body.mobile .cr-side { max-height: 40vh; }
+body.mobile .cr-tools .ibtn { width: 40px; height: 40px; }
 `;
   document.head.append(h('style', { id: STYLE_ID }, css));
 }
+
+const VIEWS = [['single', '단일 보기'], ['lr', '이전/이후 좌/우'], ['tb', '이전/이후 위/아래'], ['splitLR', '이전/이후 좌/우 분할 화면'], ['splitTB', '이전/이후 위/아래 분할 화면']];
+const ZOOM_STEPS = [0.0625, 0.0833, 0.125, 0.1667, 0.25, 0.3333, 0.5, 0.6667, 1, 2, 3, 4, 6, 8, 16];
+const PANELS = { edit: '편집', mask: '마스킹', presets: '사전 설정' };
+/** Every setting at its default. */
+const crDefaults = () => ({ ...Object.fromEntries([...BASIC, ...EFFECTS_OLD].map(([k, , , , d]) => [k, d])), ...structuredClone(CR_EXTRA) });
 
 /** Open Camera Raw for the active layer (or a smart object's filter at `index`). */
 export function cameraRawDialog(P, { params = null, onApply = null, smartIndex = null } = {}) {
@@ -670,13 +750,18 @@ export function cameraRawDialog(P, { params = null, onApply = null, smartIndex =
     return;
   }
   ensureStyle();
-  const p = { ...Object.fromEntries([...BASIC, ...EFFECTS_OLD].map(([k, , , , d]) => [k, d])), ...structuredClone(CR_EXTRA), ...(params ? structuredClone(params) : lastParams ? structuredClone(lastParams) : {}) };
+  const DEF = crDefaults();
+  const p = { ...structuredClone(DEF), ...(params ? structuredClone(params) : lastParams ? structuredClone(lastParams) : {}) };
   delete p._fg;
   delete p._bg;
+  if (!Array.isArray(p.masks)) p.masks = [];
   // the source: the layer's own pixels (smart object: its rendered content)
   const src = smart ? doc.rasterizeLayer(l) : l.canvas;
   const fullW = src.width;
   const fullH = src.height;
+  // masks are made for one picture: a picture of another size starts without them
+  const sizeKey = `${fullW}x${fullH}`;
+  if (smartIndex == null && p.maskSize && p.maskSize !== sizeKey) p.masks = [];
   // preview copy: about the size of the window
   const pk = Math.min(1, 1100 / Math.max(fullW, fullH));
   const prev = mk(Math.max(1, Math.round(fullW * pk)), Math.max(1, Math.round(fullH * pk)));
@@ -687,61 +772,124 @@ export function cameraRawDialog(P, { params = null, onApply = null, smartIndex =
   }
   const before = mk(prev.width, prev.height);
   before.getContext('2d').drawImage(prev, 0, 0);
+  const beforeData = read(before).data;
   const after = mk(prev.width, prev.height);
-  let mode = 'after'; // after | sideBySide | split
-  let zoom100 = false;
-  let off = { x: 0, y: 0 };
-  let crop = null; // 100% view: the processed full-size crop
-  const view = h('div.cr-view');
+  after.getContext('2d').drawImage(prev, 0, 0);
+
+  // ---- view state
+  let viewMode = 'single';
+  let showBefore = false;
+  let zoom = null; // CSS pixels per picture pixel; null = fit
+  let center = { x: fullW / 2, y: fullH / 2 };
+  let tool = null; // 'zoom' | 'hand'
+  let space = false;
+  let wbPick = false;
+  let panel = 'edit';
+  let crop = null; // zoomed in past the preview: a full-resolution render of the visible part
+  let overlayC = null;
+  let lastPanes = [];
+  let lastFit = 1;
+  const dpr = () => window.devicePixelRatio || 1;
+  const disp = h('canvas.cr-disp', { 'aria-label': 'Camera Raw 미리 보기' });
+  const view = h('div.cr-view', disp);
   const hist = h('canvas.cr-hist', { width: 256, height: 80 });
   const busy = h('span.note', '');
-  let timer = 0;
-  const render = () => {
-    clearTimeout(timer);
-    busy.textContent = '…';
-    timer = setTimeout(() => {
-      try {
-        const out = cameraRawCanvas(prev, p, pk);
-        after.getContext('2d').clearRect(0, 0, after.width, after.height);
-        after.getContext('2d').drawImage(out, 0, 0);
-        if (zoom100) {
-          const vw = Math.min(fullW, Math.max(200, view.clientWidth || 800));
-          const vh = Math.min(fullH, Math.max(150, view.clientHeight || 500));
-          off.x = clamp(off.x, 0, fullW - vw);
-          off.y = clamp(off.y, 0, fullH - vh);
-          const part = mk(vw, vh);
-          part.getContext('2d').drawImage(src, -Math.round(off.x), -Math.round(off.y));
-          crop = { before: part, after: cameraRawCanvas(part, p, 1) };
-        }
-        paint();
-        drawHist(out);
-      } catch (err) {
-        busy.textContent = String(err.message || err);
-        return;
-      }
-      busy.textContent = '';
-    }, 40);
+
+  /** The panes of the current view with their scale and offset (device pixels). */
+  const panes = () => {
+    const W = disp.width;
+    const H = disp.height;
+    const gap = Math.round(4 * dpr());
+    let list;
+    if (!showBefore && viewMode === 'lr') list = [{ x: 0, y: 0, w: (W - gap) / 2, h: H, which: 'before' }, { x: (W + gap) / 2, y: 0, w: (W - gap) / 2, h: H, which: 'after' }];
+    else if (!showBefore && viewMode === 'tb') list = [{ x: 0, y: 0, w: W, h: (H - gap) / 2, which: 'before' }, { x: 0, y: (H + gap) / 2, w: W, h: (H - gap) / 2, which: 'after' }];
+    else list = [{ x: 0, y: 0, w: W, h: H, which: showBefore ? 'before' : 'after', split: !showBefore && viewMode.startsWith('split') ? viewMode : null }];
+    const pn0 = list[0];
+    lastFit = Math.max(1e-4, Math.min(pn0.w / fullW, pn0.h / fullH) * 0.98);
+    const s = zoom == null ? lastFit : zoom * dpr();
+    // keep the picture in view
+    const hw = pn0.w / 2 / s;
+    const hh = pn0.h / 2 / s;
+    center.x = fullW <= hw * 2 ? fullW / 2 : clamp(center.x, hw, fullW - hw);
+    center.y = fullH <= hh * 2 ? fullH / 2 : clamp(center.y, hh, fullH - hh);
+    for (const pn of list) {
+      pn.s = s;
+      pn.ox = pn.x + pn.w / 2 - center.x * s;
+      pn.oy = pn.y + pn.h / 2 - center.y * s;
+    }
+    return list;
   };
+  const toScreen = (pn, u, v) => ({ x: pn.ox + u * fullW * pn.s, y: pn.oy + v * fullH * pn.s });
+  const fromEvent = (e) => {
+    const r = disp.getBoundingClientRect();
+    if (!r.width || !lastPanes.length) return null;
+    const x = ((e.clientX - r.left) / r.width) * disp.width;
+    const y = ((e.clientY - r.top) / r.height) * disp.height;
+    const pane = lastPanes.find((pn) => x >= pn.x && x <= pn.x + pn.w && y >= pn.y && y <= pn.y + pn.h) || lastPanes[lastPanes.length - 1];
+    const X = (x - pane.ox) / pane.s;
+    const Y = (y - pane.oy) / pane.s;
+    return { pane, x, y, X, Y, u: X / fullW, v: Y / fullH };
+  };
+  /** Visible part of the picture in a pane (picture pixels). */
+  const visible = (pn) => {
+    const x = Math.max(0, Math.floor((pn.x - pn.ox) / pn.s));
+    const y = Math.max(0, Math.floor((pn.y - pn.oy) / pn.s));
+    return { x, y, w: Math.min(fullW, Math.ceil((pn.x + pn.w - pn.ox) / pn.s)) - x, h: Math.min(fullH, Math.ceil((pn.y + pn.h - pn.oy) / pn.s)) - y };
+  };
+
   const paint = () => {
-    const b = zoom100 && crop ? crop.before : before;
-    const a = zoom100 && crop ? crop.after : after;
-    view.classList.toggle('zoom100', zoom100);
-    const cv = (c, label) => {
-      const x = mk(c.width, c.height);
-      x.getContext('2d').drawImage(c, 0, 0);
-      return label ? h('div', x, h('span', label)) : x;
-    };
-    if (mode === 'sideBySide') view.replaceChildren(h('div.cr-pair', cv(b, '이전'), cv(a, '이후')));
-    else if (mode === 'split') {
-      const x = mk(a.width, a.height);
-      const g = x.getContext('2d');
-      g.drawImage(a, 0, 0);
-      g.drawImage(b, 0, 0, Math.floor(b.width / 2), b.height, 0, 0, Math.floor(b.width / 2), b.height);
+    const g = disp.getContext('2d');
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    g.fillStyle = '#1b1c1f';
+    g.fillRect(0, 0, disp.width, disp.height);
+    if (!disp.width) return;
+    const list = panes();
+    lastPanes = list;
+    const s0 = list[0].s;
+    const vis = visible(list[0]);
+    const useCrop = crop && crop.ver === ver && s0 > pk * 1.05 && crop.s >= Math.min(1, s0) * 0.99
+      && crop.rect.x <= vis.x && crop.rect.y <= vis.y && crop.rect.x + crop.rect.w >= vis.x + vis.w && crop.rect.y + crop.rect.h >= vis.y + vis.h;
+    const dp = dpr();
+    const label = (pn, text, x, y) => {
+      g.font = `${11 * dp}px sans-serif`;
+      const w = g.measureText(text).width + 12 * dp;
+      g.fillStyle = 'rgba(0,0,0,.6)';
+      g.fillRect(x, y, w, 18 * dp);
       g.fillStyle = '#fff';
-      g.fillRect(Math.floor(b.width / 2), 0, 1, b.height);
-      view.replaceChildren(h('div.cr-pair', h('div', x, h('span', '이전 | 이후'))));
-    } else if (mode === 'before') view.replaceChildren(h('div.cr-pair', cv(b, '이전 (미리 보기 끔)')));
-    else view.replaceChildren(cv(a));
+      g.fillText(text, x + 6 * dp, y + 13 * dp);
+    };
+    for (const pn of list) {
+      g.save();
+      g.beginPath();
+      g.rect(pn.x, pn.y, pn.w, pn.h);
+      g.clip();
+      g.imageSmoothingEnabled = pn.s < 1.5 * dp;
+      g.imageSmoothingQuality = 'high';
+      const draw = (which) => {
+        if (useCrop) g.drawImage(crop[which], pn.ox + crop.rect.x * pn.s, pn.oy + crop.rect.y * pn.s, crop.rect.w * pn.s, crop.rect.h * pn.s);
+        else g.drawImage(which === 'before' ? before : after, pn.ox, pn.oy, fullW * pn.s, fullH * pn.s);
+      };
+      draw(pn.which);
+      if (pn.which === 'after' && overlayC) g.drawImage(overlayC, pn.ox, pn.oy, fullW * pn.s, fullH * pn.s);
+      if (pn.split) {
+        const lr = pn.split === 'splitLR';
+        const mid = lr ? pn.x + pn.w / 2 : pn.y + pn.h / 2;
+        g.save();
+        g.beginPath();
+        if (lr) g.rect(pn.x, pn.y, mid - pn.x, pn.h);
+        else g.rect(pn.x, pn.y, pn.w, mid - pn.y);
+        g.clip();
+        draw('before');
+        g.restore();
+        g.fillStyle = '#fff';
+        if (lr) g.fillRect(mid, pn.y, Math.max(1, dp), pn.h);
+        else g.fillRect(pn.x, mid, pn.w, Math.max(1, dp));
+        label(pn, '이전', pn.x + 6 * dp, pn.y + 6 * dp);
+        label(pn, '이후', lr ? mid + 6 * dp : pn.x + 6 * dp, lr ? pn.y + 6 * dp : mid + 6 * dp);
+      } else if (list.length > 1 || showBefore) label(pn, pn.which === 'before' ? '이전' : '이후', pn.x + 6 * dp, pn.y + 6 * dp);
+      if (pn.which === 'after' && panel === 'mask' && !tool) maskUi.drawOn(g, pn);
+      g.restore();
+    }
   };
   const drawHist = (c) => {
     const g = hist.getContext('2d');
@@ -765,54 +913,287 @@ export function cameraRawDialog(P, { params = null, onApply = null, smartIndex =
     });
     g.globalCompositeOperation = 'source-over';
   };
+  /** The selected mask tinted with the overlay colour, at preview size. */
+  const makeOverlay = ({ mask, color, opacity }) => {
+    const M = maskAlpha(mask, prev.width, prev.height, { orig: beforeData, region: null });
+    const img = new ImageData(prev.width, prev.height);
+    const [r, g2, b] = hexRgb(color);
+    for (let i = 0; i < M.length; i++) {
+      const o = i * 4;
+      img.data[o] = r;
+      img.data[o + 1] = g2;
+      img.data[o + 2] = b;
+      img.data[o + 3] = M[i] * opacity * 255;
+    }
+    return toCanvas(img);
+  };
 
-  // ---- panning at 100% and the white balance picker
-  let wbPick = false;
-  let drag = null;
-  view.addEventListener('pointerdown', (e) => {
-    const cvs = e.target.closest?.('canvas');
-    if (wbPick && cvs) {
-      const r = cvs.getBoundingClientRect();
-      const x = Math.floor(((e.clientX - r.left) / r.width) * cvs.width);
-      const y = Math.floor(((e.clientY - r.top) / r.height) * cvs.height);
-      const srcC = zoom100 && crop ? crop.before : before;
-      const sx = mode === 'sideBySide' ? x : x;
-      const dd = srcC.getContext('2d').getImageData(clamp(sx - 2, 0, srcC.width - 1), clamp(y - 2, 0, srcC.height - 1), 5, 5).data;
-      let rr = 0;
-      let gg = 0;
-      let bb = 0;
-      let nn = 0;
-      for (let i = 0; i < dd.length; i += 4) {
-        rr += TO_LIN[dd[i]];
-        gg += TO_LIN[dd[i + 1]];
-        bb += TO_LIN[dd[i + 2]];
-        nn++;
-      }
-      if (nn && rr > 0 && bb > 0 && gg > 0) {
-        // solve temp / tint so this colour becomes neutral (the multipliers of cameraRawData)
-        const tt = clamp(Math.log2(bb / rr) / 1.2 * 100, -100, 100);
-        const mm = clamp(Math.log2(gg / Math.sqrt(rr * bb)) / 0.6 * 100, -100, 100);
-        set('temp', Math.round(tt));
-        set('tint', Math.round(mm));
-        wbSel.value = 'custom';
-      }
-      wbPick = false;
-      wbBtn.classList.remove('on');
+  // ---- rendering (debounced) and the zoomed-in crop
+  let ver = 0;
+  let timer = 0;
+  let cropTimer = 0;
+  const render = () => {
+    ver++;
+    clearTimeout(timer);
+    busy.textContent = '…';
+    timer = setTimeout(renderNow, 40);
+  };
+  const renderNow = () => {
+    try {
+      const out = cameraRawCanvas(prev, p, pk);
+      const ag = after.getContext('2d');
+      ag.clearRect(0, 0, after.width, after.height);
+      ag.drawImage(out, 0, 0);
+      const info = panel === 'mask' ? maskUi.overlay() : null;
+      overlayC = info ? makeOverlay(info) : null;
+      drawHist(out);
+      paint();
+      scheduleCrop();
+    } catch (err) {
+      busy.textContent = String(err.message || err);
       return;
     }
-    if (!zoom100) return;
-    drag = { x: e.clientX, y: e.clientY, ox: off.x, oy: off.y };
-    view.setPointerCapture(e.pointerId);
+    busy.textContent = '';
+  };
+  let lensCache = null;
+  const lensSrc = () => {
+    if (!p.lensDist || !FILTERS.lensCorrection) return src;
+    if (lensCache?.v !== p.lensDist) lensCache = { v: p.lensDist, c: FILTERS.lensCorrection.fn(src, { distortion: p.lensDist, scale: 100, edge: 'edge' }) };
+    return lensCache.c;
+  };
+  const scheduleCrop = () => {
+    clearTimeout(cropTimer);
+    if (!lastPanes[0] || lastPanes[0].s <= pk * 1.05) {
+      crop = null;
+      return;
+    }
+    cropTimer = setTimeout(renderCrop, 120);
+  };
+  const renderCrop = () => {
+    const pn = lastPanes[0];
+    if (!pn || pn.s <= pk * 1.05) return;
+    const s = Math.min(1, pn.s);
+    const v = visible(pn);
+    if (v.w < 1 || v.h < 1) return;
+    // a little extra around the view so small pans stay sharp
+    const m = Math.round(Math.min(v.w, v.h) * 0.15);
+    const r = { x: Math.max(0, v.x - m), y: Math.max(0, v.y - m) };
+    r.w = Math.min(fullW, v.x + v.w + m) - r.x;
+    r.h = Math.min(fullH, v.y + v.h + m) - r.y;
+    const cw = Math.max(1, Math.round(r.w * s));
+    const ch = Math.max(1, Math.round(r.h * s));
+    const at = ver;
+    try {
+      const part = mk(cw, ch);
+      part.getContext('2d').drawImage(lensSrc(), r.x, r.y, r.w, r.h, 0, 0, cw, ch);
+      const b = mk(cw, ch);
+      b.getContext('2d').drawImage(src, r.x, r.y, r.w, r.h, 0, 0, cw, ch);
+      const a = cameraRawCanvas(part, { ...p, lensDist: 0 }, s, { x: r.x / fullW, y: r.y / fullH, w: r.w / fullW, h: r.h / fullH });
+      if (at !== ver) return;
+      crop = { rect: r, s, before: b, after: a, ver: at };
+      paint();
+    } catch (err) {
+      busy.textContent = String(err.message || err);
+    }
+  };
+
+  // ---- zoom and hand
+  const zoomSel = h('select', { 'aria-label': '확대/축소 수준', title: '확대/축소 수준 (Ctrl+0 맞춤 보기, Ctrl+Alt+0 100%)' });
+  const syncZoomSel = () => {
+    const z = (lastPanes[0]?.s ?? lastFit) / dpr();
+    const opts = [h('option', { value: 'fit' }, '맞춤 보기'), ...ZOOM_STEPS.map((v) => h('option', { value: String(v) }, `${Math.round(v * 1000) / 10}%`))];
+    if (zoom != null && !ZOOM_STEPS.includes(zoom)) opts.push(h('option', { value: String(zoom) }, `${Math.round(zoom * 1000) / 10}%`));
+    zoomSel.replaceChildren(...opts);
+    zoomSel.value = zoom == null ? 'fit' : String(zoom);
+    zoomSel.title = `확대/축소 수준: ${Math.round(z * 1000) / 10}%`;
+  };
+  zoomSel.addEventListener('change', () => setZoom(zoomSel.value === 'fit' ? null : +zoomSel.value));
+  const setZoom = (z, anchor = null) => {
+    const fitZ = lastFit / dpr();
+    if (z != null && z <= fitZ * 1.001 && !ZOOM_STEPS.includes(z)) z = null;
+    if (z != null) {
+      z = clamp(z, 0.02, 16);
+      if (anchor) {
+        // keep the picture point under the pointer where it is
+        const pn = anchor.pane;
+        const sN = z * dpr();
+        center = { x: anchor.X - (anchor.x - pn.x - pn.w / 2) / sN, y: anchor.Y - (anchor.y - pn.y - pn.h / 2) / sN };
+      }
+    } else center = { x: fullW / 2, y: fullH / 2 };
+    zoom = z;
+    paint();
+    syncZoomSel();
+    scheduleCrop();
+    updCursor();
+  };
+  const curZ = () => (lastPanes[0]?.s ?? lastFit) / dpr();
+  const stepZoom = (dir, anchor = null) => {
+    const z = curZ();
+    const fitZ = lastFit / dpr();
+    if (dir > 0) setZoom(ZOOM_STEPS.find((v) => v > z * 1.01) ?? 16, anchor);
+    else {
+      const next = [...ZOOM_STEPS].reverse().find((v) => v < z / 1.01);
+      setZoom(next == null || next <= fitZ ? null : next, anchor);
+    }
+  };
+  const setTool = (t) => {
+    tool = tool === t ? null : t;
+    if (tool) wbPick = false;
+    wbBtn.classList.toggle('on', wbPick);
+    syncTools();
+    updCursor();
+    paint();
+  };
+  const updCursor = () => {
+    const zoomed = lastPanes[0] && lastPanes[0].s > lastFit * 1.01;
+    let c = 'default';
+    if (space || tool === 'hand') c = 'grab';
+    else if (tool === 'zoom') c = 'zoom-in';
+    else if (wbPick) c = 'crosshair';
+    else if (panel === 'mask' && maskUi.cursor()) c = maskUi.cursor();
+    else if (zoomed) c = 'grab';
+    disp.style.cursor = c;
+  };
+
+  /** Average colour (bytes) of the unedited preview around picture point u, v. */
+  const sampleAt = (u, v, r = 2) => {
+    const x0 = clamp(Math.round(u * prev.width), 0, prev.width - 1);
+    const y0 = clamp(Math.round(v * prev.height), 0, prev.height - 1);
+    let rr = 0;
+    let gg = 0;
+    let bb = 0;
+    let n = 0;
+    for (let y = Math.max(0, y0 - r); y <= Math.min(prev.height - 1, y0 + r); y++) {
+      for (let x = Math.max(0, x0 - r); x <= Math.min(prev.width - 1, x0 + r); x++) {
+        const o = (y * prev.width + x) * 4;
+        rr += beforeData[o];
+        gg += beforeData[o + 1];
+        bb += beforeData[o + 2];
+        n++;
+      }
+    }
+    return [Math.round(rr / n), Math.round(gg / n), Math.round(bb / n)];
+  };
+  const pickWb = (pt) => {
+    const [r0, g0, b0] = sampleAt(pt.u, pt.v, 2);
+    const rr = TO_LIN[r0];
+    const gg = TO_LIN[g0];
+    const bb = TO_LIN[b0];
+    if (rr > 0 && gg > 0 && bb > 0) {
+      // solve temp / tint so this colour becomes neutral (the multipliers of cameraRawData)
+      set('temp', Math.round(clamp(Math.log2(bb / rr) / 1.2 * 100, -100, 100)));
+      set('tint', Math.round(clamp(Math.log2(gg / Math.sqrt(rr * bb)) / 0.6 * 100, -100, 100)));
+      wbSel.value = 'custom';
+      commit();
+    }
+    wbPick = false;
+    wbBtn.classList.remove('on');
+    updCursor();
+  };
+
+  // ---- pointer on the picture
+  let drag = null;
+  const panDrag = (pt) => {
+    const c0 = { ...center };
+    const s = pt.pane.s;
+    disp.style.cursor = 'grabbing';
+    return {
+      move(q) {
+        center = { x: c0.x - (q.x - pt.x) / s, y: c0.y - (q.y - pt.y) / s };
+        paint();
+      },
+      up() {
+        updCursor();
+        scheduleCrop();
+      },
+    };
+  };
+  disp.addEventListener('pointerdown', (e) => {
+    if (e.button === 2) return;
+    const pt = fromEvent(e);
+    if (!pt) return;
+    e.preventDefault();
+    try {
+      disp.setPointerCapture(e.pointerId);
+    } catch { /* pointer already gone */ }
+    if (e.button === 1 || space || tool === 'hand') drag = panDrag(pt);
+    else if (tool === 'zoom') stepZoom(e.altKey ? -1 : 1, pt);
+    else if (wbPick) pickWb(pt);
+    else if (panel === 'mask' && pt.pane.which === 'after' && (drag = maskUi.pointerDown(pt, e))) { /* the mask tool drags */ }
+    else if (lastPanes[0]?.s > lastFit * 1.01) drag = panDrag(pt);
   });
-  view.addEventListener('pointermove', (e) => {
-    if (!drag) return;
-    off = { x: drag.ox - (e.clientX - drag.x), y: drag.oy - (e.clientY - drag.y) };
+  disp.addEventListener('pointermove', (e) => {
+    const pt = fromEvent(e);
+    if (!pt) return;
+    if (drag) {
+      drag.move(pt, e);
+      if (panel === 'mask') maskUi.hover(pt);
+      return;
+    }
+    if (panel === 'mask') maskUi.hover(pt);
   });
-  view.addEventListener('pointerup', () => {
+  const endDrag = (e) => {
     if (!drag) return;
+    const d = drag;
     drag = null;
-    render();
+    d.up?.(fromEvent(e), e);
+  };
+  disp.addEventListener('pointerup', endDrag);
+  disp.addEventListener('pointercancel', endDrag);
+  disp.addEventListener('pointerleave', () => {
+    if (!drag && panel === 'mask') maskUi.hover(null);
   });
+  disp.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const pt = fromEvent(e);
+    if (e.ctrlKey || e.altKey || !(lastPanes[0]?.s > lastFit * 1.01)) stepZoom(e.deltaY < 0 ? 1 : -1, pt);
+    else {
+      // scroll pans when zoomed in
+      const s = lastPanes[0].s;
+      center = { x: center.x + (e.shiftKey ? e.deltaY : e.deltaX) * dpr() / s, y: center.y + (e.shiftKey ? 0 : e.deltaY) * dpr() / s };
+      paint();
+      scheduleCrop();
+    }
+  }, { passive: false });
+  const ro = new ResizeObserver(() => {
+    const w = Math.max(1, Math.round(view.clientWidth * dpr()));
+    const hh = Math.max(1, Math.round(view.clientHeight * dpr()));
+    if (w === disp.width && hh === disp.height) return;
+    disp.width = w;
+    disp.height = hh;
+    paint();
+    syncZoomSel();
+    scheduleCrop();
+  });
+  ro.observe(view);
+
+  // ---- in-dialog undo (Ctrl+Z / Ctrl+Shift+Z)
+  const undoList = [structuredClone(p)];
+  let undoAt = 0;
+  const commit = () => {
+    const snap = structuredClone(p);
+    if (JSON.stringify(snap) === JSON.stringify(undoList[undoAt])) return;
+    undoList.splice(undoAt + 1);
+    undoList.push(snap);
+    if (undoList.length > 80) undoList.shift();
+    undoAt = undoList.length - 1;
+  };
+  const restore = (snap) => {
+    for (const k of Object.keys(p)) delete p[k];
+    Object.assign(p, structuredClone(snap));
+    syncAll();
+    render();
+  };
+  const undo = () => {
+    if (undoAt <= 0) return toast('더 취소할 단계가 없습니다');
+    undoAt--;
+    restore(undoList[undoAt]);
+  };
+  const redo = () => {
+    if (undoAt >= undoList.length - 1) return;
+    undoAt++;
+    restore(undoList[undoAt]);
+  };
 
   // ---- controls
   const rows = new Map();
@@ -842,87 +1223,88 @@ export function cameraRawDialog(P, { params = null, onApply = null, smartIndex =
     num.addEventListener('change', () => upd(num.value));
     const lab = h('span', { title: '두 번 누르면 기본값' }, label);
     // double-click the label or the slider: back to the default (like Camera Raw)
-    lab.addEventListener('dblclick', () => upd(def));
-    range.addEventListener('dblclick', () => upd(def));
-    rows.set(key, { range, num });
-    return h('label.cr-row', lab, range, num);
+    lab.addEventListener('dblclick', () => {
+      upd(def);
+      commit();
+    });
+    range.addEventListener('dblclick', () => {
+      upd(def);
+      commit();
+    });
+    rows.set(key, { range, num, min, max, def });
+    return h('label.cr-row', { dataset: { key } }, lab, range, num);
   };
-  const section = (title, open, ...kids) => h(`details.cr-sec${''}`, { open }, h('summary', title), h('div', ...kids));
+  const section = (title, open, ...kids) => h('details.cr-sec', { open }, h('summary', title), h('div', ...kids));
   const grad = (a, b) => `linear-gradient(90deg, ${a}, ${b})`;
+
+  // top of 편집: 자동, 흑백 and the profile
+  const autoBtn = h('button', { type: 'button', title: '사진에 맞춰 노출·대비·흰색·검정 등을 자동으로 맞춥니다' }, '자동');
+  autoBtn.addEventListener('click', async () => {
+    try {
+      const { heuristicSettings } = await import('./photoai.js');
+      const s = heuristicSettings(before);
+      for (const [key, , min, max] of BASIC) if (Number.isFinite(s[key])) set(key, Math.round(clamp(s[key], min, max) * 100) / 100);
+      commit();
+    } catch (err) {
+      toast(String(err.message || err));
+    }
+  });
+  const bwBtn = h('button', { type: 'button', title: '흑백으로 바꿉니다 (다시 누르면 컬러)' }, '흑백');
+  const profSel = h('select', { 'aria-label': '프로필' }, ...PROFILES.map(([v, t]) => h('option', { value: v }, t)));
+  const treatBtns = () => {
+    bwBtn.classList.toggle('on', p.treatment === 'bw' || p.profile === 'bw');
+    mixPanel();
+  };
+  bwBtn.addEventListener('click', () => {
+    if (p.treatment === 'bw' || p.profile === 'bw') {
+      p.treatment = 'color';
+      if (p.profile === 'bw') p.profile = 'color';
+    } else p.treatment = 'bw';
+    profSel.value = p.profile || 'color';
+    treatBtns();
+    render();
+    commit();
+  });
+  profSel.addEventListener('change', () => {
+    p.profile = profSel.value;
+    if (profSel.value === 'bw') p.treatment = 'bw';
+    else if (p.treatment === 'bw') p.treatment = 'color';
+    treatBtns();
+    render();
+  });
 
   // 기본
   const wbSel = h('select', { 'aria-label': '흰색 균형' }, h('option', { value: 'asShot' }, '원본'), h('option', { value: 'auto' }, '자동'), h('option', { value: 'custom' }, '사용자 정의'));
-  wbSel.value = p.temp || p.tint ? 'custom' : 'asShot';
   wbSel.addEventListener('change', () => {
     if (wbSel.value === 'asShot') {
       set('temp', 0);
       set('tint', 0);
     } else if (wbSel.value === 'auto') {
       // grey world on the preview
-      const d = read(before).data;
       let rr = 0;
       let gg = 0;
       let bb = 0;
-      for (let i = 0; i < d.length; i += 4) {
-        rr += TO_LIN[d[i]];
-        gg += TO_LIN[d[i + 1]];
-        bb += TO_LIN[d[i + 2]];
+      for (let i = 0; i < beforeData.length; i += 4) {
+        rr += TO_LIN[beforeData[i]];
+        gg += TO_LIN[beforeData[i + 1]];
+        bb += TO_LIN[beforeData[i + 2]];
       }
       set('temp', Math.round(clamp(Math.log2(bb / Math.max(1e-6, rr)) / 1.2 * 100, -100, 100)));
       set('tint', Math.round(clamp(Math.log2(gg / Math.sqrt(Math.max(1e-9, rr * bb))) / 0.6 * 100, -100, 100)));
     }
   });
-  const wbBtn = h('button.small', { type: 'button', title: '흰색 균형 도구 (I): 미리 보기에서 회색이어야 할 곳을 누르세요' }, '흰색 균형 도구');
+  const wbBtn = h('button.small', { type: 'button', title: '흰색 균형 도구 (I): 미리 보기에서 회색이어야 할 곳을 누르세요' }, icon('eyedropper', 14), ' 흰색 균형 도구');
   wbBtn.addEventListener('click', () => {
     wbPick = !wbPick;
+    if (wbPick) tool = null;
     wbBtn.classList.toggle('on', wbPick);
-  });
-  const profSel = h('select', { 'aria-label': '프로필' }, ...PROFILES.map(([v, t]) => h('option', { value: v }, t)));
-  profSel.value = p.profile || 'color';
-  profSel.addEventListener('change', () => {
-    p.profile = profSel.value;
-    if (profSel.value === 'bw') p.treatment = 'bw';
-    else if (p.treatment === 'bw' && profSel.value !== 'bw') p.treatment = 'color';
-    treatBtns();
-    render();
-  });
-  const treatColor = h('button.small', { type: 'button' }, '컬러');
-  const treatBw = h('button.small', { type: 'button' }, '흑백');
-  const treatBtns = () => {
-    treatColor.classList.toggle('on', p.treatment !== 'bw');
-    treatBw.classList.toggle('on', p.treatment === 'bw');
-    mixPanel();
-  };
-  treatColor.addEventListener('click', () => {
-    p.treatment = 'color';
-    if (p.profile === 'bw') {
-      p.profile = 'color';
-      profSel.value = 'color';
-    }
-    treatBtns();
-    render();
-  });
-  treatBw.addEventListener('click', () => {
-    p.treatment = 'bw';
-    treatBtns();
-    render();
-  });
-  const autoBtn = h('button.small', { type: 'button', title: '사진에 맞춰 노출·대비·흰색·검정 등을 자동으로 맞춥니다' }, '자동');
-  autoBtn.addEventListener('click', async () => {
-    try {
-      const { heuristicSettings } = await import('./photoai.js');
-      const s = heuristicSettings(before);
-      for (const [key, , min, max] of BASIC) if (Number.isFinite(s[key])) set(key, Math.round(clamp(s[key], min, max) * 100) / 100);
-    } catch (err) {
-      toast(String(err.message || err));
-    }
+    syncTools();
+    updCursor();
   });
   const basic = section('기본', true,
-    h('div.cr-line', h('span', '처리'), treatColor, treatBw, h('span', '프로필'), profSel),
     h('div.cr-line', h('span', '흰색 균형'), wbSel, wbBtn),
     slider('temp', '색온도', -100, 100, 0, 1, grad('#3b6dd8', '#e8c24a')),
     slider('tint', '색조', -100, 100, 0, 1, grad('#46b04a', '#c94fc0')),
-    h('div.cr-line', autoBtn, h('span.note', '두 번 누르면 기본값으로')),
     slider('exposure', '노출', -5, 5, 0, 0.05),
     slider('contrast', '대비', -100, 100),
     slider('highlights', '밝은 영역', -100, 100),
@@ -948,13 +1330,14 @@ export function cameraRawDialog(P, { params = null, onApply = null, smartIndex =
       return;
     }
     const { curveEditor } = await import('./pdialogs.js');
-    const pts = Array.isArray(p[curveCh]) ? p[curveCh] : [[0, 0], [255, 255]];
+    const ch = curveCh;
+    const pts = Array.isArray(p[ch]) ? p[ch] : [[0, 0], [255, 255]];
     curveBox.replaceChildren(curveEditor(pts, (np, done) => {
-      p[curveCh] = np.length === 2 && np[0][0] === 0 && np[0][1] === 0 && np[1][0] === 255 && np[1][1] === 255 ? null : np;
-      if (done || true) render();
-    }, { color: { curve: '#e8eaed', curveR: '#ff6060', curveG: '#60d060', curveB: '#6080ff' }[curveCh] }));
+      p[ch] = np.length === 2 && np[0][0] === 0 && np[0][1] === 0 && np[1][0] === 255 && np[1][1] === 255 ? null : np.map((q) => [...q]);
+      render();
+      if (done) commit();
+    }, { color: { curve: '#e8eaed', curveR: '#ff6060', curveG: '#60d060', curveB: '#6080ff' }[ch] }));
   };
-  renderCurve();
   const curves = section('곡선', false, curveTabs, curveBox);
 
   // 세부
@@ -978,7 +1361,6 @@ export function cameraRawDialog(P, { params = null, onApply = null, smartIndex =
       return slider(`${mixTab}_${key}`, name, -100, 100, 0, 1, bg);
     }));
   };
-  mixPanel();
   const mix = section('혼합', false, mixBox);
 
   // 색상 그레이딩
@@ -1038,6 +1420,7 @@ export function cameraRawDialog(P, { params = null, onApply = null, smartIndex =
       const up = () => {
         c.removeEventListener('pointermove', mv);
         c.removeEventListener('pointerup', up);
+        commit();
       };
       c.addEventListener('pointermove', mv);
       c.addEventListener('pointerup', up);
@@ -1046,6 +1429,7 @@ export function cameraRawDialog(P, { params = null, onApply = null, smartIndex =
     c.addEventListener('dblclick', () => {
       set(sKey, 0);
       draw();
+      commit();
     });
     draw();
     c.redraw = draw;
@@ -1065,11 +1449,10 @@ export function cameraRawDialog(P, { params = null, onApply = null, smartIndex =
       slider('cgBlend', '혼합', 0, 100, 50),
       slider('cgBalance', '균형', -100, 100));
   };
-  renderCg();
   const grading = section('색상 그레이딩', false, cgTabs, cgBox);
 
   // 광학
-  const caChk = h('input', { type: 'checkbox', checked: !!p.removeCA });
+  const caChk = h('input', { type: 'checkbox' });
   caChk.addEventListener('change', () => {
     p.removeCA = caChk.checked;
     render();
@@ -1082,7 +1465,6 @@ export function cameraRawDialog(P, { params = null, onApply = null, smartIndex =
 
   // 효과
   const vigStyle = h('select', { 'aria-label': '비네팅 스타일' }, h('option', { value: 'highlight' }, '밝은 영역 우선'), h('option', { value: 'color' }, '색상 우선'), h('option', { value: 'paint' }, '페인트 오버레이'));
-  vigStyle.value = p.vigStyle || 'highlight';
   vigStyle.addEventListener('change', () => {
     p.vigStyle = vigStyle.value;
     render();
@@ -1101,67 +1483,202 @@ export function cameraRawDialog(P, { params = null, onApply = null, smartIndex =
     h('div.cr-sub', '녹색 기본 색상'), slider('calGreenH', '색조', -100, 100), slider('calGreenS', '채도', -100, 100),
     h('div.cr-sub', '파랑 기본 색상'), slider('calBlueH', '색조', -100, 100), slider('calBlueS', '채도', -100, 100));
 
-  // ---- view bar
-  const modeBtns = [['after', '이후'], ['sideBySide', '이전 | 이후 나란히'], ['split', '이전 | 이후 분할']].map(([id, t]) => {
-    const b = h('button.small', { type: 'button', onclick: () => { mode = id; syncBar(); paint(); } }, t);
-    b.dataset.id = id;
-    return b;
-  });
-  const zoomBtn = h('button.small', { type: 'button', title: '100% (실제 픽셀) 보기: 끌어서 옮기기' }, '100%');
-  zoomBtn.addEventListener('click', () => {
-    zoom100 = !zoom100;
-    if (zoom100) off = { x: Math.max(0, (fullW - 800) / 2), y: Math.max(0, (fullH - 500) / 2) };
-    syncBar();
-    render();
-  });
-  const syncBar = () => {
-    for (const b of modeBtns) b.classList.toggle('on', b.dataset.id === mode);
-    zoomBtn.classList.toggle('on', zoom100);
-  };
-  const resetBtn = h('button.small', { type: 'button', title: '모든 설정을 기본값으로' }, '기본값으로');
+  const resetBtn = h('button.small', { type: 'button', title: '편집 설정을 모두 기본값으로 (마스크는 그대로)' }, icon('reset', 14), ' 기본값으로');
   resetBtn.addEventListener('click', () => {
-    for (const [key, , , , def] of [...BASIC, ...EFFECTS_OLD]) p[key] = def;
-    Object.assign(p, structuredClone(CR_EXTRA));
+    const masks = p.masks;
+    Object.assign(p, crDefaults(), { masks });
+    syncAll();
+    render();
+    commit();
+  });
+
+  /** Every control from the settings (after undo, presets, 자동 or reset). */
+  const syncAll = () => {
     for (const [key, r] of rows) {
-      r.range.value = p[key];
-      r.num.value = p[key];
+      const v = p[key] ?? r.def;
+      r.range.value = v;
+      r.num.value = v;
     }
-    profSel.value = 'color';
-    caChk.checked = false;
-    vigStyle.value = 'highlight';
+    profSel.value = p.profile || 'color';
+    wbSel.value = p.temp || p.tint ? 'custom' : 'asShot';
+    caChk.checked = !!p.removeCA;
+    vigStyle.value = p.vigStyle || 'highlight';
     treatBtns();
     renderCurve();
-    render();
+    renderCg();
+    maskUi.refresh();
+  };
+
+  const editBox = h('div.cr-edit',
+    h('div.cr-top', autoBtn, bwBtn),
+    h('div.cr-line', h('span', '프로필'), profSel),
+    basic, curves, detail, mix, grading, optics, effects, calib, h('div.cr-line', resetBtn));
+
+  // ---- 마스킹 and 사전 설정
+  const ui = {
+    p, render, commit, before, fullW, fullH, sampleAt, toScreen,
+    repaint: () => paint(),
+  };
+  const maskUi = maskingPanel(ui);
+  const thumbBase = (() => {
+    const s = Math.min(1, 120 / Math.max(fullW, fullH));
+    const c = mk(Math.max(1, Math.round(fullW * s)), Math.max(1, Math.round(fullH * s)));
+    const g = c.getContext('2d');
+    g.imageSmoothingQuality = 'high';
+    g.drawImage(before, 0, 0, c.width, c.height);
+    return { c, s };
+  })();
+  const presetUi = presetsPanel({
+    p,
+    defs: DEF,
+    commit,
+    apply: (vals) => {
+      for (const [k, v] of Object.entries(vals)) {
+        const r = rows.get(k);
+        p[k] = r && typeof v === 'number' ? clamp(v, r.min, r.max) : v;
+      }
+      syncAll();
+      render();
+    },
+    thumb: (vals) => cameraRawCanvas(thumbBase.c, { ...DEF, ...vals }, thumbBase.s),
+    current: () => {
+      const out = {};
+      for (const [k, v] of Object.entries(p)) if (k !== 'masks' && k !== 'maskSize' && !k.startsWith('_') && JSON.stringify(v) !== JSON.stringify(DEF[k])) out[k] = structuredClone(v);
+      return out;
+    },
   });
-  syncBar();
+  const maskBox = h('div', maskUi.el);
+  const presetBox = h('div', presetUi.el);
+  const ptitle = h('div.cr-ptitle');
+
+  // ---- the toolbar on the right (like Camera Raw's)
+  const toolBtn = (id, ic, title, fn) => {
+    const b = h('button.ibtn', { type: 'button', title, 'aria-label': title, dataset: { id } }, icon(ic, 18));
+    b.addEventListener('click', fn);
+    return b;
+  };
+  const showPanel = (id) => {
+    panel = id;
+    tool = null;
+    wbPick = false;
+    wbBtn.classList.remove('on');
+    ptitle.replaceChildren(icon({ edit: 'sliders', mask: 'mask', presets: 'presets' }[id], 16), PANELS[id]);
+    editBox.hidden = id !== 'edit';
+    maskBox.hidden = id !== 'mask';
+    presetBox.hidden = id !== 'presets';
+    if (id === 'mask') maskUi.refresh();
+    syncTools();
+    updCursor();
+    render();
+  };
+  const tEdit = toolBtn('edit', 'sliders', '편집 (E)', () => showPanel('edit'));
+  const tMask = toolBtn('mask', 'mask', '마스킹 (Shift+W)', () => showPanel('mask'));
+  const tPre = toolBtn('presets', 'presets', '사전 설정 (Shift+P)', () => showPanel('presets'));
+  const tZoom = toolBtn('zoom', 'zoom', '확대/축소 도구 (Z): 누르면 확대, Alt+클릭은 축소, 두 번 누르면 100%', () => setTool('zoom'));
+  tZoom.addEventListener('dblclick', () => setZoom(1));
+  const tHand = toolBtn('hand', 'hand', '손 도구 (H): 끌어서 옮기기, 두 번 누르면 맞춤 보기 (Space를 누르는 동안에도 손 도구)', () => setTool('hand'));
+  tHand.addEventListener('dblclick', () => setZoom(null));
+  const syncTools = () => {
+    for (const [b, on] of [[tEdit, panel === 'edit'], [tMask, panel === 'mask'], [tPre, panel === 'presets'], [tZoom, tool === 'zoom'], [tHand, tool === 'hand']]) b.classList.toggle('on', on);
+  };
+  const tools = h('div.cr-tools', { role: 'toolbar', 'aria-label': 'Camera Raw 도구' }, tEdit, tMask, tPre, h('div.cr-tools-gap'), tZoom, tHand);
+
+  // ---- the bar under the picture: zoom, before / after
+  const zOut = h('button.small', { type: 'button', title: '축소 (Ctrl+-)', 'aria-label': '축소' }, icon('zoomOut', 14));
+  zOut.addEventListener('click', () => stepZoom(-1));
+  const zIn = h('button.small', { type: 'button', title: '확대 (Ctrl++)', 'aria-label': '확대' }, icon('zoomIn', 14));
+  zIn.addEventListener('click', () => stepZoom(1));
+  const viewSel = h('select', { 'aria-label': '이전/이후 보기', title: '이전/이후 보기 (Q로 차례로 바꾸기)' }, ...VIEWS.map(([v, t]) => h('option', { value: v }, t)));
+  viewSel.addEventListener('change', () => {
+    viewMode = viewSel.value;
+    showBefore = false;
+    syncBar();
+    paint();
+    scheduleCrop();
+  });
+  const cycleBtn = h('button.small', { type: 'button', title: '이전/이후 보기 전환 (Q)', 'aria-label': '이전/이후 보기 전환' }, icon('compare', 14));
+  cycleBtn.addEventListener('click', () => cycleView());
+  const prevBtn = h('button.small', { type: 'button', title: '원본 보기 켜기/끄기 (P)' }, '원본 보기');
+  prevBtn.addEventListener('click', () => {
+    showBefore = !showBefore;
+    syncBar();
+    paint();
+  });
+  const cycleView = () => {
+    const order = VIEWS.map((v) => v[0]);
+    viewMode = order[(order.indexOf(viewMode) + 1) % order.length];
+    showBefore = false;
+    syncBar();
+    paint();
+    scheduleCrop();
+  };
+  const syncBar = () => {
+    viewSel.value = viewMode;
+    prevBtn.classList.toggle('on', showBefore);
+  };
 
   const onKey = (e) => {
-    const tag = e.target?.tagName;
-    if (tag === 'INPUT' && e.target.type !== 'range' && e.target.type !== 'checkbox') return;
-    if (tag === 'SELECT' || tag === 'TEXTAREA') return;
-    // Q: cycle before / after views, P: preview on / off, I: white balance tool, Z: 100%
-    if (e.code === 'KeyQ' && !e.ctrlKey && !e.metaKey) {
-      const order = ['after', 'sideBySide', 'split'];
-      mode = order[(order.indexOf(mode) + 1) % order.length];
-      syncBar();
-      paint();
-    } else if (e.code === 'KeyP' && !e.ctrlKey && !e.metaKey) {
-      mode = mode === 'before' ? 'after' : 'before';
-      syncBar();
-      paint();
-    } else if (e.code === 'KeyI' && !e.ctrlKey && !e.metaKey) wbBtn.click();
-    else if (e.code === 'KeyZ' && !e.ctrlKey && !e.metaKey) zoomBtn.click();
+    if (!view.isConnected) return;
+    // another window on top (a name prompt): leave the keys to it
+    const tops = document.querySelectorAll('.modal-backdrop');
+    if (tops.length && !tops[tops.length - 1].contains(view)) return;
+    const t = e.target;
+    const tag = t?.tagName;
+    if ((tag === 'INPUT' && !['range', 'checkbox', 'color', 'radio'].includes(t.type)) || tag === 'TEXTAREA' || t?.isContentEditable) return;
+    // a focused list keeps its own arrow keys
+    if (tag === 'SELECT' && /^(Arrow|Enter|Home|End|Page)/.test(e.key)) return;
+    const mod = e.ctrlKey || e.metaKey;
+    if (e.code === 'Space' && !mod) {
+      if (!space) {
+        space = true;
+        updCursor();
+      }
+    } else if (mod && e.code === 'KeyZ') (e.shiftKey ? redo : undo)();
+    else if (mod && e.code === 'KeyY') redo();
+    else if (mod && (e.key === '=' || e.key === '+')) stepZoom(1);
+    else if (mod && e.key === '-') stepZoom(-1);
+    else if (mod && e.code === 'Digit0') setZoom(e.altKey ? 1 : null);
+    else if (mod) return;
+    else if (panel === 'mask' && maskUi.key(e)) { /* a masking key */ }
+    else if (e.code === 'KeyW' && e.shiftKey) showPanel('mask');
+    else if (e.code === 'KeyP' && e.shiftKey) showPanel('presets');
+    else if (e.code === 'KeyE' && !e.shiftKey && !e.altKey) showPanel('edit');
+    else if (e.code === 'KeyQ' && !e.shiftKey) cycleView();
+    else if (e.code === 'KeyP' && !e.altKey) prevBtn.click();
+    else if (e.code === 'KeyI' && !e.shiftKey) {
+      if (panel !== 'edit') showPanel('edit');
+      wbBtn.click();
+    } else if (e.code === 'KeyZ' && !e.shiftKey) setTool('zoom');
+    else if (e.code === 'KeyH' && !e.shiftKey) setTool('hand');
     else return;
     e.preventDefault();
     e.stopPropagation();
   };
+  const onKeyUp = (e) => {
+    if (e.code === 'Space' && space) {
+      space = false;
+      updCursor();
+    }
+  };
   window.addEventListener('keydown', onKey, true);
+  window.addEventListener('keyup', onKeyUp, true);
 
   const apply = () => {
     const out = { ...p };
     // keep only what differs from the defaults (smaller actions and files)
     for (const [key, def] of Object.entries(CR_EXTRA)) if (JSON.stringify(out[key]) === JSON.stringify(def)) delete out[key];
+    const masks = (p.masks || []).filter((m) => m.comps?.length);
+    if (masks.length) {
+      out.masks = structuredClone(masks);
+      out.maskSize = sizeKey;
+    } else {
+      delete out.masks;
+      delete out.maskSize;
+    }
+    // masks belong to this picture: the next Camera Raw starts from the settings without them
     lastParams = structuredClone(out);
+    delete lastParams.masks;
+    delete lastParams.maskSize;
     if (onApply) {
       onApply(out);
       return;
@@ -1187,18 +1704,30 @@ export function cameraRawDialog(P, { params = null, onApply = null, smartIndex =
     }, 30);
   };
 
+  const side = h('div.cr-side', hist, ptitle, editBox, maskBox, presetBox);
+  // any slider or option let go: one undo step
+  side.addEventListener('change', () => commit());
   openModal({
     title: 'Camera Raw 필터',
-    width: 'min(1320px, 98vw)',
+    width: 'min(1400px, 98vw)',
     peek: false,
     body: [h('div.cr',
-      h('div.cr-stage', view, h('div.cr-bar', ...modeBtns, zoomBtn, h('span.note', 'Q: 이전/이후 보기 · P: 미리 보기 · I: 흰색 균형 도구 · Z: 100%'), busy)),
-      h('div.cr-side', hist, basic, curves, detail, mix, grading, optics, effects, calib, h('div.cr-line', resetBtn)))],
+      h('div.cr-stage', view, h('div.cr-bar', zOut, zoomSel, zIn, busy, h('span.grow'), cycleBtn, viewSel, prevBtn)),
+      side, tools)],
     buttons: [{ label: '취소' }, { label: '확인', primary: true, action: apply }],
     onClose: () => {
       clearTimeout(timer);
+      clearTimeout(cropTimer);
+      ro.disconnect();
       window.removeEventListener('keydown', onKey, true);
+      window.removeEventListener('keyup', onKeyUp, true);
     },
   });
-  render();
+  syncAll();
+  syncBar();
+  showPanel('edit');
+  syncZoomSel();
+  // the picture has the keyboard first (not the zoom list)
+  disp.tabIndex = -1;
+  setTimeout(() => disp.focus({ preventScroll: true }), 0);
 }

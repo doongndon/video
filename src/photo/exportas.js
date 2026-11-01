@@ -200,7 +200,11 @@ export function installExportAs(P) {
   C.exportAs = () => {
     if (!need()) return;
     const doc = P.doc;
-    const src = flat();
+    // with artboards (artboards.js): one artboard is previewed, and all of them (one file each) or
+    // the chosen one are exported, like Photoshop
+    const pics = P.artboardPictures?.(doc) || [];
+    let src = pics.length ? pics[0].canvas : flat();
+    const abSel = pics.length ? h('select', { 'aria-label': '대지' }, h('option', { value: 'all' }, `모든 대지 (${pics.length}개)`), pics.map((p, i) => h('option', { value: String(i) }, p.name))) : null;
     const prev = loadPref('photo.exportAs', {});
     const fmt = h('select', { 'aria-label': '형식' }, EXPORT_FORMATS.map(([v, n]) => h('option', { value: v, selected: v === (prev.format || 'png') }, n)));
     const transp = h('input', { type: 'checkbox', checked: prev.transparency !== false });
@@ -208,12 +212,12 @@ export function installExportAs(P) {
     const quality = h('input', { type: 'range', min: 1, max: 100, value: prev.quality || 90, 'aria-label': '품질' });
     const qv = h('span.ph-hint', `${quality.value}%`);
     const matte = h('input', { type: 'color', value: prev.matte || '#ffffff', 'aria-label': '매트 색' });
-    const wIn = h('input.ph-num', { type: 'number', min: 1, max: 30000, value: doc.width, 'aria-label': '폭' });
-    const hIn = h('input.ph-num', { type: 'number', min: 1, max: 30000, value: doc.height, 'aria-label': '높이' });
+    const wIn = h('input.ph-num', { type: 'number', min: 1, max: 30000, value: src.width, 'aria-label': '폭' });
+    const hIn = h('input.ph-num', { type: 'number', min: 1, max: 30000, value: src.height, 'aria-label': '높이' });
     const pct = h('select', { 'aria-label': '비율' }, [25, 33.33, 50, 66.67, 75, 100, 150, 200, 300, 400].map((v) => h('option', { value: v, selected: v === 100 }, `${Math.round(v)}%`)), h('option', { value: 'custom' }, '사용자 정의'));
     const method = h('select', { 'aria-label': '리샘플링' }, RESAMPLE.map(([v, n]) => h('option', { value: v, selected: v === (prev.method || 'auto') }, n)));
-    const cwIn = h('input.ph-num', { type: 'number', min: 1, max: 30000, value: doc.width, 'aria-label': '캔버스 폭' });
-    const chIn = h('input.ph-num', { type: 'number', min: 1, max: 30000, value: doc.height, 'aria-label': '캔버스 높이' });
+    const cwIn = h('input.ph-num', { type: 'number', min: 1, max: 30000, value: src.width, 'aria-label': '캔버스 폭' });
+    const chIn = h('input.ph-num', { type: 'number', min: 1, max: 30000, value: src.height, 'aria-label': '캔버스 높이' });
     const meta = h('select', { 'aria-label': '메타데이터' }, h('option', { value: 'none' }, '없음'), h('option', { value: 'info' }, '저작권 및 연락처 정보'));
     meta.value = prev.meta === 'none' ? 'none' : 'info';
     const extra = [0.5, 2, 3].map((k) => ({ k, box: h('input', { type: 'checkbox', checked: (prev.extra || []).includes(k) }) }));
@@ -223,13 +227,26 @@ export function installExportAs(P) {
     const info = h('div.ph-xpinfo', '');
     const busy = h('span.ph-xpbusy', { hidden: true }, '계산 중…');
     let lockCanvas = true;
-    const ratio = doc.width / doc.height;
+    let ratio = src.width / src.height;
     const sizeFromPct = () => {
       if (pct.value === 'custom') return;
       const k = +pct.value / 100;
-      wIn.value = Math.max(1, Math.round(doc.width * k));
-      hIn.value = Math.max(1, Math.round(doc.height * k));
+      wIn.value = Math.max(1, Math.round(src.width * k));
+      hIn.value = Math.max(1, Math.round(src.height * k));
     };
+    abSel?.addEventListener('change', () => {
+      // a custom size keeps its scale on the newly shown artboard
+      const k = +wIn.value / src.width;
+      src = pics[abSel.value === 'all' ? 0 : +abSel.value].canvas;
+      ratio = src.width / src.height;
+      if (pct.value === 'custom') {
+        wIn.value = Math.max(1, Math.round(src.width * k));
+        hIn.value = Math.max(1, Math.round(src.height * k));
+      } else sizeFromPct();
+      lockCanvas = true;
+      canvasFollow();
+      refresh();
+    });
     const canvasFollow = () => {
       if (!lockCanvas) return;
       cwIn.value = wIn.value;
@@ -324,6 +341,7 @@ export function installExportAs(P) {
     quality.addEventListener('change', refresh);
     const metaNote = h('div.note', docMeta(doc) ? '파일 ▸ 파일 정보의 제목·만든 사람·저작권을 파일에 넣습니다 (PNG·JPG).' : '파일 ▸ 파일 정보에 저작권 등을 적어 두면 파일에 함께 넣습니다 (PNG·JPG).');
     const side = h('div.ph-xpside',
+      ...(abSel ? [h('div.ph-sub', '대지'), formRow('내보낼 대지', abSel)] : []),
       h('div.ph-sub', '파일 설정'), formRow('형식', fmt), rowTransp, rowSmall, rowQ, rowMatte,
       h('div.ph-sub', '이미지 크기'), formRow('폭 (px)', wIn), formRow('높이 (px)', hIn), formRow('비율', pct), formRow('리샘플링', method),
       h('div.ph-sub', '캔버스 크기'), formRow('폭 (px)', cwIn), formRow('높이 (px)', chIn), h('div.inline', resetCanvas),
@@ -340,7 +358,28 @@ export function installExportAs(P) {
           const s = settings();
           savePref('photo.exportAs', { format: s.format, transparency: s.transparency, small: s.small, quality: s.quality, matte: s.matte, method: s.method, meta: s.meta, extra: extra.filter((x) => x.box.checked).map((x) => x.k) });
           try {
-            const base = extName(doc);
+            if (abSel?.value === 'all') {
+              // every artboard at the same scale, a file each (named after the artboard)
+              const k0 = s.W / src.width;
+              const keep = src;
+              let n = 0;
+              try {
+                for (const pic of pics) {
+                  src = pic.canvas;
+                  for (const k of [1, ...extra.filter((x) => x.box.checked).map((x) => x.k)]) {
+                    const W = Math.max(1, Math.round(src.width * k0));
+                    const H = Math.max(1, Math.round(src.height * k0));
+                    const r = await encode(s, build({ ...s, W, H, CW: W, CH: H }, k));
+                    if (await downloadBlob(r.blob, `${extName(doc)}_${pic.name.replace(/[\\/:*?"<>|]/g, '_')}${k === 1 ? '' : `@${k}x`}.${r.ext}`)) n++;
+                  }
+                }
+              } finally {
+                src = keep;
+              }
+              toast(`대지 ${pics.length}개를 ${n}개 파일로 내보냈습니다`);
+              return undefined;
+            }
+            const base = abSel ? `${extName(doc)}_${pics[+abSel.value].name.replace(/[\\/:*?"<>|]/g, '_')}` : extName(doc);
             const r = await encode(s, build(s));
             if (r.note) toast(r.note);
             if (!(await downloadBlob(r.blob, `${base}.${r.ext}`))) return false;
@@ -426,6 +465,7 @@ export function installExportAs(P) {
       '-',
       { label: '웹용으로 저장 (레거시)…', key: `${mod}Alt+Shift+S`, disabled: no || !C.saveForWeb, action: () => C.saveForWeb() },
       '-',
+      { label: '대지를 파일로…', disabled: no || !C.artboardsToFiles || !P.doc.layers.some((l) => l.artboard), action: () => C.artboardsToFiles() },
       { label: '레이어를 파일로…', disabled: no || !C.exportLayers, action: () => C.exportLayers() },
       { label: '레이어 구성요소를 파일로…', disabled: no || !P.doc?.comps?.length, action: () => C.compsToFiles() },
       '-',
