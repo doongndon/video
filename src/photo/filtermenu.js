@@ -153,5 +153,4 @@ export function installFilters(P) {
       return items;
     });
   }];
-
 }

@@ -584,11 +584,13 @@ export function createPhotoEditor(root) {
     const r = stage.getBoundingClientRect();
     const dpr = window.devicePixelRatio || 1;
     const rot = P.doc?.view?.rot || 0;
+    // View ▸ Flip Horizontal mirrors the view (not the picture)
+    const flip = !!P.doc?.view?.flip;
     const D = rot ? Math.ceil(Math.hypot(r.width, r.height)) + 2 : 0;
     const cw = rot ? D : r.width;
     const ch = rot ? D : r.height;
     off = { x: rot ? (D - r.width) / 2 : 0, y: rot ? (D - r.height) / 2 : 0 };
-    const key = rot ? `${rot}|${D}|${r.width}x${r.height}` : '';
+    const key = rot || flip ? `${rot}|${flip}|${D}|${r.width}x${r.height}` : '';
     for (const c of [view, over]) {
       const w = Math.max(1, Math.round(cw * dpr));
       const hh = Math.max(1, Math.round(ch * dpr));
@@ -597,8 +599,8 @@ export function createPhotoEditor(root) {
         c.height = hh;
       }
       if (key !== cssKey) {
-        Object.assign(c.style, rot
-          ? { left: `${-off.x}px`, top: `${-off.y}px`, width: `${D}px`, height: `${D}px`, transform: `rotate(${rot}deg)`, transformOrigin: '50% 50%' }
+        Object.assign(c.style, rot || flip
+          ? { left: `${-off.x}px`, top: `${-off.y}px`, width: `${cw}px`, height: `${ch}px`, transform: `${rot ? `rotate(${rot}deg)` : ''}${flip ? ' scaleX(-1)' : ''}`.trim(), transformOrigin: '50% 50%' }
           : { left: '', top: '', width: '', height: '', transform: '', transformOrigin: '' });
       }
     }
@@ -620,14 +622,16 @@ export function createPhotoEditor(root) {
       lx = cx + dx * Math.cos(a) - dy * Math.sin(a);
       ly = cy + dx * Math.sin(a) + dy * Math.cos(a);
     }
+    if (P.doc?.view?.flip) lx = r.width - lx;
     return [lx, ly];
   };
   /** A movement on screen turned into the stage's own coordinates. */
   const logicalDelta = (dx, dy) => {
     const rot = P.doc?.view?.rot || 0;
-    if (!rot) return [dx, dy];
+    const k = P.doc?.view?.flip ? -1 : 1;
+    if (!rot) return [k * dx, dy];
     const a = (-rot * Math.PI) / 180;
-    return [dx * Math.cos(a) - dy * Math.sin(a), dx * Math.sin(a) + dy * Math.cos(a)];
+    return [k * (dx * Math.cos(a) - dy * Math.sin(a)), dx * Math.sin(a) + dy * Math.cos(a)];
   };
   P.logicalPoint = logical;
 
@@ -846,7 +850,7 @@ export function createPhotoEditor(root) {
     const bh = Math.abs(doc.width * Math.sin(a)) + Math.abs(doc.height * Math.cos(a));
     const z = Math.max(0.01, Math.min(1, (r.width - pad) / bw, (r.height - pad) / bh));
     // auto: the view follows the window (rotating the phone) until the user zooms or pans
-    doc.view = { zoom: z, x: (r.width - doc.width * z) / 2, y: (r.height - doc.height * z) / 2, fitted: true, auto: true, rot };
+    doc.view = { zoom: z, x: (r.width - doc.width * z) / 2, y: (r.height - doc.height * z) / 2, fitted: true, auto: true, rot, flip: !!doc.view?.flip };
     P.viewChanged();
   };
   /** Called when the photo editor comes on screen. */
@@ -864,10 +868,22 @@ export function createPhotoEditor(root) {
     const p = P.toDoc(px, py);
     const [lx, ly] = logical(px, py);
     const zoom = clamp(z, 0.01, 64);
-    doc.view = { zoom, x: lx - p.x * zoom, y: ly - p.y * zoom, fitted: true, rot: doc.view.rot || 0 };
+    doc.view = { zoom, x: lx - p.x * zoom, y: ly - p.y * zoom, fitted: true, rot: doc.view.rot || 0, flip: !!doc.view.flip };
     P.viewChanged();
   };
   P.zoomAt = (k, cx, cy) => P.setZoom(P.view.zoom * k, cx, cy);
+  /** View ▸ Flip Horizontal: mirror the view to check a drawing (the picture stays as it is). */
+  P.setViewFlip = (on = !P.doc?.view?.flip) => {
+    const doc = P.doc;
+    if (!doc) return;
+    // the middle of the window stays on the same spot of the picture
+    const r = stage.getBoundingClientRect();
+    const c = P.toDoc(r.left + r.width / 2, r.top + r.height / 2);
+    doc.view = { ...doc.view, flip: !!on };
+    const [lx] = logical(r.left + r.width / 2, r.top + r.height / 2);
+    doc.view.x = lx - c.x * doc.view.zoom;
+    P.viewChanged();
+  };
   P.zoomStep = (dir) => {
     const z = P.view.zoom;
     const next = dir > 0 ? ZOOMS.find((x) => x > z * 1.001) : [...ZOOMS].reverse().find((x) => x < z / 1.001);
@@ -1042,8 +1058,11 @@ export function createPhotoEditor(root) {
     const t = P.editingText;
     if (!t) return;
     const b = textBox(t.layer);
-    const [x, y] = P.toScreen(t.layer.x, t.layer.y + b.h);
+    const flip = !!P.doc?.view?.flip;
+    let [x, y] = P.toScreen(t.layer.x + (flip ? b.w : 0), t.layer.y + b.h);
     const r = stage.getBoundingClientRect();
+    // a mirrored view (View ▸ Flip Horizontal): the box's left edge is the layer's right one
+    if (flip) x = r.width - x;
     textBox2.style.left = `${clamp(r.left + x, 8, window.innerWidth - 300)}px`;
     textBox2.style.top = `${clamp(r.top + y + 8, 8, window.innerHeight - 180)}px`;
   }
@@ -1121,7 +1140,7 @@ export function createPhotoEditor(root) {
   P.textBox = (l) => textBox(l);
   P.pathBounds = (sps) => PT.pathBounds(sps);
   /** Transform a layer by a doc-space affine M (Transform Again, actions). Raw: inside a run. */
-  P.transformLayerBy = (l, M) => {
+  P.transformLayerBy = (l, M, inGroup = false) => {
     const doc = P.doc;
     if (l.kind === 'raster' && l.canvas) {
       const cs = [[l.x, l.y], [l.x + l.canvas.width, l.y], [l.x + l.canvas.width, l.y + l.canvas.height], [l.x, l.y + l.canvas.height]].map((q) => applyM(M, q));
@@ -1152,10 +1171,11 @@ export function createPhotoEditor(root) {
       const L2 = textBox(l);
       l.x = Math.round(cx - L2.w / 2);
       l.y = Math.round(cy - L2.h / 2);
-    } else if (l.kind === 'group') {
-      for (const d of doc.descendants(l.id)) if (d.kind !== 'group' && d.kind !== 'adjust' && d.kind !== 'fill') P.transformLayerBy(d, M);
+    } else if (l.kind === 'group' && !inGroup) {
+      // everything inside comes along (groups inside only turn their masks: their layers are listed too)
+      for (const d of doc.descendants(l.id)) P.transformLayerBy(d, M, true);
     }
-    if (l.mask && l.mask.linked !== false && l.kind !== 'group') {
+    if (l.mask && l.mask.linked !== false) {
       const mc = makeCanvas(doc.width, doc.height);
       const mg = mc.getContext('2d');
       // outside the old mask stays as the mask's edge says (white masks show, black hide)
@@ -1291,7 +1311,7 @@ export function createPhotoEditor(root) {
       const [nx, ny] = logical(mx, my);
       const docX = (sx - panStart.vx) / panStart.zoom;
       const docY = (sy - panStart.vy) / panStart.zoom;
-      P.doc.view = { zoom, x: nx - docX * zoom, y: ny - docY * zoom, fitted: true, rot: P.doc.view.rot || 0 };
+      P.doc.view = { zoom, x: nx - docX * zoom, y: ny - docY * zoom, fitted: true, rot: P.doc.view.rot || 0, flip: !!P.doc.view.flip };
       P.viewChanged();
       return;
     }
@@ -1463,7 +1483,8 @@ export function createPhotoEditor(root) {
     // a tool key held down repeats: the tool stays (Shift would otherwise race through the family)
     if (e.repeat && !mod && !alt && /^Key[A-Z]$/.test(k)) return done();
     const C = P.cmd;
-    const tool = (letter) => cycleKey(letter, sh);
+    // (Alt+letter is not a tool key in Photoshop)
+    const tool = (letter) => (alt ? null : cycleKey(letter, sh));
     const filter = (id) => (FILTERS[id] ? D.filterDialog(P, id) : null);
     const map = {
       KeyZ: () => (mod ? (alt && !sh ? C.toggleLastState() : sh ? P.redo() : P.undo()) : tool('Z')),

@@ -366,10 +366,10 @@ export function layerStyleDialog(P, start = 'blending') {
   function select(key, enable = false) {
     cur = key;
     if (enable && key !== 'styles' && key !== 'blending') {
-      if (key === 'bevelContour') {
+      if (key === 'bevelContour' || key === 'bevelTexture') {
         const b = ensure('bevel');
         b.enabled = true;
-        b.contourOn = true;
+        b[key === 'bevelContour' ? 'contourOn' : 'textureOn'] = true;
       } else ensure(key).enabled = true;
       changed();
     }
@@ -433,6 +433,15 @@ export function layerStyleDialog(P, start = 'blending') {
               changed();
             });
             rows.push(h(`div.pls-item.sub${cur === 'bevelContour' ? '.on' : ''}`, { role: 'button', tabindex: 0, onclick: () => select('bevelContour', true) }, cb, h('span', '윤곽선')));
+            const tb = h('input', { type: 'checkbox', checked: !!(b?.enabled && b.textureOn), 'aria-label': '텍스처 켜기' });
+            tb.addEventListener('click', (ev) => {
+              ev.stopPropagation();
+              const bb = ensure('bevel');
+              bb.textureOn = tb.checked;
+              if (tb.checked) bb.enabled = true;
+              changed();
+            });
+            rows.push(h(`div.pls-item.sub${cur === 'bevelTexture' ? '.on' : ''}`, { role: 'button', tabindex: 0, onclick: () => select('bevelTexture', true) }, tb, h('span', '텍스처')));
           }
         });
       }
@@ -441,7 +450,7 @@ export function layerStyleDialog(P, start = 'blending') {
     revealOn();
     // move / delete the selected effect
     const k = baseKey(cur);
-    const isFx = FX_LIST.includes(k) && cur !== 'bevelContour';
+    const isFx = FX_LIST.includes(k) && cur !== 'bevelContour' && cur !== 'bevelTexture';
     const keys = isFx ? instanceKeys(st.fx, k) : [];
     const at = keys.indexOf(cur);
     const moveBy = (d) => {
@@ -536,6 +545,7 @@ export function layerStyleDialog(P, start = 'blending') {
     if (cur === 'styles') return paneStyles();
     if (cur === 'blending') return paneBlending();
     if (cur === 'bevelContour') return paneBevelContour();
+    if (cur === 'bevelTexture') return paneBevelTexture();
     const k = baseKey(cur);
     const e = ensure(cur);
     const title = h('h4', FX_NAMES[k]);
@@ -668,6 +678,18 @@ export function layerStyleDialog(P, start = 'blending') {
       contourRow('윤곽선', e, 'profile', changed),
       rangeRow('범위', e.profileRange ?? 50, 1, 100, '%', (v) => { e.profileRange = v; changed(); }),
       h('div.pls-note', '경사 면의 모양(굴곡)을 바꿉니다. 왼쪽 목록의 "윤곽선"을 켜야 적용됩니다.')));
+  }
+
+  function paneBevelTexture() {
+    const e = ensure('bevel');
+    pane.replaceChildren(h('h4', '텍스처'), fs('요소',
+      selectRow('패턴', listPatterns().map((p) => [p.id, p.name]), e.texPattern || 'checker', (v) => { e.texPattern = v; changed(); }),
+      rangeRow('비율', e.texScale ?? 100, 1, 1000, '%', (v) => { e.texScale = v; changed(); }),
+      rangeRow('깊이', e.texDepth ?? 100, -1000, 1000, '%', (v) => { e.texDepth = v; changed(); }),
+      h('div.pls-inline',
+        check('반전', e.texInvert, (v) => { e.texInvert = v; changed(); }),
+        check('레이어에 연결', e.texLink !== false, (v) => { e.texLink = v; changed(); }, '켜면 레이어를 옮길 때 텍스처도 함께 움직입니다')),
+      h('div.pls-note', '패턴의 밝은 곳은 솟아오르고 어두운 곳은 들어가 보입니다. 왼쪽 목록의 "텍스처"를 켜야 적용됩니다.')));
   }
 
   function paneStyles() {

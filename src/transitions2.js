@@ -85,9 +85,11 @@ TRANSITION_PLANS.bandSlide = (p, dir, W, H) => {
   const n = 7;
   const e = smooth(p);
   const vertical = dir === 'up' || dir === 'down';
+  // the opposite direction starts the alternation from the other side
+  const flip = dir === 'right' || dir === 'down' ? -1 : 1;
   const bands = [];
   for (let i = 0; i < n; i++) {
-    const s = i % 2 ? 1 : -1;
+    const s = (i % 2 ? 1 : -1) * flip;
     if (vertical) {
       const x = (i * W) / n;
       bands.push({ clipPath: (c) => c.rect(x, 0, W / n + 0.5, H), offsetY: s * (1 - e) * H });
@@ -104,12 +106,13 @@ TRANSITION_PLANS.bandSlide = (p, dir, W, H) => {
 TRANSITION_PLANS.bandWipe = (p, dir, W, H) => {
   const n = 7;
   const vertical = dir === 'up' || dir === 'down';
+  const flip = dir === 'right' || dir === 'down';
   return {
     a: {},
     b: {
       clipPath: (c) => {
         for (let i = 0; i < n; i++) {
-          const fwd = i % 2 === 0;
+          const fwd = (i % 2 === 0) !== flip;
           if (vertical) {
             const x = (i * W) / n;
             c.rect(x, fwd ? 0 : H * (1 - p), W / n + 0.5, H * p);

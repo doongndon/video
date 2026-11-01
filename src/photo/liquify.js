@@ -548,6 +548,8 @@ export function liquifyDialog(P) {
     over.style.cursor = id === 'face' ? 'crosshair' : '';
     brushBox.hidden = id === 'face';
     faceNote.hidden = id !== 'face';
+    // the face tool works with the Face-Aware Liquify sliders: show them
+    if (id === 'face' && !faceBox.open) faceBox.open = true;
     drawCursor(null);
   };
   const toolName = h('div.lq-toolname');

@@ -132,6 +132,19 @@ export function installViewExtras(P, { stage }) {
         g.stroke();
       }
     }
+    if (drag?.kind === 'origin' && drag.live) {
+      // the zero point being dragged out of the rulers' corner
+      const [ox, oy] = P.toScreen(drag.live.x, drag.live.y);
+      g.strokeStyle = vx.guideColor;
+      g.setLineDash([4, 3]);
+      g.beginPath();
+      g.moveTo(Math.round(ox) + 0.5, 0);
+      g.lineTo(Math.round(ox) + 0.5, H);
+      g.moveTo(0, Math.round(oy) + 0.5);
+      g.lineTo(W, Math.round(oy) + 0.5);
+      g.stroke();
+      g.setLineDash([]);
+    }
     if (snapMark) {
       g.strokeStyle = '#ff3fb4';
       g.setLineDash([3, 3]);
@@ -173,17 +186,29 @@ export function installViewExtras(P, { stage }) {
         }
         return out;
       };
-      for (const [sx, major, u] of ticks('x', W, v.x)) {
+      // measured from the ruler origin (dragged out of the rulers' corner)
+      const o = doc.rulerOrigin || { x: 0, y: 0 };
+      for (const [sx, major, u] of ticks('x', W, v.x + o.x * v.zoom)) {
         g.moveTo(sx, RULER);
         g.lineTo(sx, major ? 2 : RULER - 5);
-        if (major) g.fillText(fmtNum(u), sx + 2, 2);
+        if (major && v.flip) {
+          // a mirrored view (View ▸ Flip Horizontal): the numbers still read the right way
+          g.save();
+          g.translate(sx - 2, 2);
+          g.scale(-1, 1);
+          g.fillText(fmtNum(u), 0, 0);
+          g.restore();
+        } else if (major) g.fillText(fmtNum(u), sx + 2, 2);
       }
-      for (const [sy, major, u] of ticks('y', H, v.y)) {
+      for (const [sy, major, u] of ticks('y', H, v.y + o.y * v.zoom)) {
         g.moveTo(RULER, sy);
         g.lineTo(major ? 2 : RULER - 5, sy);
         if (major) {
           g.save();
-          g.translate(2, sy + 2);
+          if (v.flip) {
+            g.translate(RULER - 2, sy + 2);
+            g.scale(-1, 1);
+          } else g.translate(2, sy + 2);
           g.rotate(Math.PI / 2);
           g.fillText(fmtNum(u), 0, -10);
           g.restore();
@@ -376,7 +401,11 @@ export function installViewExtras(P, { stage }) {
     if (!doc) return false;
     const q = local(e);
     if (vx.rulers && (q.y < RULER || q.x < RULER)) {
-      if (q.y < RULER && q.x < RULER) return true;
+      if (q.y < RULER && q.x < RULER) {
+        // the corner: drag the rulers' zero point (Photoshop)
+        drag = { kind: 'origin', live: null };
+        return true;
+      }
       if (!vx.guides) {
         vx.guides = true;
         save();
@@ -398,8 +427,27 @@ export function installViewExtras(P, { stage }) {
     }
     return false;
   };
+  /** A point snapped like a guide: Shift onto ruler ticks, else (snap on) onto edges, centre and guides. */
+  const snapAxis = (pos, axis, e) => {
+    if (e.shiftKey) {
+      const k = unitScale(axis);
+      const t = rulerTicks(P.doc.view.zoom / k);
+      return (Math.round((pos * k) / t.minor) * t.minor) / k;
+    }
+    if (!vx.snap) return Math.round(pos);
+    const tol = 8 / P.doc.view.zoom;
+    const lim = axis === 'x' ? P.doc.width : P.doc.height;
+    for (const c of [0, lim / 2, lim, ...(vx.guides ? P.doc.guides.filter((g) => g.axis === axis).map((g) => g.pos) : [])]) if (Math.abs(pos - c) <= tol) return c;
+    return Math.round(pos);
+  };
   P.viewExtrasMove = (e, p) => {
     if (!drag) return;
+    if (drag.kind === 'origin') {
+      drag.live = { x: snapAxis(p.x, 'x', e), y: snapAxis(p.y, 'y', e) };
+      stage.style.cursor = 'crosshair';
+      P.redraw();
+      return;
+    }
     // a new guide: Alt turns it the other way (Photoshop)
     if (drag.axis0) drag.axis = e.altKey ? (drag.axis0 === 'x' ? 'y' : 'x') : drag.axis0;
     let pos = drag.axis === 'x' ? p.x : p.y;
@@ -421,6 +469,14 @@ export function installViewExtras(P, { stage }) {
     if (!drag) return;
     const doc = P.doc;
     const q = local(e);
+    if (drag.kind === 'origin') {
+      // let go on the picture: the rulers count from there (not an undo step, like Photoshop)
+      if (drag.live && q.x >= RULER && q.y >= RULER) doc.rulerOrigin = drag.live;
+      drag = null;
+      P.redraw();
+      P.emit('pointer');
+      return;
+    }
     const r = stage.getBoundingClientRect();
     // dropped back on a ruler or outside the view: the guide goes away
     const gone = (drag.axis === 'x' ? q.x < (vx.rulers ? RULER : 0) || q.x > r.width : q.y < (vx.rulers ? RULER : 0) || q.y > r.height);
@@ -433,7 +489,7 @@ export function installViewExtras(P, { stage }) {
   /** The pointer was taken away mid-drag (a phone call, a second finger): the guide goes back. */
   P.viewExtrasCancel = () => {
     if (!drag) return;
-    P.doc?.restore(drag.before);
+    if (drag.before) P.doc?.restore(drag.before);
     drag = null;
     P.redraw();
   };
@@ -713,6 +769,13 @@ export function installViewExtras(P, { stage }) {
     if (!vx.rulers || !P.doc) return false;
     const q = local(e);
     if (q.y >= RULER && q.x >= RULER) return false;
+    // the corner: the zero point goes back to the top left
+    if (q.y < RULER && q.x < RULER) {
+      P.doc.rulerOrigin = null;
+      P.redraw();
+      P.emit('pointer');
+      return true;
+    }
     C.preferences?.('units');
     return true;
   };
@@ -761,7 +824,14 @@ export function buildNavigatorPanel(P, stage) {
     const v = doc.view;
     g.strokeStyle = '#ff3b3b';
     g.lineWidth = 2;
-    g.strokeRect(ox + (-v.x / v.zoom) * k, oy + (-v.y / v.zoom) * k, (r.width / v.zoom) * k, (r.height / v.zoom) * k);
+    // the window's corners in the picture (a turned box when the view is rotated)
+    g.beginPath();
+    [[r.left, r.top], [r.right, r.top], [r.right, r.bottom], [r.left, r.bottom]].forEach(([x, y], i) => {
+      const p = P.toDoc(x, y);
+      g[i ? 'lineTo' : 'moveTo'](ox + p.x * k, oy + p.y * k);
+    });
+    g.closePath();
+    g.stroke();
     zoom.value = Math.round(Math.log2(v.zoom) * 100);
     pct.textContent = `${Math.round(v.zoom * 1000) / 10}%`;
   };
@@ -827,7 +897,7 @@ export function buildInfoPanel(P) {
         h('div.ph-info-row', h('span', '16진수'), h('b', rgb ? h('i.ph-info-swatch', { style: { background: hex } }) : null, hex || '—')),
         row('C M Y K', cmyk ? `${cmyk.join('  ')} %` : '—'),
         row('불투명도', rgb ? `${Math.round((rgb[3] / 255) * 100)}%` : '—'),
-        row('X, Y', p ? `${u(Math.floor(p.x), 'x')}, ${u(Math.floor(p.y), 'y')}` : '—'),
+        row('X, Y', p ? `${u(Math.floor(p.x) - (doc.rulerOrigin?.x || 0), 'x')}, ${u(Math.floor(p.y) - (doc.rulerOrigin?.y || 0), 'y')}` : '—'),
         row('선택 영역', sb ? `${u(sb.w, 'x')} × ${u(sb.h, 'y')}` : '없음'),
         row('문서', `${doc.width} × ${doc.height} px${inPx ? '' : ` (${u(doc.width, 'x')} × ${u(doc.height, 'y')})`}`),
         row('레이어', doc.active?.name || '—')));

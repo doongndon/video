@@ -7,7 +7,7 @@ import { h } from '../util.js';
 import { openModal, toast } from '../ui/common.js';
 import { icon } from '../ui/icons.js';
 import { FILTERS, applyFilter, defaultFilterParams } from './adjust.js';
-import { applyToLayer, paramEditors } from './pdialogs.js';
+import { applyToLayer, paramEditors, setLastFilter } from './pdialogs.js';
 import { makeCanvas } from './doc.js';
 import { GALLERY } from './fxgallery.js';
 
@@ -23,7 +23,7 @@ export function applyStack(c, stack, colors) {
 
 // a hidden filter so a gallery stack can be recorded in actions and repeated with Ctrl+F
 FILTERS.filterGallery = {
-  name: '필터 갤러리', group: '필터 갤러리', gallery: true, hidden: true, slow: true, params: [],
+  name: '필터 갤러리', group: '필터 갤러리', gallery: true, hidden: true, slow: true, dialog: 'gallery', params: [],
   fn: (c, p, colors) => applyStack(c, Array.isArray(p.stack) ? p.stack : [], colors),
 };
 
@@ -208,6 +208,7 @@ export function filterGalleryDialog(P) {
     const active = stack.filter((e) => e.enabled !== false);
     lastStack = stack.map((e) => ({ ...e, params: { ...e.params } }));
     if (!active.length) return;
+    setLastFilter('filterGallery', { stack: active.map((e) => ({ id: e.id, params: { ...e.params } })) });
     if (smart) {
       P.run('고급 필터: 필터 갤러리', () => {
         l.smart = { ...l.smart, filters: [...(l.smart.filters || []), ...active.map((e) => ({ id: e.id, params: { ...e.params, _fg: P.fg, _bg: P.bg }, enabled: true }))] };

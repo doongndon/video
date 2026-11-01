@@ -1197,7 +1197,7 @@ export function layerMenuItems(P, mod) {
     { label: '새로 만들기', disabled: no, submenu: [
       { label: '레이어', key: `${mod}Shift+N`, action: () => C.newLayer() },
       { label: '그룹', action: () => C.newGroup() },
-      { label: '레이어에서 그룹', key: `${mod}G`, action: () => C.groupLayers() },
+      { label: '레이어에서 그룹', action: () => C.groupLayers() },
       '-',
       { label: '복사한 레이어', key: `${mod}J`, action: () => C.layerVia(false) },
       { label: '잘라낸 레이어', key: `${mod}Shift+J`, disabled: !d?.selection, action: () => C.layerVia(true) },

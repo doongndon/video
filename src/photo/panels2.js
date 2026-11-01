@@ -90,6 +90,7 @@ export function buildPathsPanel(P) {
     '-',
     { label: '벡터 마스크로', action: () => C().addVectorMask('path') },
     { label: '모양 레이어로', action: () => C().pathToShape?.() },
+    { label: '모양 구성 요소 병합', action: () => C().mergeShapeComponents?.() },
   ].filter(Boolean);
   const render = () => {
     const doc = P.doc;

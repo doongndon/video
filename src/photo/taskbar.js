@@ -272,8 +272,10 @@ export function installTaskbar(P) {
   const currentPos = () => ({ x: parseFloat(bar.style.left) || 0, y: parseFloat(bar.style.top) || 0 });
   /** A doc point in stage coordinates (the view may be turned with Rotate View). */
   const toStage = (x, y) => {
-    const [sx, sy] = P.toScreen(x, y);
+    let [sx, sy] = P.toScreen(x, y);
     const rot = P.doc?.view?.rot || 0;
+    // View ▸ Flip Horizontal mirrors before turning
+    if (P.doc?.view?.flip) sx = stage.getBoundingClientRect().width - sx;
     if (!rot) return [sx, sy];
     const r = stage.getBoundingClientRect();
     const a = (rot * Math.PI) / 180;

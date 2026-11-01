@@ -79,8 +79,35 @@ export function drawShape(g, s, pad = 0) {
   const closed = sps.filter((sp) => sp.closed);
   const rule = s.fillRule || PT.fillRuleFor(sps);
   if (hasFill(s) && closed.length) {
-    g.fillStyle = paintFor(g, s, 'fill', w, h, pad);
-    g.fill(PT.toPath2D(closed), rule);
+    if (closed.some((sp, i) => i > 0 && sp.op && sp.op !== 'combine')) {
+      // path operations (subtract / intersect / exclude), each on the result so far like Photoshop
+      const W = g.canvas.width;
+      const H = g.canvas.height;
+      const m = makeCanvas(W, H);
+      const mg = m.getContext('2d');
+      const one = makeCanvas(W, H);
+      const og = one.getContext('2d');
+      closed.forEach((sp, i) => {
+        og.setTransform(1, 0, 0, 1, 0, 0);
+        og.clearRect(0, 0, W, H);
+        og.setTransform(g.getTransform());
+        og.fill(PT.toPath2D([sp]));
+        const op = i === 0 ? 'combine' : sp.op || 'combine';
+        mg.globalCompositeOperation = op === 'subtract' ? 'destination-out' : op === 'intersect' ? 'destination-in' : op === 'exclude' ? 'xor' : 'source-over';
+        mg.drawImage(one, 0, 0);
+      });
+      mg.globalCompositeOperation = 'source-in';
+      mg.setTransform(g.getTransform());
+      mg.fillStyle = paintFor(mg, s, 'fill', w, h, pad);
+      mg.fillRect(-pad - w, -pad - h, w * 3 + pad * 2, h * 3 + pad * 2);
+      g.save();
+      g.setTransform(1, 0, 0, 1, 0, 0);
+      g.drawImage(m, 0, 0);
+      g.restore();
+    } else {
+      g.fillStyle = paintFor(g, s, 'fill', w, h, pad);
+      g.fill(PT.toPath2D(closed), rule);
+    }
   }
   if (!strokeOn(s)) return;
   const isLine = s.type === 'line';
@@ -491,6 +518,84 @@ export function installShapes2(P) {
   const COMMON = (extra) => [['mode', '모드', 'select', null, null, 'shape', [['shape', '모양'], ['path', '패스'], ['pixels', '픽셀']]], ...extra, ['op', '패스 작업', 'select', null, null, 'new', PATH_OPS]];
   const ORDER = ['shape', 'ellipseShape', 'triangleShape', 'polygonShape', 'lineShape', 'customShape'];
 
+  // ---- live corners: the dots inside the corners of the active live rectangle; drag one to round all
+  // the corners (Alt: only that corner), like Photoshop's live shape widgets
+  const liveRect = () => {
+    const l = P.doc?.active;
+    return l?.kind === 'shape' && l.shape?.type === 'rect' && !l.locked && l.visible !== false ? l : null;
+  };
+  const rot = (l, x, y, back) => {
+    const a = (((back ? -1 : 1) * (l.rotation || 0)) * Math.PI) / 180;
+    const cx = l.x + l.shape.w / 2;
+    const cy = l.y + l.shape.h / 2;
+    return [cx + (x - cx) * Math.cos(a) - (y - cy) * Math.sin(a), cy + (x - cx) * Math.sin(a) + (y - cy) * Math.cos(a)];
+  };
+  const CORNER_DIRS = [[0, 0, 1, 1], [1, 0, -1, 1], [1, 1, -1, -1], [0, 1, 1, -1]];
+  const cornerDots = (l) => {
+    const sh = l.shape;
+    const z = P.view.zoom;
+    if (Math.min(sh.w, sh.h) * z < 40) return [];
+    const lim = Math.min(sh.w, sh.h) / 2;
+    return CORNER_DIRS.map(([fx, fy, sx, sy], i) => {
+      const r = Math.min(lim, sh.radii?.[i] || 0);
+      const d = Math.max(r, 12 / z);
+      return rot(l, l.x + fx * sh.w + sx * d, l.y + fy * sh.h + sy * d);
+    });
+  };
+  let cornerDrag = null;
+  P.liveCorners = {
+    down(p, e) {
+      const l = liveRect();
+      if (!l) return false;
+      const z = P.view.zoom;
+      const i = cornerDots(l).findIndex(([x, y]) => Math.hypot(x - p.x, y - p.y) * z <= 7);
+      if (i < 0) return false;
+      cornerDrag = { l, i, one: !!e?.altKey, before: P.doc.capture(), moved: false };
+      return true;
+    },
+    move(p) {
+      const d = cornerDrag;
+      if (!d) return false;
+      const sh = d.l.shape;
+      const [x, y] = rot(d.l, p.x, p.y, true);
+      const [fx, fy, sx, sy] = CORNER_DIRS[d.i];
+      const r = Math.round(clamp(((x - d.l.x - fx * sh.w) * sx + (y - d.l.y - fy * sh.h) * sy) / 2, 0, Math.min(sh.w, sh.h) / 2));
+      const radii = d.one ? (sh.radii || [0, 0, 0, 0]).map((v, k) => (k === d.i ? r : v)) : [r, r, r, r];
+      d.l.shape = { ...sh, radii };
+      d.moved = true;
+      P.doc.touch(d.l);
+      P.redraw();
+      return true;
+    },
+    up() {
+      const d = cornerDrag;
+      cornerDrag = null;
+      if (!d) return false;
+      if (d.moved) P.commit('모퉁이 반경', d.before);
+      return true;
+    },
+    draw(g) {
+      const l = liveRect();
+      if (!l) return;
+      g.save();
+      g.lineWidth = 1.5;
+      for (const [x, y] of cornerDots(l)) {
+        const [sx, sy] = P.toScreen(x, y);
+        g.beginPath();
+        g.arc(sx, sy, 4, 0, Math.PI * 2);
+        g.fillStyle = '#fff';
+        g.fill();
+        g.strokeStyle = '#3d8bff';
+        g.stroke();
+        g.beginPath();
+        g.arc(sx, sy, 1.5, 0, Math.PI * 2);
+        g.fillStyle = '#3d8bff';
+        g.fill();
+      }
+      g.restore();
+    },
+  };
+
   const makeTool = (id, type, name, ic, extra) => ({
     id, name, key: 'U', icon: ic, group: 'shape', cursor: 'crosshair', optionsFrom: 'shape',
     options: COMMON(extra),
@@ -499,15 +604,19 @@ export function installShapes2(P) {
       S().type = type;
     },
     down(E, p, e) {
+      this.d = null;
+      if (P.liveCorners.down(p, e)) return;
       this.d = { a: p, b: p, e };
     },
     move(E, p, e) {
+      if (P.liveCorners.move(p)) return;
       if (!this.d) return;
       this.d.b = p;
       this.d.e = e;
       E.overlay();
     },
     up(E) {
+      if (P.liveCorners.up()) return;
       const d = this.d;
       this.d = null;
       if (!d) return;
@@ -544,7 +653,10 @@ export function installShapes2(P) {
     },
     overlay(E, g) {
       const d = this.d;
-      if (!d) return;
+      if (!d) {
+        P.liveCorners.draw(g);
+        return;
+      }
       const o = S();
       g.save();
       g.strokeStyle = '#4aa3ff';
@@ -748,6 +860,21 @@ function shapeProperties(P, l, live) {
       close();
     })]));
     rows.push(h('div.ph-prow', b));
+  }
+  // Pathfinder: the operation of the chosen components (all but the first when none is chosen), and merging
+  if (s.type === 'path' && (s.subpaths || []).filter((sp) => sp.closed).length > 1) {
+    const setOp = (op, label) => {
+      P.pathTarget = { kind: 'shape', layerId: l.id };
+      const sps = PT.clonePath(P.getPath());
+      const sel = P.pathSel?.subs;
+      sps.forEach((sp, i) => {
+        if (sel?.size ? sel.has(i) : i > 0) sp.op = op;
+      });
+      live(label, () => P.setShapePathDoc(l, sps), true);
+    };
+    rows.push(h('div.ph-sub', '패스파인더'), h('div.ph-prow', { style: { flexWrap: 'wrap', gap: '4px' } },
+      ...PT.PATH_OPS.map(([op, n]) => h('button.small', { title: `${n} (고른 구성 요소, 없으면 첫 모양 위의 모두)`, onclick: () => setOp(op, n) }, n)),
+      h('button.small', { title: '구성 요소를 하나의 윤곽으로 합칩니다', onclick: () => { P.pathTarget = { kind: 'shape', layerId: l.id }; P.cmd.mergeShapeComponents(); } }, '모양 구성 요소 병합')));
   }
   rows.push(h('div.ph-prow',
     h('button.small', { onclick: () => { P.pathTarget = { kind: 'shape', layerId: l.id }; P.setTool('directSelect'); } }, '패스 고치기 (직접 선택)'),

@@ -266,8 +266,43 @@ function presetList(P, toolId, { onPick, onMenu, filter = '' }) {
 
 // ---------------------------------------------------------------- install
 
+// ---- number keys: 1-9 / 0 set the opacity in tens, two quick digits an exact value (4 then 5: 45%),
+// Shift with them the flow; with the airbrush on it is the other way round (Photoshop). Listened to
+// from when this module loads, so it comes before the editor's own number keys (layer opacity).
+let keysP = null;
+let lastDigit = null;
+window.addEventListener('keydown', (e) => {
+  const P = keysP;
+  const m = /^(Digit|Numpad)([0-9])$/.exec(e.code);
+  if (!P || !m || e.ctrlKey || e.metaKey || e.altKey || !document.body.classList.contains('photo-mode')) return;
+  const t = e.target;
+  if (t?.isContentEditable || ['TEXTAREA', 'SELECT'].includes(t?.tagName) || (t?.tagName === 'INPUT' && !['checkbox', 'radio', 'range', 'button', 'color'].includes(t.type))) return;
+  if (document.querySelector('.modal-backdrop, .menu')) return;
+  const id = P.tool;
+  const opts = TOOL_BY_ID[id]?.options || [];
+  const has = (k) => opts.some((x) => x[0] === k);
+  if (!has('flow') && !has('opacity')) return;
+  const air = has('flow') && !!P.opts(id).airbrush;
+  const key = e.shiftKey !== air ? 'flow' : 'opacity';
+  if (!has(key)) return;
+  const d = +m[2];
+  const now = performance.now();
+  let v;
+  if (lastDigit && lastDigit.id === id && lastDigit.key === key && now - lastDigit.t < 600) {
+    v = lastDigit.d * 10 + d;
+    lastDigit = null;
+  } else {
+    v = d === 0 ? 100 : d * 10;
+    lastDigit = { id, key, d, t: now };
+  }
+  e.preventDefault();
+  e.stopImmediatePropagation();
+  P.setOpt(id, key, clamp(v, 1, 100));
+}, true);
+
 export function installBrushPanels(P) {
   const C = P.cmd;
+  keysP = P;
   /** The tool the brush panels change: the current one when it paints with brushes. */
   const target = () => (BRUSH_TOOLS.includes(P.tool) && TOOL_BY_ID[P.tool] ? P.tool : 'brush');
 
@@ -523,16 +558,40 @@ export function installBrushPanels(P) {
     pop?.remove();
     pop = null;
     document.removeEventListener('pointerdown', outside, true);
+    document.removeEventListener('keydown', popKeys, true);
   };
   const outside = (e) => {
     if (pop && !pop.contains(e.target) && !e.target.closest?.('.ph-bpbtn')) closePop();
   };
-  const openPicker = (anchor) => {
+  // Enter or Esc closes it, like Photoshop (wherever the keyboard is)
+  const popKeys = (e) => {
+    if (!pop || (e.key !== 'Escape' && !(e.key === 'Enter' && e.target.type !== 'search'))) return;
+    // a number being typed counts
+    if (e.key === 'Enter' && pop.contains(e.target) && e.target.type === 'number') e.target.dispatchEvent(new Event('change'));
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    closePop();
+  };
+  /**
+   * The Brush Preset picker under an anchor element or at a point { x, y } (right-click on the
+   * picture). Tools that paint with brush presets get the list; the other brush-shaped tools (dodge,
+   * blur, pencil…) only their size and hardness, like Photoshop.
+   */
+  const openPicker = (anchor, toolId = target()) => {
     if (pop) return closePop();
-    const id = target();
+    const id = toolId;
+    const presets = BRUSH_TOOLS.includes(id);
     const body = h('div.bp-pop', { role: 'dialog', 'aria-label': '브러시 사전 설정 피커' });
     const render = () => {
       const oo = P.opts(id);
+      const hasHard = TOOL_BY_ID[id]?.options?.some((x) => x[0] === 'hardness');
+      if (!presets) {
+        body.replaceChildren(
+          rangeRow('크기', 1, 1000, oo.size, 'px', (v) => P.setOpt(id, 'size', v)),
+          hasHard ? rangeRow('경도', 0, 100, oo.hardness, '%', (v) => P.setOpt(id, 'hardness', v)) : null,
+          h('div.bp-note', `${TOOL_BY_ID[id]?.name || ''} 도구의 브러시 크기${hasHard ? '와 경도' : ''}`));
+        return;
+      }
       const search = h('input', { type: 'search', placeholder: '브러시 찾기', value: body.dataset.q || '', 'aria-label': '브러시 찾기' });
       search.addEventListener('input', () => {
         body.dataset.q = search.value;
@@ -552,11 +611,18 @@ export function installBrushPanels(P) {
     };
     render();
     document.body.append(body);
-    const r = anchor.getBoundingClientRect();
+    const r = anchor.getBoundingClientRect ? anchor.getBoundingClientRect() : { left: anchor.x, bottom: anchor.y };
     body.style.left = `${Math.max(8, Math.min(r.left, window.innerWidth - body.offsetWidth - 8))}px`;
-    body.style.top = `${Math.min(r.bottom + 4, window.innerHeight - body.offsetHeight - 8)}px`;
+    body.style.top = `${Math.max(8, Math.min(r.bottom + 4, window.innerHeight - body.offsetHeight - 8))}px`;
     pop = body;
+    // opened on the picture: the size is ready to be typed over
+    if (!anchor.getBoundingClientRect) {
+      const n = body.querySelector('input[type=number]');
+      n?.focus({ preventScroll: true });
+      n?.select();
+    }
     setTimeout(() => document.addEventListener('pointerdown', outside, true), 0);
+    document.addEventListener('keydown', popKeys, true);
   };
   P.on('tool', closePop);
   const pickerButton = (id) => {
@@ -573,6 +639,85 @@ export function installBrushPanels(P) {
     if (t) t.leadButtons = () => P.brushOptionButtons(id);
   };
   for (const id of ['brush', 'eraser']) P.brushLead(id);
+
+  // ---- on the picture: right-click opens the picker, Alt+right-drag (Ctrl+Alt+drag on a Mac)
+  // sizes the brush (sideways) and sets its hardness (up and down), like Photoshop
+  const onPicture = (e) => document.body.classList.contains('photo-mode') && P.doc && !document.querySelector('.modal-backdrop') && !!e.target.matches?.('.ph-stage canvas.ph-view, .ph-stage canvas.ph-over');
+  /** Tools whose brush the picker and the on-picture sizing change. */
+  const brushShaped = (id) => {
+    const t = TOOL_BY_ID[id];
+    return !!t && (t.group === 'paint' || t.group === 'retouch') && id !== 'redEye' && t.options?.some((x) => x[0] === 'size');
+  };
+  let sizing = null;
+  let eatMenu = 0;
+  window.addEventListener('contextmenu', (e) => {
+    if (!onPicture(e)) return;
+    if (sizing || e.altKey || performance.now() < eatMenu) {
+      // the end of an Alt+right-drag: no menu
+      eatMenu = 0;
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+    if (!brushShaped(P.tool) || TOOL_BY_ID[P.tool]?.st) return;
+    e.preventDefault();
+    e.stopPropagation();
+    closePop();
+    openPicker({ x: e.clientX, y: e.clientY }, P.tool);
+  }, true);
+  const hud = h('div', { style: { position: 'fixed', zIndex: 70, pointerEvents: 'none', borderRadius: '50%', border: '1px solid rgba(255,255,255,.9)', boxShadow: '0 0 0 1px rgba(0,0,0,.6)', display: 'none' } });
+  const hudText = h('div', { style: { position: 'fixed', zIndex: 71, pointerEvents: 'none', padding: '3px 7px', borderRadius: '4px', background: 'rgba(20,20,20,.85)', color: '#fff', font: '12px/1.4 sans-serif', whiteSpace: 'nowrap', display: 'none' } });
+  const showHud = () => {
+    const { x, y, id } = sizing;
+    const o = P.opts(id);
+    const d = Math.max(2, (o.size || 1) * (P.view.zoom || 1));
+    const hard = clamp(o.hardness ?? 100, 0, 100);
+    Object.assign(hud.style, { display: 'block', left: `${x - d / 2}px`, top: `${y - d / 2}px`, width: `${d}px`, height: `${d}px`,
+      background: `radial-gradient(circle closest-side, rgba(255,40,40,.55) ${hard * 0.98}%, rgba(255,40,40,0) 100%)` });
+    hudText.textContent = sizing.hard ? `지름 ${o.size} px · 경도 ${o.hardness}%` : `지름 ${o.size} px`;
+    Object.assign(hudText.style, { display: 'block', left: `${x + d / 2 + 8}px`, top: `${y - 12}px` });
+  };
+  window.addEventListener('pointerdown', (e) => {
+    const mac = e.ctrlKey && e.altKey && e.button === 0;
+    if (!((e.altKey && e.button === 2) || mac) || !onPicture(e) || !brushShaped(P.tool)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    closePop();
+    const id = P.tool;
+    const o = P.opts(id);
+    sizing = { id, x: e.clientX, y: e.clientY, size: o.size || 1, hardness: o.hardness ?? 100, hard: TOOL_BY_ID[id].options.some((x) => x[0] === 'hardness') && isDrawnTip(o.tip || 'round') };
+    if (!hud.isConnected) document.body.append(hud, hudText);
+    showHud();
+    let raf = 0;
+    let last = e;
+    const move = (ev) => {
+      last = ev;
+      if (raf) return;
+      raf = requestAnimationFrame(() => {
+        raf = 0;
+        if (!sizing) return;
+        const z = P.view.zoom || 1;
+        const max = TOOL_BY_ID[id].options.find((x) => x[0] === 'size')?.[4] || 1000;
+        P.setOpt(id, 'size', clamp(Math.round(sizing.size + ((last.clientX - sizing.x) * 2) / z), 1, max));
+        if (sizing.hard) P.setOpt(id, 'hardness', clamp(Math.round(sizing.hardness - (last.clientY - sizing.y) / 2), 0, 100));
+        showHud();
+      });
+    };
+    const up = () => {
+      window.removeEventListener('pointermove', move, true);
+      window.removeEventListener('pointerup', up, true);
+      window.removeEventListener('pointercancel', up, true);
+      cancelAnimationFrame(raf);
+      sizing = null;
+      eatMenu = performance.now() + 300;
+      hud.style.display = 'none';
+      hudText.style.display = 'none';
+    };
+    window.addEventListener('pointermove', move, true);
+    window.addEventListener('pointerup', up, true);
+    window.addEventListener('pointercancel', up, true);
+  }, true);
+
 
   // ---- Brushes panel
   const brushesEl = h('div.ph-panel.bp-brushes');

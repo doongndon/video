@@ -269,9 +269,16 @@ export function buildOptionsBar(P) {
         h('button.small', { onclick: () => P.cmd.pathToSelection() }, '선택 영역'),
         h('button.small', { onclick: () => P.cmd.addVectorMask('path') }, '마스크'),
         h('button.small', { onclick: () => P.cmd.pathToShape?.() }, '모양'),
-        ...(P.doc?.workPath ? [h('button.small', { onclick: () => P.cmd.savePath() }, '패스 저장')] : []));
+        ...(P.doc?.workPath ? [h('button.small', { onclick: () => P.cmd.savePath() }, '패스 저장')] : []),
+        ...(t.id === 'pathSelect' && P.cmd.mergeShapeComponents ? [h('button.small', { title: '패스 작업: 모양 구성 요소 병합', onclick: () => P.cmd.mergeShapeComponents() }, '구성 요소 병합')] : []));
     } else if (TOOL_BY_ID[t.id]?.optionsFrom === 'text') {
-      ctrls.push(h('button.small', { onclick: () => (P.doc?.active?.kind === 'text' ? P.warpText() : toast('글자 레이어를 고르세요')) }, '텍스트 뒤틀기'), h('button.small', { onclick: () => P.showPanel('char') }, '문자 패널'));
+      // the text colour swatch and the orientation toggle of Photoshop's type options bar
+      const tcol = P.typeState?.().char.color;
+      const sw = h('input', { type: 'color', title: '텍스트 색상 설정', 'aria-label': '텍스트 색상', value: /^#[0-9a-f]{6}$/i.test(tcol || '') ? tcol : P.fg });
+      sw.addEventListener('input', () => P.typeApply?.({ color: sw.value }, '글자 색상', { live: true }));
+      sw.addEventListener('change', () => P.typeApply?.({ color: sw.value }, '글자 색상', { refocus: true }));
+      const at = P.doc?.active?.kind === 'text' ? P.doc.active.text : null;
+      ctrls.push(sw, h('button.small', { title: '텍스트 방향 켜기/끄기 (가로 ↔ 세로)', disabled: !at || !!at.path || !!at.area, onclick: () => P.cmd.textOrientation?.(at?.vertical ? 'h' : 'v') }, '방향'), h('button.small', { onclick: () => (P.doc?.active?.kind === 'text' ? P.warpText() : toast('글자 레이어를 고르세요')) }, '텍스트 뒤틀기'), h('button.small', { onclick: () => P.showPanel('char') }, '문자 패널'));
     } else if (t.optionButtons) {
       ctrls.push(...t.optionButtons(P).filter(Boolean));
     }

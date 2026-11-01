@@ -216,13 +216,19 @@ injectStyle('ph-colorpicker-dialog-css', `
 .pcp-f small { color: var(--text-faint); min-width: 12px; }
 .pcp-hex { width: calc(78px * var(--ui-scale)); font-family: ui-monospace, Menlo, Consolas, monospace; text-transform: uppercase; }
 .pcp-warn { color: var(--warn); font-size: var(--fs-xs); min-height: 1.2em; }
+.pcp-note { color: var(--text-faint); font-size: var(--fs-xs); }
+.pcp-web { display: inline-flex; align-items: center; gap: 4px; padding: 0 4px; min-height: 0; height: calc(20px * var(--ui-scale)); font-size: var(--fs-xs); }
+.pcp-web i { display: inline-block; width: 12px; height: 12px; border: 1px solid var(--line-2); }
+.modal-backdrop.pcp-sampling { background: rgba(0, 0, 0, .15); cursor: crosshair; }
+.modal-backdrop.pcp-sampling .modal { cursor: auto; }
 `);
 
 /**
  * Photoshop's Color Picker as a dialog. onOk(hex) is called with the chosen colour; onAddSwatch(hex)
- * (optional) shows the 견본에 추가 button.
+ * (optional) shows the 견본에 추가 button; sample(clientX, clientY) (optional) returns the colour of
+ * the picture under the pointer, so clicking the picture behind the dialog picks it, like Photoshop.
  */
-export function colorPickerDialog({ title = '색상 피커', value = '#000000', onOk = () => {}, onAddSwatch = null } = {}) {
+export function colorPickerDialog({ title = '색상 피커', value = '#000000', onOk = () => {}, onAddSwatch = null, sample = null } = {}) {
   const current = normHex(value) || '#000000';
   let rgb = rgbOf(current);
   let [hue, sat, bri] = rgbToHsb(...rgb);
@@ -234,6 +240,9 @@ export function colorPickerDialog({ title = '색상 피커', value = '#000000', 
   const sNew = h('div', { title: '새로운 색' });
   const sCur = h('div.cur', { title: '현재 색 (누르면 되돌리기)', style: { background: current } });
   const warn = h('div.pcp-warn');
+  // Photoshop's "not a web colour" cube: the nearest web-safe colour, clicked to use it
+  const webChip = h('i');
+  const webBtn = h('button.small.pcp-web', { title: '웹 색상이 아님: 가장 가까운 웹 색상으로 바꾸기', 'aria-label': '가장 가까운 웹 색상', onclick: () => setRgb(webSafe(rgb)) }, webChip, '웹 색상으로');
   const inputs = {};
   const num = (key, min, max, unit) => {
     const i = h('input', { type: 'number', min, max, step: 1, 'aria-label': key });
@@ -421,6 +430,9 @@ export function colorPickerDialog({ title = '색상 피커', value = '#000000', 
     // colours a printer cannot reach exactly (very saturated): Photoshop's gamut warning
     const [, s2, v2] = rgbToHsb(...rgb);
     warn.textContent = s2 > 0.92 && v2 > 0.85 && Math.max(...rgb) - Math.min(...rgb) > 200 ? '인쇄(CMYK)로는 정확히 나오지 않는 색입니다' : '';
+    const ws = webSafe(rgb);
+    webBtn.hidden = webOnly || ws.every((c, i) => c === Math.round(rgb[i]));
+    webChip.style.background = hexOf(...ws);
   }
 
   const drag = (el, fn) => {
@@ -476,7 +488,8 @@ export function colorPickerDialog({ title = '색상 피커', value = '#000000', 
   const side = h('div.pcp-side',
     h('div.pcp-top', h('div.pcp-swatch', sNew, sCur), h('small', '새로운 색 (위)', h('br'), '현재 색 (아래)'), addBtn),
     warn, grid,
-    h('label.pcp-f', web, h('span', '웹 색상만')));
+    h('div.pcp-f', h('label.pcp-f', web, h('span', '웹 색상만')), webBtn),
+    sample ? h('div.pcp-note', '창 밖의 그림을 눌러 색을 고를 수도 있습니다') : null);
   draw();
   const m = openModal({
     title,
@@ -489,5 +502,26 @@ export function colorPickerDialog({ title = '색상 피커', value = '#000000', 
     } }],
   });
   m.modal.style.maxWidth = '96vw';
+  // with the dialog open, clicking or dragging on the picture picks its colour
+  if (sample) {
+    const bd = m.modal.parentElement;
+    bd.classList.add('pcp-sampling');
+    let on = false;
+    const at = (e) => {
+      const hx = sample(e.clientX, e.clientY);
+      if (hx) setRgb(rgbOf(hx));
+    };
+    bd.addEventListener('pointerdown', (e) => {
+      if (e.target !== bd) return;
+      e.preventDefault();
+      on = true;
+      bd.setPointerCapture?.(e.pointerId);
+      at(e);
+    });
+    bd.addEventListener('pointermove', (e) => {
+      if (on) at(e);
+    });
+    for (const t of ['pointerup', 'pointercancel']) bd.addEventListener(t, () => { on = false; });
+  }
   return m;
 }

@@ -1094,6 +1094,8 @@ export function cameraRawDialog(P, { params = null, onApply = null, smartIndex =
       onApply(out);
       return;
     }
+    // Ctrl+F applies it again, Alt+Ctrl+F reopens it with these settings
+    import('./pdialogs.js').then((m) => m.setLastFilter('cameraRaw', out));
     if (smart) {
       P.run('고급 필터: Camera Raw 필터', () => {
         const list = [...(l.smart.filters || [])];

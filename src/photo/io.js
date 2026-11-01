@@ -696,7 +696,7 @@ export function docToPsd(doc, { editableText = false, fg = '#000000', bg = '#fff
     if (l.kind === 'smart') flat.smart++;
     if (l.kind === 'shape') flat.shape++;
     const out = { ...base, canvas: c.canvas, left: c.x, top: c.y };
-    if (l.kind === 'shape' && editableText && l.shape.fill && !l.rotation) {
+    if (l.kind === 'shape' && editableText && l.shape.fill && !l.rotation && (l.shape.fillType || 'color') === 'color' && (l.shape.strokeType || 'color') === 'color') {
       // a real Photoshop shape layer: vector mask + solid colour fill (+ stroke)
       const s = l.shape;
       const kx = s.w / (s.pw || s.w || 1);
@@ -706,9 +706,10 @@ export function docToPsd(doc, { editableText = false, fg = '#000000', bg = '#fff
       flat.shape--;
       out.vectorMask = { paths: pathsToPsd(sps) };
       out.vectorFill = { type: 'color', color: psdColor(s.fill) };
-      if (s.stroke && s.strokeWidth) out.vectorStroke = { strokeEnabled: true, fillEnabled: true, lineWidth: unitPx(s.strokeWidth), lineAlignment: s.strokeAlign || 'center', lineCapType: 'round', lineJoinType: 'round', content: { type: 'color', color: psdColor(s.stroke) }, opacity: 1, blendMode: 'normal' };
+      if (s.stroke && s.strokeWidth) out.vectorStroke = { strokeEnabled: true, fillEnabled: true, lineWidth: unitPx(s.strokeWidth), lineAlignment: s.strokeAlign || 'center', lineCapType: s.lineCap || 'round', lineJoinType: s.lineJoin || 'round', ...(s.dash?.length ? { lineDashSet: s.dash.map((v) => ({ units: 'None', value: v })) } : {}), content: { type: 'color', color: psdColor(s.stroke) }, opacity: 1, blendMode: 'normal' };
     }
-    if (l.kind === 'text' && editableText) {
+    // type on a path, area type and warped text keep their pixels (written as point text they would move)
+    if (l.kind === 'text' && editableText && !l.text.path && !l.text.area && !l.text.warp) {
       const t = l.text;
       out.text = {
         text: t.content,

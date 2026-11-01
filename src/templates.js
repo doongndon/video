@@ -4,7 +4,7 @@
 // (16:9, 9:16, 1:1). Text that has to line up with something is measured when it is inserted.
 
 import { store } from './store.js';
-import { createClip, createTrack, videoTracks, clipsOnTrack, clipEnd, renameTracks, findEffect } from './model.js';
+import { createClip, createTrack, createSequence, videoTracks, clipsOnTrack, clipEnd, renameTracks, findEffect } from './model.js';
 import { snapFrame } from './util.js';
 
 const W = (f) => f * store.seq.width;
@@ -397,6 +397,7 @@ export const TEMPLATES = [
     category: '엔딩',
     name: '엔딩 크레딧 롤',
     duration: 15,
+    thumbAt: 6,
     layers: (D) => {
       const content = ['엔딩 크레딧', '', '연출', '홍길동', '', '편집', '김편집', '', '촬영', '이촬영', '', '음악', '박음악', '', '출연', '최배우 · 정배우', '', '', '시청해 주셔서 감사합니다'].join('\n');
       const text = { content, size: U(0.042), bold: false, lineHeight: 160, color: '#f3f4f6' };
@@ -437,40 +438,75 @@ function setValues(clip, fxType, values) {
   for (const [k, v] of Object.entries(values)) if (fx.params[k]) fx.params[k].value = v;
 }
 
+/**
+ * Build the clips of a template placed at t0 on sequence s: trackFor(start, end) gives each layer's
+ * track and add(clip) puts the clip in (before the next layer looks for a free track).
+ */
+export function buildTemplate(tpl, s, t0, { trackFor, add }) {
+  const out = [];
+  for (const layer of tpl.layers(tpl.duration)) {
+    const start = snapFrame(t0 + layer.start, s.fps);
+    const end = snapFrame(t0 + (layer.end ?? tpl.duration), s.fps);
+    if (end - start < 1 / s.fps) continue;
+    const tr = trackFor(start, end);
+    const kind = layer.kind;
+    const name = layer.name || (kind === 'text' ? String(layer.text.content).split('\n')[0].slice(0, 40) : tpl.name);
+    const c = createClip(s, { kind, trackId: tr.id, name, start, duration: end - start, color: layer.color });
+    if (kind === 'text') setValues(c, 'text', layer.text);
+    if (kind === 'shape') setValues(c, 'shape', layer.shape);
+    setValues(c, 'motion', layer.motion);
+    if (layer.opacity != null) setValues(c, 'opacity', { opacity: layer.opacity });
+    for (const [path, keys] of Object.entries(layer.kf || {})) {
+      const [fxType, key] = path.split('.');
+      const fx = findEffect(c, fxType);
+      if (!fx?.params[key]) continue;
+      fx.params[key].kf = keys.map(([kt, v, ease = 'linear']) => ({ t: Math.min(kt, end - start), v, ease }));
+      fx.params[key].value = keys[keys.length - 1][1];
+    }
+    if (layer.transIn) c.transIn = { type: 'crossDissolve', duration: Math.min(layer.transIn, end - start) };
+    if (layer.transOut) c.transOut = { type: 'crossDissolve', duration: Math.min(layer.transOut, end - start) };
+    add(c);
+    out.push(c);
+  }
+  return out;
+}
+
 /** Insert a template at the playhead (one undo step); returns the ids of the clips it made. */
 export function insertTemplate(id, at = store.ui.playhead) {
   const tpl = TEMPLATES.find((t) => t.id === id);
   if (!tpl) return [];
   const s = store.seq;
-  const t0 = snapFrame(at, s.fps);
   const created = [];
   store.transact(`템플릿: ${tpl.name}`, () => {
-    for (const layer of tpl.layers(tpl.duration)) {
-      const start = snapFrame(t0 + layer.start, s.fps);
-      const end = snapFrame(t0 + (layer.end ?? tpl.duration), s.fps);
-      if (end - start < 1 / s.fps) continue;
-      const tr = freeTrack(s, start, end);
-      const kind = layer.kind;
-      const name = layer.name || (kind === 'text' ? String(layer.text.content).split('\n')[0].slice(0, 40) : tpl.name);
-      const c = createClip(s, { kind, trackId: tr.id, name, start, duration: end - start, color: layer.color });
-      if (kind === 'text') setValues(c, 'text', layer.text);
-      if (kind === 'shape') setValues(c, 'shape', layer.shape);
-      setValues(c, 'motion', layer.motion);
-      if (layer.opacity != null) setValues(c, 'opacity', { opacity: layer.opacity });
-      for (const [path, keys] of Object.entries(layer.kf || {})) {
-        const [fxType, key] = path.split('.');
-        const fx = findEffect(c, fxType);
-        if (!fx?.params[key]) continue;
-        fx.params[key].kf = keys.map(([kt, v, ease = 'linear']) => ({ t: Math.min(kt, end - start), v, ease }));
-        fx.params[key].value = keys[keys.length - 1][1];
-      }
-      if (layer.transIn) c.transIn = { type: 'crossDissolve', duration: Math.min(layer.transIn, end - start) };
-      if (layer.transOut) c.transOut = { type: 'crossDissolve', duration: Math.min(layer.transOut, end - start) };
-      s.clips[c.id] = c;
-      created.push(c.id);
-    }
+    const clips = buildTemplate(tpl, s, snapFrame(Math.max(0, at), s.fps), {
+      trackFor: (start, end) => freeTrack(s, start, end),
+      add: (c) => { s.clips[c.id] = c; },
+    });
+    created.push(...clips.map((c) => c.id));
     store.selectClips(created);
   });
-  store.toast(`"${tpl.name}" 템플릿을 넣었습니다. 텍스트를 선택해 효과 컨트롤에서 내용을 바꾸세요.`);
+  store.toast(`"${tpl.name}" 템플릿을 넣었습니다. 텍스트를 선택해 효과 컨트롤이나 기본 그래픽 ▸ 편집에서 내용을 바꾸세요.`);
   return created;
+}
+
+/** When a template's thumbnail is taken (its title is fully in). */
+export const templateThumbTime = (tpl) => tpl.thumbAt ?? Math.min(2.5, tpl.duration / 2);
+
+/**
+ * A template drawn alone (black background) at time t of its animation, sized for the current
+ * sequence, into a 2D context of the given width (the 기본 그래픽 panel's previews).
+ */
+export function drawTemplate(ctx, tpl, t, compositor, provider) {
+  const s0 = store.seq;
+  const s = createSequence({ width: s0.width, height: s0.height, fps: s0.fps, videoTracks: 0, audioTracks: 0 });
+  let n = 0;
+  buildTemplate(tpl, s, 0, {
+    trackFor: () => {
+      const tr = createTrack('video', n++);
+      s.tracks.push(tr);
+      return tr;
+    },
+    add: (c) => { s.clips[c.id] = c; },
+  });
+  compositor.render(ctx, s, Math.min(t, tpl.duration - 1 / s.fps), provider, { scale: ctx.canvas.width / s.width, background: '#000000' });
 }

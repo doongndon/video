@@ -2270,6 +2270,7 @@ export function createTimeline() {
     const types = [...(e.dataTransfer?.types || [])];
     if (types.includes('application/x-montage-media')) return 'media';
     if (types.includes('application/x-montage-effect')) return 'effect';
+    if (types.includes('application/x-montage-template')) return 'template';
     if (types.includes('Files')) return 'files';
     return null;
   }
@@ -2392,6 +2393,10 @@ export function createTimeline() {
         store.selectClips([hit.clip.id]);
         store.emit('reveal-effect-controls');
       }
+    } else if (kind === 'template') {
+      // a title template from 기본 그래픽 ▸ 찾아보기 goes in where it is dropped
+      const id = e.dataTransfer.getData('application/x-montage-template') || dnd.payload?.template;
+      if (id) (await import('../templates.js')).insertTemplate(id, Math.max(0, snapFrame(tOf(x), fps())));
     } else if (kind === 'files') {
       const files = [...e.dataTransfer.files];
       const ids = await importFiles(files);

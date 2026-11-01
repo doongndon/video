@@ -1181,6 +1181,28 @@ export function installPathTools(P) {
     g.putImageData(img, 0, 0);
     return c;
   };
+  /**
+   * 모양 구성 요소 병합 (Merge Shape Components): the closed components, with their path operations,
+   * become one outline (traced at up to 4× so curves stay close). Open subpaths are kept.
+   */
+  C.mergeShapeComponents = () => {
+    const sps = P.getPath();
+    const closed = sps.filter((sp) => sp.closed && sp.knots.length > 1);
+    if (closed.length < 2) return toast('병합할 모양 구성 요소가 두 개 이상 있어야 합니다');
+    const b = PT.pathBounds(closed);
+    if (!b || b.w < 1 || b.h < 1) return undefined;
+    const k = clamp(Math.sqrt(1.4e6 / (b.w * b.h)), 0.25, 4);
+    const pad = 2;
+    const scaled = PT.mapPath(closed, ([x, y]) => [(x - b.x) * k + pad, (y - b.y) * k + pad]);
+    const mask = PT.rasterizePath(Math.ceil(b.w * k) + pad * 2, Math.ceil(b.h * k) + pad * 2, scaled);
+    const merged = PT.mapPath(PT.pathFromMask(mask, 1), ([x, y]) => [(x - pad) / k + b.x, (y - pad) / k + b.y]);
+    if (!merged.length) return toast('남는 모양이 없습니다');
+    const hh = begin('모양 구성 요소 병합');
+    P.pathSel = { subs: new Set(), knots: new Set() };
+    P.setPath([...merged, ...sps.filter((sp) => !sp.closed)]);
+    finish(hh);
+    return undefined;
+  };
   C.selectionToPath = (tolerance = 2) => {
     const doc = P.doc;
     if (!doc?.selection) return toast('먼저 선택 영역을 만드세요');

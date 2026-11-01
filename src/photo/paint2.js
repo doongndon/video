@@ -4,8 +4,8 @@
 import { h } from '../util.js';
 import { toast, promptDialog, loadPref, savePref } from '../ui/common.js';
 import { makeCanvas } from './doc.js';
-import { TOOLS, TOOL_BY_ID, TOOL_GROUPS, Stroke, brushOpts, needRaster } from './tools.js';
-import { GRADIENTS, GRADIENT_STYLES, paintGradient, gradientLut, gradientSwatch, listPatterns, patternCanvas, definePattern, paintPattern, userPatterns } from './resources.js';
+import { TOOLS, TOOL_BY_ID, TOOL_GROUPS, Stroke, brushOpts, needRaster, sampleColor, rgbHex } from './tools.js';
+import { GRADIENTS, GRADIENT_STYLES, paintGradient, gradientLut, gradientSwatch, listPatterns, patternCanvas, definePattern, paintPattern, userPatterns, userGradients } from './resources.js';
 import { colorPickerDialog } from './colorpicker.js';
 import { gradientEditorDialog, importGradientFiles } from './gradedit.js';
 import { keepImportedPatterns } from './resources.js';
@@ -24,10 +24,30 @@ export function installPaint2(P) {
       P.addSwatch(hex);
       toast('견본 패널의 "내 견본"에 추가했습니다');
     } : null,
+    // the picture behind the dialog: the eyedropper's sample size and layers
+    sample: (x, y) => {
+      if (!P.doc || !document.elementsFromPoint(x, y).some((el) => el.matches?.('.ph-stage canvas.ph-view, .ph-stage canvas.ph-over'))) return null;
+      const c = sampleColor(P, P.toDoc(x, y));
+      return c ? rgbHex(...c) : null;
+    },
   });
 
   // ---- gradient tool
-  const GR_LIST = [...GRADIENTS.map((g) => [g.id, g.name]), ['custom', '사용자 정의 (편집으로 만들기)']];
+  // the presets, the user's gradients (saved in the editor or imported from .grd files) and the
+  // edited one, under its name
+  const GR_LIST = () => [...GRADIENTS.map((g) => [g.id, g.name]), ...userGradients().map((g) => [g.id, g.name]), ['custom', P.opts('gradient').custom?.name || '사용자 정의 (편집으로 만들기)']];
+  // picking one of the user's gradients uses a copy of it (what the gradient tool paints with)
+  const setOpt = P.setOpt;
+  P.setOpt = (id, key, v) => {
+    if (id === 'gradient' && key === 'preset' && v !== 'custom' && !GRADIENTS.some((g) => g.id === v)) {
+      const ug = userGradients().find((g) => g.id === v);
+      if (ug) {
+        setOpt('gradient', 'custom', structuredClone(ug));
+        v = 'custom';
+      }
+    }
+    return setOpt(id, key, v);
+  };
   const grad = TOOL_BY_ID.gradient;
   grad.options = [
     ['preset', '그레이디언트', 'select', null, null, 'fgbg', GR_LIST],

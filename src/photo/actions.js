@@ -66,8 +66,16 @@ export function installActions(P) {
   const serial = () => P.doc?.history.serial ?? P.doc?.history.undoStack.length;
   const plain = (args) => {
     try {
-      if (JSON.stringify(args).length >= 20000 || args.some((a) => a instanceof HTMLCanvasElement || typeof a === 'function' || a instanceof Event)) return null;
-      return JSON.parse(JSON.stringify(args));
+      // anything that doesn't survive a trip through JSON (pixels, a layer object, an event) is not replayable
+      let bad = false;
+      // a command used straight as a click handler gets the click: replayed without it
+      while (args.length && args[args.length - 1] instanceof Event) args = args.slice(0, -1);
+      const s = JSON.stringify(args, (k, v) => {
+        if (typeof v === 'function' || v instanceof HTMLCanvasElement || v instanceof ImageData || v instanceof Event || v instanceof Node || (v && typeof v === 'object' && 'kind' in v && 'id' in v && ('canvas' in v || 'parent' in v))) bad = true;
+        return v;
+      });
+      if (bad || s === undefined || s.length >= 20000) return null;
+      return JSON.parse(s);
     } catch {
       return null;
     }

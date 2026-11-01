@@ -9,7 +9,6 @@ import { BLEND_MODES, compositeOnto } from './blend.js';
 import { GRADIENTS, GRADIENT_STYLES, gradientSwatch, listPatterns, resolveStopColor, paintPattern } from './resources.js';
 import { CUSTOM_EDITORS, histOf, ensureAdjStyle, curvesGraph } from './adjui.js';
 import { cameraRawDialog } from './camraw.js';
-import { FX_DEFAULTS, FX_NAMES, STYLE_PRESETS, normalizeFx } from './styles.js';
 import { createColorPicker } from './colorpicker.js';
 
 export const DOC_PRESETS = [
@@ -190,8 +189,8 @@ export function imageSizeDialog(P) {
   hh.addEventListener('input', () => fromField(hh));
   for (const [u, other] of [[wu, hu], [hu, wu]]) {
     u.addEventListener('change', () => {
-      // percent and pixels go together on both rows only when picked; physical units are shared
-      if (u.value !== 'percent' && other.value !== 'percent') other.value = u.value;
+      // linked sizes share their unit (Photoshop); unlinked, percent stays on its own row
+      if (keep.box.checked || (u.value !== 'percent' && other.value !== 'percent')) other.value = u.value;
       show();
     });
   }
@@ -481,7 +480,7 @@ function spot(c, x, y) {
  * and `sampleAt(x, y)` reads it at document coordinates (eyedroppers). Defaults follow the active
  * layer: an adjustment layer looks at what is below it, an image layer at its own pixels.
  */
-function makeEnv(P, { source = null, sampleAt = null } = {}) {
+function makeEnv(P, { source = null, sampleAt = null, ctls = {} } = {}) {
   const api = P || apiP;
   const doc = api?.doc;
   let cached = null;
@@ -501,7 +500,6 @@ function makeEnv(P, { source = null, sampleAt = null } = {}) {
     if (!source && l?.kind === 'raster' && l.canvas) return spot(l.canvas, x - l.x, y - l.y);
     return spot(src(), x, y);
   });
-  const ctls = {};
   return {
     P: api,
     histSource: src,
@@ -516,7 +514,8 @@ function makeEnv(P, { source = null, sampleAt = null } = {}) {
  * Controls for a params definition list [key, label, min, max, default, kind]. kind: 'bool' | 'color' |
  * 'curve' | 'gradient' | 'pattern' | 'blend' | 'kernel' | 'hidden' | [[value, label]…] (a select) | a
  * number (slider step) | the name of a custom editor (adjui.js). onChange(params, done).
- * `envOpts` tells custom editors what the picture is: { source, sampleAt } (see makeEnv).
+ * `envOpts` tells custom editors what the picture is: { source, sampleAt } (see makeEnv); its `ctls`
+ * object gets a setter per plain control (key → set(v)) so a caller can move them.
  */
 export function paramEditors(defs, params, onChange, P = null, envOpts = {}) {
   ensureAdjStyle();
@@ -824,7 +823,7 @@ function liveLayerDialog(P, { title, defs, params, compute, label, slow = false,
     P.redraw();
   };
   const sampleAt = (x, y) => spot(base, x - bx, y - by);
-  openModal({
+  const dlg = openModal({
     title,
     width: box ? '560px' : '460px',
     peek: true,
@@ -833,9 +832,10 @@ function liveLayerDialog(P, { title, defs, params, compute, label, slow = false,
     buttons: [{ label: '취소' }, {
       label: '확인', primary: true, action: () => {
         clearTimeout(timer);
+        // set before the window closes: closing undoes the preview unless the result is kept
+        applied = true;
         const finish = () => {
           preview(true);
-          applied = true;
           P.commit(label, before);
           if (record) P.recordStep?.({ ...record, params: structuredClone(params) });
         };
@@ -855,6 +855,23 @@ function liveLayerDialog(P, { title, defs, params, compute, label, slow = false,
       }
     },
   });
+  if (boxC) {
+    // a click on the picture around the window shows that spot in the preview box (Photoshop)
+    const back = dlg.modal.parentElement;
+    const stageAt = (e) => {
+      const r = document.querySelector('.ph-stage')?.getBoundingClientRect();
+      return e.target === back && r && e.clientX >= r.left && e.clientX < r.right && e.clientY >= r.top && e.clientY < r.bottom;
+    };
+    back.addEventListener('pointermove', (e) => {
+      back.style.cursor = stageAt(e) ? 'crosshair' : '';
+    });
+    back.addEventListener('pointerdown', (e) => {
+      if (!stageAt(e) || picking) return;
+      const pt = P.toDoc(e.clientX, e.clientY);
+      bc = { x: pt.x - bx, y: pt.y - by };
+      drawBox();
+    });
+  }
   schedule(true);
 }
 
@@ -862,6 +879,7 @@ export function adjustDialog(P, type) {
   const def = ADJUSTMENTS[type];
   if (!P.doc) return undefined;
   if (P.channelEdit?.('adjust', type)) return undefined; // an alpha channel / quick mask (selchan.js)
+  if (maskDialog(P, 'adjust', type)) return undefined; // the layer mask / a smart object's filter mask
   const params = defaultParams(type);
   if (P.doc?.active?.kind === 'smart') return smartFilterDialog(P, `adj:${type}`, params);
   if (!visibleParams(def.params).length) {
@@ -908,12 +926,193 @@ export function applyToLayer(P, fn) {
   doc.touch(l);
 }
 
+// ---------------------------------------------------------------- a mask as the target
+
+// adjustments that mean something on a grey mask (Photoshop greys out the colour ones there)
+const MASK_ADJ = new Set(['levels', 'curves', 'brightness', 'exposure', 'invert', 'posterize', 'threshold', 'equalize', 'shadowsHighlights']);
+
+/** A mask canvas (its alpha is the value) as an opaque grey picture, and back. */
+function maskToGrey(c) {
+  const img = c.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, c.width, c.height);
+  const d = img.data;
+  for (let i = 0; i < d.length; i += 4) {
+    d[i] = d[i + 1] = d[i + 2] = d[i + 3];
+    d[i + 3] = 255;
+  }
+  const out = makeCanvas(c.width, c.height);
+  out.getContext('2d').putImageData(img, 0, 0);
+  return out;
+}
+function greyToMask(c) {
+  const img = c.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, c.width, c.height);
+  const d = img.data;
+  for (let i = 0; i < d.length; i += 4) {
+    d[i + 3] = Math.round(0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]);
+    d[i] = d[i + 1] = d[i + 2] = 0;
+  }
+  const out = makeCanvas(c.width, c.height);
+  out.getContext('2d').putImageData(img, 0, 0);
+  return out;
+}
+
+/** The new mask `out` kept only inside the selection; outside, the old values of `orig` stay. */
+function maskInSelection(P, mt, orig, out) {
+  const sel = P.doc.selection?.canvas;
+  if (!sel) return out;
+  const keep = cloneCanvas(orig);
+  const kg = keep.getContext('2d');
+  kg.globalCompositeOperation = 'destination-out';
+  kg.drawImage(sel, -mt.x, -mt.y);
+  const g = out.getContext('2d');
+  g.globalCompositeOperation = 'destination-in';
+  g.drawImage(sel, -mt.x, -mt.y);
+  // both are amounts in alpha: they add up
+  g.globalCompositeOperation = 'lighter';
+  g.drawImage(keep, 0, 0);
+  g.globalCompositeOperation = 'source-over';
+  return out;
+}
+
+/** The mask being painted (P.maskTarget) gets a private canvas; returns its writer. Raw. */
+function maskWriter(P, mt) {
+  const g = mt.edit();
+  return (c) => {
+    g.globalCompositeOperation = 'copy';
+    g.drawImage(c, 0, 0);
+    g.globalCompositeOperation = 'source-over';
+    if (mt.kind === 'layer' || mt.kind === 'filter') P.doc.touch(P.doc.active);
+    P.doc.rev++;
+  };
+}
+
+const maskName = (mt) => ({ layer: '레이어 마스크', filter: '고급 필터 마스크', quick: '빠른 마스크' })[mt.kind] || '알파 채널';
+const runOn = (kind, id, c, p, P) => (kind === 'adjust' ? adjustCanvas(c, id, p, P) : applyFilter(c, id, p, { fg: P.fg, bg: P.bg }));
+
+/**
+ * Image ▸ Adjustments and filters with the layer mask (or a smart object's filter mask) targeted
+ * work on the mask as a grey picture, as in Photoshop (Ctrl+I inverts the mask, Gaussian Blur
+ * softens it…). Alpha channels and the quick mask go through P.channelEdit first (selchan.js).
+ * Returns true when it took over.
+ */
+function maskDialog(P, kind, id) {
+  const mt = P.maskTarget?.();
+  if (!mt || (mt.kind !== 'layer' && mt.kind !== 'filter')) return false;
+  const def = kind === 'adjust' ? ADJUSTMENTS[id] : FILTERS[id];
+  if (!def) return false;
+  const name = maskName(mt);
+  if ((kind === 'adjust' && !MASK_ADJ.has(id)) || (kind === 'filter' && (def.dialog || def.neural))) {
+    toast(`${def.name}은(는) ${name}에 쓸 수 없습니다. 레벨·곡선·반전·흐림 효과 등을 쓰거나, 레이어 패널에서 레이어 썸네일을 눌러 그림으로 돌아가세요.`);
+    return true;
+  }
+  const doc = P.doc;
+  const label = `${def.name} (${name})`;
+  const params = kind === 'adjust' ? defaultParams(id) : randomize(id, lastFilter?.id === id ? structuredClone(lastFilter.params) : defaultFilterParams(id));
+  const remember = () => {
+    if (kind === 'filter') lastFilter = { id, params: structuredClone(params) };
+  };
+  const before = doc.capture();
+  const orig = mt.canvas;
+  const write = maskWriter(P, mt);
+  const full = (p) => maskInSelection(P, mt, orig, greyToMask(runOn(kind, id, maskToGrey(orig), p, P)));
+  if (!visibleParams(def.params).length) {
+    write(full(params));
+    P.commit(label, before);
+    remember();
+    return true;
+  }
+  // previews of a big mask are worked out on a smaller copy
+  const k = Math.min(1, Math.sqrt(1.5e6 / (orig.width * orig.height)));
+  let grey = null;
+  const small = () => {
+    if (grey) return grey;
+    const c = makeCanvas(Math.max(1, Math.round(orig.width * k)), Math.max(1, Math.round(orig.height * k)));
+    c.getContext('2d').drawImage(orig, 0, 0, c.width, c.height);
+    grey = maskToGrey(c);
+    return grey;
+  };
+  let timer = 0;
+  let ok = false;
+  const preview = () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      try {
+        if (k >= 1) return write(full(params));
+        const r = greyToMask(runOn(kind, id, small(), params, P));
+        const out = makeCanvas(orig.width, orig.height);
+        const og = out.getContext('2d');
+        og.imageSmoothingQuality = 'high';
+        og.drawImage(r, 0, 0, out.width, out.height);
+        write(maskInSelection(P, mt, orig, out));
+      } catch (err) {
+        toast(String(err.message || err));
+      }
+      P.redraw();
+    }, 40);
+  };
+  const controls = paramEditors(def.params, params, preview, P, { source: () => maskToGrey(orig), sampleAt: (x, y) => spot(maskToGrey(orig), x - mt.x, y - mt.y) });
+  // the editors' channel pickers (RGB / 빨강 / 녹색 / 파랑) offer only the mask, as in Photoshop
+  for (const c of controls) {
+    for (const s of c.querySelectorAll?.('select') || []) {
+      const v = [...s.options].map((o) => o.value);
+      if (v.length === 4 && v[1] === 'r' && v[2] === 'g' && v[3] === 'b') {
+        s.options[0].textContent = name;
+        while (s.options.length > 1) s.remove(1);
+      }
+    }
+  }
+  openModal({
+    title: `${def.name} — ${name}`,
+    width: '460px',
+    peek: true,
+    body: [...controls, h('div.note', `${name}에 적용합니다 (흰색 = 보임, 검정 = 숨김). 그림에 쓰려면 레이어 패널에서 레이어 썸네일을 누르세요.`)],
+    buttons: [{ label: '취소' }, {
+      label: '확인', primary: true, action: () => {
+        clearTimeout(timer);
+        ok = true;
+        write(full(params));
+        P.commit(label, before);
+        remember();
+      },
+    }],
+    onClose: () => {
+      clearTimeout(timer);
+      picking?.cancel();
+      if (!ok) {
+        doc.restore(before);
+        P.afterHistory();
+      }
+    },
+  });
+  preview();
+  return true;
+}
+
+/** Ctrl+F on any mask being painted (layer mask, filter mask, alpha channel, quick mask). */
+function repeatOnMask(P, mt, id, params) {
+  const f = FILTERS[id];
+  if (f.dialog || f.neural) return toast(`${f.name}은(는) ${maskName(mt)}에 쓸 수 없습니다`);
+  const before = P.doc.capture();
+  const orig = mt.canvas;
+  maskWriter(P, mt)(maskInSelection(P, mt, orig, greyToMask(runOn('filter', id, maskToGrey(orig), params, P))));
+  P.commit(`${f.name} (${maskName(mt)})`, before);
+  P.emit('channels');
+  return undefined;
+}
+
 let lastFilter = null;
 export const lastFilterInfo = () => lastFilter;
-/** A filter's own window, if it has one (Camera Raw). */
+/** Filters with windows of their own (Camera Raw, the Filter Gallery) become Ctrl+F's filter too. */
+export const setLastFilter = (id, params) => {
+  lastFilter = { id, params: structuredClone(params) };
+};
+/** A filter's own window, if it has one (Camera Raw, the Filter Gallery). */
 const ownDialog = (P, id, params, extra = {}) => {
   if (FILTERS[id]?.dialog === 'camraw') {
     cameraRawDialog(P, { params, ...extra });
+    return true;
+  }
+  if (FILTERS[id]?.dialog === 'gallery' && P.cmd.filterGallery) {
+    P.cmd.filterGallery();
     return true;
   }
   return false;
@@ -927,6 +1126,7 @@ export function filterDialog(P, id) {
   const f = FILTERS[id];
   if (!f || !P.doc) return undefined;
   if (P.channelEdit?.('filter', id)) return undefined; // an alpha channel / quick mask (selchan.js)
+  if (maskDialog(P, 'filter', id)) return undefined; // the layer mask / a smart object's filter mask
   const params = randomize(id, lastFilter?.id === id ? structuredClone(lastFilter.params) : defaultFilterParams(id));
   if (ownDialog(P, id, lastFilter?.id === id ? lastFilter.params : null)) return undefined;
   if (P.doc?.active?.kind === 'smart') return smartFilterDialog(P, id, params);
@@ -957,6 +1157,8 @@ export function repeatFilter(P) {
   if (!P.doc) return undefined;
   const { id } = lastFilter;
   const params = randomize(id, structuredClone(lastFilter.params));
+  const mt = P.maskTarget?.();
+  if (mt) return repeatOnMask(P, mt, id, params);
   if (P.doc?.active?.kind === 'smart') {
     const l = P.doc.active;
     P.run(`고급 필터: ${FILTERS[id].name}`, () => { l.smart = { ...l.smart, filters: [...(l.smart.filters || []), { id, params: { ...params, _fg: P.fg, _bg: P.bg }, enabled: true }] }; P.doc.touch(l); });
@@ -1034,148 +1236,6 @@ export function smartFilterDialog(P, id, params, index = null) {
     },
   });
   apply();
-  return undefined;
-}
-
-// ---------------------------------------------------------------- layer style
-
-const BLEND = 'blend';
-const FX_FIELDS = {
-  dropShadow: [['blend', '혼합 모드', null, null, 'multiply', BLEND], ['color', '색', null, null, '#000000', 'color'], ['opacity', '불투명도 (%)', 0, 100, 75], ['angle', '각도 (°)', -180, 180, 120], ['distance', '거리 (px)', 0, 300, 5], ['spread', '스프레드 (%)', 0, 100, 0], ['size', '크기 (px)', 0, 250, 5], ['knockout', '레이어가 그림자를 가림', null, null, true, 'bool']],
-  innerShadow: [['blend', '혼합 모드', null, null, 'multiply', BLEND], ['color', '색', null, null, '#000000', 'color'], ['opacity', '불투명도 (%)', 0, 100, 75], ['angle', '각도 (°)', -180, 180, 120], ['distance', '거리 (px)', 0, 300, 5], ['choke', '경계 감소 (%)', 0, 100, 0], ['size', '크기 (px)', 0, 250, 5]],
-  outerGlow: [['blend', '혼합 모드', null, null, 'screen', BLEND], ['color', '색', null, null, '#ffffbe', 'color'], ['opacity', '불투명도 (%)', 0, 100, 75], ['spread', '스프레드 (%)', 0, 100, 0], ['size', '크기 (px)', 0, 250, 5]],
-  innerGlow: [['blend', '혼합 모드', null, null, 'screen', BLEND], ['color', '색', null, null, '#ffffbe', 'color'], ['opacity', '불투명도 (%)', 0, 100, 75], ['source', '소스', null, null, 'edge', [['edge', '가장자리'], ['center', '가운데']]], ['choke', '경계 감소 (%)', 0, 100, 0], ['size', '크기 (px)', 0, 250, 5]],
-  bevel: [['style', '스타일', null, null, 'inner bevel', [['inner bevel', '내부 경사'], ['outer bevel', '외부 경사'], ['emboss', '엠보스'], ['pillow emboss', '쿠션 엠보스']]], ['technique', '기법', null, null, 'smooth', [['smooth', '매끄럽게'], ['chisel hard', '단단하게 깎기'], ['chisel soft', '부드럽게 깎기']]], ['depth', '깊이 (%)', 1, 1000, 100], ['direction', '방향', null, null, 'up', [['up', '위로'], ['down', '아래로']]], ['size', '크기 (px)', 0, 250, 5], ['soften', '부드럽게 (px)', 0, 16, 0], ['angle', '빛의 각도 (°)', -180, 180, 120], ['altitude', '빛의 높이 (°)', 0, 90, 30],
-    ['highlightBlend', '밝은 영역 모드', null, null, 'screen', BLEND], ['highlightColor', '밝은 영역 색', null, null, '#ffffff', 'color'], ['highlightOpacity', '밝은 영역 불투명도 (%)', 0, 100, 75], ['shadowBlend', '그림자 모드', null, null, 'multiply', BLEND], ['shadowColor', '그림자 색', null, null, '#000000', 'color'], ['shadowOpacity', '그림자 불투명도 (%)', 0, 100, 75]],
-  satin: [['blend', '혼합 모드', null, null, 'multiply', BLEND], ['color', '색', null, null, '#000000', 'color'], ['opacity', '불투명도 (%)', 0, 100, 50], ['angle', '각도 (°)', -180, 180, 19], ['distance', '거리 (px)', 0, 250, 11], ['size', '크기 (px)', 0, 250, 14], ['invert', '반전', null, null, true, 'bool']],
-  colorOverlay: [['blend', '혼합 모드', null, null, 'normal', BLEND], ['color', '색', null, null, '#ff0000', 'color'], ['opacity', '불투명도 (%)', 0, 100, 100]],
-  gradientOverlay: [['blend', '혼합 모드', null, null, 'normal', BLEND], ['opacity', '불투명도 (%)', 0, 100, 100], ['gradient', '그레이디언트', null, null, null, 'gradient'], ['reverse', '반전', null, null, false, 'bool'], ['style', '스타일', null, null, 'linear', GRADIENT_STYLES], ['angle', '각도 (°)', -180, 180, 90], ['scale', '비율 (%)', 10, 150, 100]],
-  patternOverlay: [['blend', '혼합 모드', null, null, 'normal', BLEND], ['opacity', '불투명도 (%)', 0, 100, 100], ['pattern', '패턴', null, null, 'checker', 'pattern'], ['scale', '비율 (%)', 1, 1000, 100]],
-  stroke: [['size', '크기 (px)', 1, 250, 3], ['position', '위치', null, null, 'outside', [['outside', '바깥쪽'], ['inside', '안쪽'], ['center', '가운데']]], ['blend', '혼합 모드', null, null, 'normal', BLEND], ['opacity', '불투명도 (%)', 0, 100, 100], ['fillType', '칠 유형', null, null, 'color', [['color', '색상'], ['gradient', '그레이디언트']]], ['color', '색', null, null, '#000000', 'color'], ['gradient', '그레이디언트', null, null, null, 'gradient'], ['angle', '각도 (°)', -180, 180, 90]],
-};
-const FX_LIST = ['bevel', 'stroke', 'innerShadow', 'innerGlow', 'satin', 'colorOverlay', 'gradientOverlay', 'patternOverlay', 'outerGlow', 'dropShadow'];
-const PCT = new Set(['opacity', 'highlightOpacity', 'shadowOpacity']);
-
-const userStyles = () => {
-  try {
-    return JSON.parse(localStorage.getItem('montage.photo.styles') || '[]');
-  } catch {
-    return [];
-  }
-};
-
-/** Photoshop-like layer style dialog: sections on the left, settings on the right, live preview. */
-export function layerStyleDialog(P, start = 'blending') {
-  const doc = P.doc;
-  const l = doc.active;
-  if (!l || l.kind === 'adjust') return toast('스타일은 조정 레이어가 아닌 레이어에 넣을 수 있습니다');
-  const before = doc.capture();
-  const fx = normalizeFx(structuredClone(l.fx || {}));
-  const blending = { blend: l.blend, opacity: Math.round(l.opacity * 100), fillOpacity: Math.round((l.fillOpacity ?? 1) * 100), thisLo: l.blendIf?.this[0] ?? 0, thisLo2: l.blendIf?.this[1] ?? 0, thisHi2: l.blendIf?.this[2] ?? 255, thisHi: l.blendIf?.this[3] ?? 255, underLo: l.blendIf?.under[0] ?? 0, underLo2: l.blendIf?.under[1] ?? 0, underHi2: l.blendIf?.under[2] ?? 255, underHi: l.blendIf?.under[3] ?? 255 };
-  let raf = 0;
-  const apply = () => {
-    raf = 0;
-    l.fx = structuredClone(fx);
-    l.blend = blending.blend;
-    l.opacity = blending.opacity / 100;
-    l.fillOpacity = blending.fillOpacity / 100;
-    const bi = { this: [blending.thisLo, Math.max(blending.thisLo, blending.thisLo2), Math.min(blending.thisHi, blending.thisHi2), blending.thisHi], under: [blending.underLo, Math.max(blending.underLo, blending.underLo2), Math.min(blending.underHi, blending.underHi2), blending.underHi] };
-    l.blendIf = bi.this[0] <= 0 && bi.this[3] >= 255 && bi.under[0] <= 0 && bi.under[3] >= 255 ? null : bi;
-    l._styled = null;
-    doc.touch(l);
-    P.redraw();
-  };
-  const schedule = () => { if (!raf) raf = requestAnimationFrame(apply); };
-  const side = h('div.ph-fxlist');
-  const pane = h('div.ph-fxpane');
-  let current = start;
-  const showSection = (k) => {
-    current = k;
-    side.querySelectorAll('[data-k]').forEach((r) => r.classList.toggle('on', r.dataset.k === k));
-    if (k === 'blending') {
-      const defs = [['blend', '혼합 모드', null, null, 'normal', l.kind === 'group' ? [['pass through', '통과'], ...BLEND_MODES.map(([id, n]) => [id, n])] : BLEND], ['opacity', '불투명도 (%)', 0, 100, 100], ['fillOpacity', '칠 불투명도 (%) — 효과는 그대로', 0, 100, 100]];
-      const bi = [['thisLo', '이 레이어: 검정 쪽 시작', 0, 255, 0], ['thisLo2', '이 레이어: 검정 쪽 끝 (부드럽게)', 0, 255, 0], ['thisHi2', '이 레이어: 흰색 쪽 시작 (부드럽게)', 0, 255, 255], ['thisHi', '이 레이어: 흰색 쪽 끝', 0, 255, 255], ['underLo', '아래 레이어: 검정 쪽 시작', 0, 255, 0], ['underLo2', '아래 레이어: 검정 쪽 끝 (부드럽게)', 0, 255, 0], ['underHi2', '아래 레이어: 흰색 쪽 시작 (부드럽게)', 0, 255, 255], ['underHi', '아래 레이어: 흰색 쪽 끝', 0, 255, 255]];
-      pane.replaceChildren(h('h4', '혼합 옵션'), ...paramEditors(defs, blending, schedule, P), h('h4', '혼합 조건 (Blend If, 회색 밝기 기준)'), h('div.note', '이 레이어가 보일 밝기 범위와, 아래 레이어의 어느 밝기 위에서 보일지를 정합니다.'), ...paramEditors(bi, blending, schedule, P));
-      return;
-    }
-    if (k === 'styles') {
-      const presets = [...STYLE_PRESETS, ...userStyles().map((u) => ({ ...u, user: true }))];
-      pane.replaceChildren(h('h4', '스타일'), h('div.ph-stylegrid', presets.map((pr) => h('button.ph-stylecell', {
-        title: pr.name,
-        onclick: () => {
-          for (const key of FX_LIST) delete fx[key];
-          Object.assign(fx, structuredClone(pr.fx));
-          renderSide();
-          schedule();
-        },
-      }, h('span', pr.name)))));
-      return;
-    }
-    if (!fx[k]) fx[k] = { ...FX_DEFAULTS[k], enabled: true };
-    const ui = { ...fx[k] };
-    for (const key of PCT) if (key in ui) ui[key] = Math.round(ui[key] * 100);
-    const on = chk(!!fx[k].enabled, `${FX_NAMES[k]} 사용`);
-    on.box.addEventListener('change', () => {
-      fx[k] = { ...fx[k], enabled: on.box.checked };
-      renderSide();
-      schedule();
-    });
-    const eds = paramEditors(FX_FIELDS[k], ui, () => {
-      const v = { ...ui };
-      for (const key of PCT) if (key in v) v[key] = v[key] / 100;
-      fx[k] = { ...v, enabled: true };
-      on.box.checked = true;
-      renderSide();
-      schedule();
-    }, P);
-    pane.replaceChildren(h('h4', FX_NAMES[k]), on.el, ...eds, h('div.inline', h('button.small', { onclick: () => { fx[k] = { ...FX_DEFAULTS[k], enabled: fx[k].enabled }; showSection(k); schedule(); } }, '기본값으로')));
-  };
-  const renderSide = () => {
-    side.replaceChildren(
-      h(`button.ph-fxitem${current === 'styles' ? '.on' : ''}`, { 'data-k': 'styles', onclick: () => showSection('styles') }, '스타일'),
-      h(`button.ph-fxitem${current === 'blending' ? '.on' : ''}`, { 'data-k': 'blending', onclick: () => showSection('blending') }, '혼합 옵션'),
-      ...FX_LIST.map((k) => {
-        const box = h('input', { type: 'checkbox', checked: !!fx[k]?.enabled, 'aria-label': `${FX_NAMES[k]} 켜기` });
-        box.addEventListener('click', (e) => {
-          e.stopPropagation();
-          fx[k] = { ...(fx[k] || FX_DEFAULTS[k]), enabled: box.checked };
-          schedule();
-          if (box.checked) showSection(k);
-        });
-        return h(`div.ph-fxitem${current === k ? '.on' : ''}`, { 'data-k': k, role: 'button', tabindex: 0, onclick: () => showSection(k) }, box, h('span', FX_NAMES[k]));
-      }));
-  };
-  renderSide();
-  showSection(start);
-  let ok = false;
-  openModal({
-    title: '레이어 스타일',
-    width: '760px',
-    body: [h('div.ph-fxdlg', side, pane)],
-    buttons: [
-      {
-        label: '새 스타일로 저장…', action: async () => {
-          const { promptDialog } = await import('../ui/common.js');
-          const name = await promptDialog('새 스타일', '스타일 이름', '내 스타일');
-          if (!name) return false;
-          const list = userStyles();
-          list.push({ id: `u${Date.now()}`, name, fx: structuredClone(fx) });
-          try { localStorage.setItem('montage.photo.styles', JSON.stringify(list)); } catch { /* storage unavailable */ }
-          toast(`스타일 "${name}"을(를) 저장했습니다 (스타일 패널·스타일 목록)`);
-          return false;
-        },
-      },
-      { label: '취소' },
-      { label: '확인', primary: true, action: () => { cancelAnimationFrame(raf); apply(); ok = true; P.commit('레이어 스타일', before); } },
-    ],
-    onClose: () => {
-      cancelAnimationFrame(raf);
-      if (!ok) {
-        doc.restore(before);
-        P.afterHistory();
-      }
-    },
-  });
   return undefined;
 }
 

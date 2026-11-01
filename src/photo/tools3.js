@@ -590,7 +590,7 @@ export function installTools3(P) {
         { label: '반시계 방향 15°', action: () => P.setViewRotation(rot - 15) },
         { label: '시계 방향 90°', action: () => P.setViewRotation(rot + 90) },
         { label: '회전 초기화 (0°)', disabled: !rot, action: () => P.setViewRotation(0) },
-      ] });
+      ] }, { label: '가로로 뒤집기 (화면만)', checked: !!doc()?.view?.flip, disabled: !doc(), action: () => P.setViewFlip?.() });
       return items;
     };
     const orig = P.menus['레이어'];

@@ -89,15 +89,24 @@ export function gradientEditorDialog(P, gr, onApply = () => {}) {
   };
   const alphaAt = (t) => gradientLut(g, { fg: fg(), bg: bg() })[clamp(Math.round(t * 255), 0, 255) * 4 + 3] / 255;
 
-  /** Drag a stop (or midpoint) along a strip; pulling a stop far off the strip removes it. */
-  const dragOn = (el, strip, onMove, onUp, { removable = false } = {}) => {
+  /**
+   * Drag a stop (or midpoint) along a strip; pulling a stop far off the strip removes it. Pressing
+   * selects it (onDown); the strips are only rebuilt after a real drag, so the element stays for its
+   * click and double-click.
+   */
+  const dragOn = (el, strip, onDown, onMove, onUp, { removable = false } = {}) => {
     el.addEventListener('pointerdown', (e) => {
       e.preventDefault();
       e.stopPropagation();
       el.setPointerCapture?.(e.pointerId);
       const r = strip.getBoundingClientRect();
+      const x0 = e.clientX;
       let off = false;
+      let moved = false;
+      onDown();
       const mv = (ev) => {
+        if (!moved && Math.abs(ev.clientX - x0) < 2 && Math.abs(ev.clientY - e.clientY) < 2) return;
+        moved = true;
         off = removable && Math.abs(ev.clientY - (r.top + r.height / 2)) > 40;
         el.style.opacity = off ? '0.3' : '';
         onMove(clamp((ev.clientX - r.left) / r.width, 0, 1));
@@ -106,7 +115,7 @@ export function gradientEditorDialog(P, gr, onApply = () => {}) {
         el.removeEventListener('pointermove', mv);
         el.removeEventListener('pointerup', up);
         el.removeEventListener('pointercancel', up);
-        onUp(off);
+        if (moved) onUp(off);
       };
       el.addEventListener('pointermove', mv);
       el.addEventListener('pointerup', up);
@@ -115,6 +124,13 @@ export function gradientEditorDialog(P, gr, onApply = () => {}) {
   };
 
   const paintBar = () => bar.replaceChildren(gradientSwatch(g, W, 30, fg(), bg()));
+  /** Select a stop or midpoint without rebuilding the strips. */
+  const select = (s2, el) => {
+    sel = s2;
+    for (const x of [...alphaStrip.children, ...colorStrip.children]) x.classList.remove('on');
+    el.classList.add('on');
+    renderDetail();
+  };
 
   function renderStops() {
     for (const [kind, strip] of [['a', alphaStrip], ['c', colorStrip]]) {
@@ -127,7 +143,7 @@ export function gradientEditorDialog(P, gr, onApply = () => {}) {
         const [b, bi] = order[k];
         const mid = (b.mid ?? 50) / 100;
         const m = h(`div.ge-mid${sel.kind === kind && (sel.i === bi || sel.i === order[k - 1][1]) ? '.on' : ''}`, { style: { left: `${(a.pos + (b.pos - a.pos) * mid) * 100}%` }, title: '중간점: 끌어서 두 색이 반씩 섞이는 곳을 옮깁니다', 'aria-label': '중간점' });
-        dragOn(m, strip, (t) => {
+        dragOn(m, strip, () => select({ kind, i: bi, mid: true }, m), (t) => {
           const span = Math.max(1e-6, b.pos - a.pos);
           b.mid = clamp(Math.round(((t - a.pos) / span) * 100), 5, 95);
           m.style.left = `${(a.pos + span * (b.mid / 100)) * 100}%`;
@@ -140,7 +156,7 @@ export function gradientEditorDialog(P, gr, onApply = () => {}) {
       arr.forEach((s, i) => {
         const col = kind === 'c' ? resolveStopColor(s.color, fg(), bg()) : `rgba(0,0,0,${s.a})`;
         const el = h(`button.ge-stop${sel.kind === kind && sel.i === i && !sel.mid ? '.on' : ''}`, { style: { left: `${s.pos * 100}%`, background: kind === 'c' ? col : `linear-gradient(${col}, ${col}), #fff` }, 'aria-label': `${kind === 'c' ? '색상' : '불투명도'} 정지점 ${Math.round(s.pos * 100)}%` });
-        dragOn(el, strip, (t) => {
+        dragOn(el, strip, () => select({ kind, i }, el), (t) => {
           s.pos = t;
           el.style.left = `${t * 100}%`;
           sel = { kind, i };
@@ -153,10 +169,6 @@ export function gradientEditorDialog(P, gr, onApply = () => {}) {
           }
           render();
         }, { removable: true });
-        el.addEventListener('click', () => {
-          sel = { kind, i };
-          render();
-        });
         if (kind === 'c') el.addEventListener('dblclick', () => pickColor(s));
         els.push(el);
       });

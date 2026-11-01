@@ -156,9 +156,13 @@ export function neuralFiltersDialog(P) {
     const active = LIST.filter(([id]) => st[id].on);
     if (!active.length) return;
     clearTimeout(timer);
-    // back to the original before computing the real thing
-    doc.restore(before);
-    P.afterHistory();
+    // back to the original before computing the real thing (a smart object was never changed)
+    if (!smart) {
+      doc.restore(before);
+      P.afterHistory();
+    }
+    // the closing window must not undo what is applied below
+    applied = true;
     toast('뉴럴 필터 적용 중…');
     setTimeout(() => {
       const full = run(src);
@@ -168,14 +172,14 @@ export function neuralFiltersDialog(P) {
         const k = zoomOn ? +st.superZoom.params.scale || 2 : 1;
         const out = zoomOn ? superZoom(full, k, st.superZoom.params) : full;
         P.openCanvas(out, `${doc.name}${zoomOn ? ` 슈퍼 줌 ${k}배` : ' 뉴럴 필터'}`);
-        applied = true;
         return;
       }
       if (mode === 'smart' && smart) {
         P.run('고급 필터: 뉴럴 필터', () => {
           const add = active.filter(([id]) => id !== 'superZoom').map(([id]) => ({ id, params: { ...st[id].params, _fg: P.fg, _bg: P.bg }, enabled: true }));
-          l.smart = { ...l.smart, filters: [...(l.smart.filters || []), ...add] };
-          doc.touch(l);
+          const sl = doc.layers.find((x) => x.id === l.id) || l;
+          sl.smart = { ...sl.smart, filters: [...(sl.smart.filters || []), ...add] };
+          doc.touch(sl);
         });
       } else if (mode === 'newLayer') {
         P.run('뉴럴 필터', () => {
@@ -192,7 +196,6 @@ export function neuralFiltersDialog(P) {
       } else {
         P.run('뉴럴 필터', () => applyToLayer(P, () => full));
       }
-      applied = true;
       for (const [id] of active) if (id !== 'superZoom') P.recordStep?.({ type: 'filter', id, params: structuredClone(st[id].params) });
     }, 40);
   };

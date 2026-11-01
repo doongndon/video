@@ -19,6 +19,7 @@ import { openExportFrameDialog } from './export-dialog.js';
 import { motionPath, rawSetPathKey, setAutoKey } from '../motionkeys.js';
 import { extendMenu } from './menubar.js';
 import { injectStyle } from './style-inject.js';
+import { insertTemplate } from '../templates.js';
 
 export const programApi = {};
 
@@ -2147,11 +2148,20 @@ export function createProgramMonitor() {
     if (prevHover !== hoverGuide) drawOverlay();
   }
 
-  // drop media onto the program monitor = overwrite at playhead on the first free video track
+  // drop media onto the program monitor = overwrite at playhead on the first free video track;
+  // a title template (기본 그래픽 ▸ 찾아보기) goes in at the playhead
   view.addEventListener('dragover', (e) => {
-    if ([...e.dataTransfer.types].includes('application/x-montage-media')) e.preventDefault();
+    const types = [...e.dataTransfer.types];
+    if (types.includes('application/x-montage-media') || types.includes('application/x-montage-template')) e.preventDefault();
   });
   view.addEventListener('drop', (e) => {
+    const tpl = e.dataTransfer.getData('application/x-montage-template') || dnd.payload?.template;
+    if (tpl) {
+      e.preventDefault();
+      dnd.payload = null;
+      insertTemplate(tpl, store.ui.playhead);
+      return;
+    }
     const items = dnd.payload?.items;
     if (!items?.length) return;
     e.preventDefault();

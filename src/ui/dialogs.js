@@ -339,12 +339,35 @@ export async function openCountingLeaderDialog() {
  * 롤/크롤 옵션 (Premiere's 반응형 디자인 - 시간 ▸ 롤): make the selected text (or any picture) clips
  * roll up the screen or crawl sideways by keyframing their position.
  */
+/**
+ * measure(clip) for applyRollCrawl: the clip's box in sequence px where it rests (a roll already on
+ * it is undone first). Shared by the 롤/크롤 옵션 dialog and the 기본 그래픽 panel.
+ */
+export async function rollMeasure() {
+  const [{ Compositor }, { playback }, { evalEffect }] = await Promise.all([import('../compositor.js'), import('../playback.js'), import('../model.js')]);
+  const comp = new Compositor();
+  return (c) => {
+    const t = clamp(store.ui.playhead, c.start, clipEnd(c) - 1e-3);
+    const q = comp.clipQuad(store.seq, c, t, playback.provider);
+    const motion = c.effects.find((e) => e.type === 'motion');
+    if (!q || !motion) return null;
+    const cur = evalEffect(motion, t - c.start);
+    const restOf = (k) => (motion.params[k].kf?.length ? (motion.params[k].restValue ?? motion.params[k].value) : motion.params[k].value);
+    const dx = restOf('posX') - cur.posX;
+    const dy = restOf('posY') - cur.posY;
+    const xs = q.map((p) => p[0] + dx);
+    const ys = q.map((p) => p[1] + dy);
+    return { x0: Math.min(...xs), x1: Math.max(...xs), y0: Math.min(...ys), y1: Math.max(...ys) };
+  };
+}
+
+/** Clips a roll / crawl can move: the selected visual clips with 모션. */
+export const rollTargets = () => store.selectedClips().filter((c) => c.kind !== 'audio' && c.kind !== 'adjustment' && c.effects.some((e) => e.type === 'motion'));
+
 export async function openRollCrawlDialog() {
-  const [{ applyRollCrawl, clearRollCrawl }, { Compositor }, { playback }, { evalEffect }] = await Promise.all([
-    import('../features.js'), import('../compositor.js'), import('../playback.js'), import('../model.js'),
-  ]);
+  const [{ applyRollCrawl, clearRollCrawl }, measure] = await Promise.all([import('../features.js'), rollMeasure()]);
   const s = store.seq;
-  const clips = store.selectedClips().filter((c) => c.kind !== 'audio' && c.kind !== 'adjustment' && c.effects.some((e) => e.type === 'motion'));
+  const clips = rollTargets();
   if (!clips.length) {
     toast('롤이나 크롤을 넣을 텍스트(또는 그림) 클립을 타임라인에서 선택하세요');
     return;
@@ -366,21 +389,6 @@ export async function openRollCrawlDialog() {
   };
   dir.addEventListener('change', sync);
   sync();
-  const comp = new Compositor();
-  // the clip's box in sequence px where it rests (a roll already on it is undone first)
-  const measure = (c) => {
-    const t = clamp(store.ui.playhead, c.start, clipEnd(c) - 1e-3);
-    const q = comp.clipQuad(store.seq, c, t, playback.provider);
-    const motion = c.effects.find((e) => e.type === 'motion');
-    if (!q || !motion) return null;
-    const cur = evalEffect(motion, t - c.start);
-    const restOf = (k) => (motion.params[k].kf?.length ? (motion.params[k].restValue ?? motion.params[k].value) : motion.params[k].value);
-    const dx = restOf('posX') - cur.posX;
-    const dy = restOf('posY') - cur.posY;
-    const xs = q.map((p) => p[0] + dx);
-    const ys = q.map((p) => p[1] + dy);
-    return { x0: Math.min(...xs), x1: Math.max(...xs), y0: Math.min(...ys), y1: Math.max(...ys) };
-  };
   const secs = (el) => Math.max(0, parseTimecode(el.value, s.fps) || 0);
   openModal({
     title: `롤/크롤 옵션${clips.length > 1 ? ` (클립 ${clips.length}개)` : ''}`,

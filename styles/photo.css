@@ -459,7 +459,7 @@ body.photo-mode.ph-hide-panels .ph-opts, body.photo-mode.ph-hide-panels .ph-tool
 body.photo-mode.ph-hide-side .ph-side { display: none; }
 .ph-lfilter { display: flex; align-items: center; gap: 4px; color: var(--text-faint); }
 .ph-lfind { flex: 1; min-width: 0; min-height: 0; height: calc(26px * var(--ui-scale)); }
-.ph-lkind { min-height: 0; height: calc(26px * var(--ui-scale)); max-width: 46%; }
+.ph-lkind { min-height: 0; height: calc(26px * var(--ui-scale)); max-width: 46%; padding-block: 0; }
 .ph-panel.history { min-height: 0; }
 .ph-hlist { display: flex; flex-direction: column; gap: 1px; min-height: 0; overflow: auto; }
 .ph-hrow.snap { display: inline-flex; align-items: center; gap: 4px; color: var(--text); }

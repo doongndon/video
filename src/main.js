@@ -21,6 +21,7 @@ import { openGuideDialog } from './ui/dialogs.js';
 import { createQuickPanel } from './ui/quick-panel.js';
 import { createAiPanel } from './ui/ai-panel.js';
 import { createEssentialSoundPanel } from './ui/essential-sound.js';
+import { createEssentialGraphicsPanel } from './ui/essential-graphics.js';
 import './ui/audio-menus.js';
 import { initMobile } from './ui/mobile.js';
 import { formatTimecode } from './util.js';
@@ -36,6 +37,7 @@ function buildWorkspace() {
   const multicam = createMulticamPanel();
   const quick = createQuickPanel();
   const ai = createAiPanel();
+  const graphics = createEssentialGraphicsPanel();
   panelGroup($('pg-top-left'), 'topLeft', [
     { id: 'source', title: '소스', body: createSourceMonitor() },
     { id: 'effectControls', title: '효과 컨트롤', body: createEffectControls() },
@@ -44,6 +46,7 @@ function buildWorkspace() {
     { id: 'mixer', title: '오디오 트랙 믹서', body: createMixerPanel() },
     { id: 'clipMixer', title: '오디오 클립 믹서', body: createClipMixerPanel() },
     { id: 'essentialSound', title: '기본 사운드', body: createEssentialSoundPanel() },
+    { id: 'essentialGraphics', title: '기본 그래픽', body: graphics, onShow: () => graphics.onShow(), onHide: () => graphics.onHide() },
     { id: 'scopes', title: 'Lumetri 범위', body: scopes, onShow: () => scopes.onShow(), onHide: () => scopes.setVisible(false) },
     { id: 'multicam', title: '멀티캠', body: multicam, onShow: () => multicam.onShow(), onHide: () => multicam.onHide() },
   ]);

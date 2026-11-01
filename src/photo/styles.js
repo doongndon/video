@@ -163,6 +163,7 @@ export function fxDocAnchored(fx) {
     const k = baseKey(key);
     if ((k === 'gradientOverlay' || (k === 'stroke' && e.fillType === 'gradient')) && e.align === false) return true;
     if ((k === 'patternOverlay' || (k === 'stroke' && e.fillType === 'pattern')) && e.link === false) return true;
+    if (k === 'bevel' && e.textureOn && e.texLink === false) return true;
   }
   return false;
 }
@@ -176,6 +177,7 @@ export function scaleFx(fx, k) {
     if (!e || typeof e !== 'object' || !FX_DEFAULTS[baseKey(key)]) continue;
     for (const f of SIZE) if (typeof e[f] === 'number') e[f] = Math.max(f === 'size' && baseKey(key) === 'stroke' ? 1 : 0, Math.round(e[f] * k * 10) / 10);
     if (baseKey(key) === 'patternOverlay' && typeof e.scale === 'number') e.scale = Math.max(1, Math.min(1000, Math.round(e.scale * k)));
+    if (baseKey(key) === 'bevel' && typeof e.texScale === 'number') e.texScale = Math.max(1, Math.min(1000, Math.round(e.texScale * k)));
   }
   return out;
 }
@@ -389,6 +391,7 @@ export function stylePasses(body, fx, { fg = '#000000', bg = '#ffffff', globalAn
   const gradient = (e, opts) => gradientIn(w, h, gradBox(e), e.gradient, { fg, bg, ...opts });
   // patterns start at the layer's origin (레이어에 연결) or the document's
   const patternAt = (e) => (e.link === false && docBox ? [docBox.x, docBox.y] : origin ? [origin.x, origin.y] : [0, 0]);
+  const texture = (bv) => (bv.textureOn && (bv.texDepth ?? 100) ? textureHeights(w, h, bv, patternAt({ link: bv.texLink })) : null);
   // enabled instances of an effect type, bottom (drawn first) to top
   const list = (k) => instanceKeys(fx, k).map((key) => fx[key]).filter((e) => e?.enabled).reverse();
   const global = (e) => (fx.useGlobalLight || e.useGlobalLight) && globalAngle != null;
@@ -546,14 +549,29 @@ export function stylePasses(body, fx, { fg = '#000000', bg = '#ffffff', globalAn
       for (let i = 0; i < A.length; i++) U[i] = Math.max(A[i], strokeA[i]);
       let uIn = null;
       const getUIn = () => (uIn ||= distanceTo(U, w, h, (a) => a < 0.5));
-      const ps = bevelPasses(U, w, h, { ...bv, style: 'inner bevel', altitude: alt }, getUIn, getOut, ang(bv));
+      const ps = bevelPasses(U, w, h, { ...bv, style: 'inner bevel', altitude: alt }, getUIn, getOut, ang(bv), texture(bv));
       for (const p of ps) maskedCanvas(p.canvas, strokeA);
       passes.push(...ps);
       continue;
     }
-    passes.push(...bevelPasses(A, w, h, { ...bv, altitude: alt }, getIn, getOut, ang(bv)));
+    passes.push(...bevelPasses(A, w, h, { ...bv, altitude: alt }, getIn, getOut, ang(bv), texture(bv)));
   }
   return passes;
+}
+
+/**
+ * 경사와 엠보스 ▸ 텍스처: the pattern's brightness as a height map (0..1, light = high; 반전 flips it),
+ * laid out like a pattern overlay (레이어에 연결: moves with the layer).
+ */
+function textureHeights(w, h, bv, at) {
+  const c = paintPattern(w, h, bv.texPattern || 'checker', bv.texScale ?? 100, ...at);
+  const d = c.getContext('2d').getImageData(0, 0, w, h).data;
+  const T = new Float32Array(w * h);
+  for (let i = 0, j = 0; j < T.length; i += 4, j++) {
+    const v = ((0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]) / 255) * (d[i + 3] / 255);
+    T[j] = bv.texInvert ? 1 - v : v;
+  }
+  return T;
 }
 
 /** Photoshop's noise slider: random dots knocked out of an effect (deterministic per pixel). */
@@ -568,7 +586,7 @@ function addNoise(s, amount) {
   }
 }
 
-function bevelPasses(A, w, h, bv, getIn, getOut, a) {
+function bevelPasses(A, w, h, bv, getIn, getOut, a, tex = null) {
   const size = bv.size;
   const style = bv.style || 'inner bevel';
   const Hm = new Float32Array(A.length);
@@ -606,8 +624,14 @@ function bevelPasses(A, w, h, bv, getIn, getOut, a) {
       const xr = soft[y * w + Math.min(w - 1, x + 1)];
       const yu = soft[Math.max(0, y - 1) * w + x];
       const yd = soft[Math.min(h - 1, y + 1) * w + x];
-      const nx = -(xr - xl) * 0.5 * depth;
-      const ny = -(yd - yu) * 0.5 * depth;
+      let nx = -(xr - xl) * 0.5 * depth;
+      let ny = -(yd - yu) * 0.5 * depth;
+      if (tex) {
+        // the texture bumps the surface inside the layer (깊이 ±1000%)
+        const k = ((bv.texDepth ?? 100) / 100) * 2 * A[i];
+        nx -= (tex[y * w + Math.min(w - 1, x + 1)] - tex[y * w + Math.max(0, x - 1)]) * 0.5 * k;
+        ny -= (tex[Math.min(h - 1, y + 1) * w + x] - tex[Math.max(0, y - 1) * w + x]) * 0.5 * k;
+      }
       const len = Math.hypot(nx, ny, 1);
       const shade = (nx * L[0] + ny * L[1] + L[2]) / len;
       // where the bevel is drawn
