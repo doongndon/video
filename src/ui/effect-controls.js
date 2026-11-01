@@ -399,14 +399,15 @@ export function createEffectControls({ only = null } = {}) {
     scroller.append(buildTop(c));
     const fixed = c.effects.filter((fx) => EFFECT_FIXED_TYPES.has(fx.type));
     const added = c.effects.filter((fx) => !EFFECT_FIXED_TYPES.has(fx.type));
-    scroller.append(h('div.ec-group.ec-row', c.kind === 'audio' ? '오디오 효과' : '비디오 효과'));
+    // Premiere's section headers: 비디오 (or 오디오), then the fixed effects and the added ones in order
+    scroller.append(h('div.ec-group.ec-row', { title: '효과는 위에서 아래 순서로 적용됩니다. 추가한 효과는 머리글을 끌어 순서를 바꿉니다.' }, c.kind === 'audio' ? '오디오' : '비디오'));
     for (const fx of fixed) scroller.append(buildEffect(c, fx));
-    scroller.append(h('div.ec-group.ec-row', added.length ? '추가한 효과 — 위에서 아래 순서로 적용 (머리글을 끌어 순서 바꾸기)' : '추가한 효과 없음 — "효과 추가" 또는 효과 패널에서 여기로 끌어다 놓기'));
+    if (!added.length) scroller.append(h('div.ec-group.ec-row.ec-none', '추가한 효과 없음 — "효과 추가" 또는 효과 패널에서 여기로 끌어다 놓기'));
     for (const fx of added) scroller.append(buildEffect(c, fx));
     // a linked pair: the audio clip's effects follow, as in Premiere's Effect Controls
     const audio = linkedAudio();
     if (audio) {
-      scroller.append(h('div.ec-group.ec-row', `오디오 효과 — ${audio.name || '연결된 오디오'}`));
+      scroller.append(h('div.ec-group.ec-row', { title: audio.name || '연결된 오디오' }, '오디오'));
       for (const fx of audio.effects) scroller.append(buildEffect(audio, fx));
     }
     // default mask target: the last mask-like effect on the clip
@@ -423,18 +424,58 @@ export function createEffectControls({ only = null } = {}) {
   function buildOnly(c) {
     const def = EFFECTS[only];
     const list = c.effects.filter((fx) => fx.type === only);
-    const title = h('span.title', c.name || c.kind);
     const addBtn = iconButton('plus', `${def?.name || only} 추가`, () => addEffectAt(c.id, only, Infinity), { label: list.length ? '하나 더 추가' : '효과 추가', cls: 'boxed' });
-    scroller.append(h('div.ec-top', h('div.ec-head', title, def && effectFitsClip(only, c.kind) ? addBtn : null)));
+    scroller.append(h('div.ec-top', h('div.ec-head', clipPicker(c), def && effectFitsClip(only, c.kind) ? addBtn : null)));
     if (!def || !effectFitsClip(only, c.kind)) {
       scroller.append(h('div.empty-hint', `${def?.name || only}은(는) 영상 클립에만 쓸 수 있습니다`));
       return;
     }
     if (!list.length) {
-      scroller.append(h('div.empty-hint', `이 클립에는 아직 ${def.name} 효과가 없습니다.\n"효과 추가"를 누르면 기본 교정 · 크리에이티브 · 곡선 ·\n색상 휠 · HSL 보조 · 비네팅을 여기서 조절할 수 있습니다.`));
+      // Premiere shows the sections before the effect exists: opening one adds the effect
+      const groups = [...new Set(def.params.map((p) => p.group).filter(Boolean))];
+      scroller.append(h('div.ec-row.ec-hrow.ec-lum-name', h('div.ec-l', h('div.ec-sec-head.fixed', h('span.fxname', def.name), h('button.fx-toggle', { disabled: true, title: '아직 적용되지 않음' }, 'fx')))));
+      for (const g of groups) {
+        const head = h('div.ec-mask-head', { style: { cursor: 'pointer' }, title: `${g} 열기 (클립에 ${def.name} 효과를 넣습니다)` }, h('span.twisty', icon('chevRight', 10)), h('span.mname', g));
+        head.addEventListener('click', () => {
+          addEffectAt(c.id, only, Infinity);
+          const fx = store.seq.clips[c.id]?.effects.filter((e) => e.type === only).pop();
+          if (!fx) return;
+          for (const x of groups) groupOpen.set(`${fx.id}§${x}`, x === g);
+          rebuild();
+        });
+        scroller.append(h('div.ec-row.ec-hrow.ec-subhead', h('div.ec-l', head), h('div.ec-t')));
+      }
+      scroller.append(h('div.ec-group.ec-row.ec-none', `구역을 열거나 "효과 추가"를 누르면 이 클립에 ${def.name} 효과가 들어갑니다`));
       return;
     }
     for (const fx of list) scroller.append(buildEffect(c, fx));
+  }
+
+  /**
+   * Premiere's clip selector: "소스 • 미디어 ▾" (the clips that use this source, and the ones under
+   * the playhead) and "시퀀스 • 클립" (the clip whose effects are shown).
+   */
+  function clipPicker(c) {
+    const m = c.mediaId ? store.project.media[c.mediaId] : null;
+    const src = h('button.ec-src', {
+      title: '소스: 같은 소스를 쓰는 클립이나 재생헤드 위치의 클립으로 바꾸기',
+      onclick: (e) => {
+        const r = e.currentTarget.getBoundingClientRect();
+        const all = Object.values(store.seq.clips);
+        const t = store.ui.playhead;
+        const label = (x) => `${x.name || x.kind} · ${tc(x.start)}`;
+        const pick = (x) => ({ label: label(x), checked: x.id === c.id, action: () => store.selectClips([x.id]) });
+        const same = c.mediaId ? all.filter((x) => x.mediaId === c.mediaId).sort((a, b) => a.start - b.start) : [];
+        const under = all.filter((x) => x.start <= t + 1e-6 && clipEnd(x) > t + 1e-6 && x.kind !== 'audio' && !same.includes(x));
+        showMenu([
+          same.length ? { group: '이 소스를 쓰는 클립' } : null, ...same.slice(0, 30).map(pick),
+          under.length ? { group: '재생헤드 위치의 클립' } : null, ...under.map(pick),
+          !same.length && !under.length ? { label: '고를 클립 없음', disabled: true } : null,
+        ].filter(Boolean), r.left, r.bottom + 2);
+      },
+    }, h('span.ec-k', '소스'), ' • ', h('span.ec-n', m?.name || c.name || c.kind), icon('chevDown', 10));
+    const seq = h('span.ec-seq', { title: '이 시퀀스의 클립에 적용된 효과' }, h('span.ec-k', store.seq.name || '시퀀스'), ' • ', h('span.ec-n', c.name || m?.name || c.kind));
+    return h('span.ec-picker', src, seq);
   }
 
   function setMaskTarget(fxId) {
@@ -451,15 +492,12 @@ export function createEffectControls({ only = null } = {}) {
   }
 
   function buildTop(c) {
-    const title = h('span.title');
-    const range = h('span.sub');
+    const picker = clipPicker(c);
     const dot = c.label ? h('span.label-dot', { style: { background: c.label } }) : null;
     updaters.push(() => {
       const cl = store.seq.clips[c.id];
       if (!cl) return;
-      title.textContent = cl.name || cl.kind;
-      title.title = cl.name || '';
-      range.textContent = `${tc(cl.start)} ~ ${tc(clipEnd(cl))}`;
+      picker.title = `${cl.name || cl.kind}: ${tc(cl.start)} ~ ${tc(clipEnd(cl))}`;
     });
     const addBtn = iconButton('plus', '효과 추가', (e) => openAddMenu(c, e), { label: '효과 추가', cls: 'boxed' });
     const tlBtn = iconButton('tlview', showTimeline ? '타임라인 보기 숨기기' : '타임라인 보기 표시', () => setTimelineView(!showTimeline));
@@ -468,7 +506,7 @@ export function createEffectControls({ only = null } = {}) {
       const r = e.currentTarget.getBoundingClientRect();
       showMenu(panelMenuItems(c), r.left, r.bottom + 2);
     });
-    const top = h('div.ec-top', h('div.ec-head', dot, title, range, addBtn, tlBtn, menuBtn));
+    const top = h('div.ec-top', h('div.ec-head', dot, picker, addBtn, tlBtn, menuBtn));
     if (wide) top.append(buildRuler(c));
     return top;
   }
@@ -614,7 +652,7 @@ export function createEffectControls({ only = null } = {}) {
     if (fixed) sec.dataset.fixed = '1';
     const toggle = h(`button.fx-toggle${fx.enabled ? '.on' : ''}`, { title: fx.enabled ? '효과 끄기 (바이패스)' : '효과 켜기', 'aria-pressed': String(fx.enabled) }, 'fx');
     toggle.addEventListener('click', () => mutate(fx.enabled ? '효과 끄기' : '효과 켜기', c, fx, (f) => { f.enabled = !f.enabled; }));
-    const twisty = h('span.twisty', { title: '접기/펴기' }, collapsed.has(fx.id) ? '▸' : '▾');
+    const twisty = h('span.twisty', { title: '접기/펴기' }, icon(collapsed.has(fx.id) ? 'chevRight' : 'chevDown', 10));
     twisty.addEventListener('click', () => {
       if (collapsed.has(fx.id)) collapsed.delete(fx.id);
       else collapsed.add(fx.id);
@@ -664,6 +702,15 @@ export function createEffectControls({ only = null } = {}) {
       }
       if (open) params.append(...buildParam(c, fx, pdef));
     }
+    // two colour wheels in a row sit side by side (Lumetri 크리에이티브: 어두운 영역 / 강조 표시 색조)
+    for (const row of [...params.children]) {
+      const next = row.nextElementSibling;
+      if (row.parentNode === params && row.querySelector(':scope > .ec-full > .ec-wide > .wheel-wrap') && next?.querySelector(':scope > .ec-full > .ec-wide > .wheel-wrap')) {
+        row.firstElementChild.classList.add('ec-wheels');
+        row.firstElementChild.append(next.querySelector('.ec-wide'));
+        next.remove();
+      }
+    }
     if (fx.type === 'timeRemap') params.append(fullRow(buildRampTools(c, fx)));
     // an effect may bring its own editor above its values (EQ curves: audio-fx2.js)
     if (def.widget) params.prepend(fullRow(def.widget({ clipId: c.id, fxId: fx.id })));
@@ -674,7 +721,7 @@ export function createEffectControls({ only = null } = {}) {
   }
 
   function subHead(label, open, onToggle) {
-    const tw = h('span.twisty', open ? '▾' : '▸');
+    const tw = h('span.twisty', icon(open ? 'chevDown' : 'chevRight', 10));
     const head = h('div.ec-mask-head', { style: { cursor: 'pointer' } }, tw, h('span.mname', label));
     head.addEventListener('click', onToggle);
     return h('div.ec-row.ec-hrow.ec-subhead', h('div.ec-l', head), h('div.ec-t'));
@@ -1034,7 +1081,35 @@ export function createEffectControls({ only = null } = {}) {
         if (label.textContent !== name) label.textContent = name;
       });
     }
-    const left = h('div.ec-l.ecp', twirl, stopwatch, label, h('span.ec-val', scr), tools);
+    // the Lumetri 색상 panel: a slider before the blue value, as in Premiere (double-click: default)
+    let slider = null;
+    if (only && !isMaskKey && Number.isFinite(pdef.min) && Number.isFinite(pdef.max)) {
+      slider = h('input.ec-lslider', { type: 'range', min: pdef.min, max: pdef.max, step: pdef.step ?? 1, value: evalParam(param, tLocal(c.id)), 'aria-label': pdef.label });
+      let begun = false;
+      slider.addEventListener('input', () => {
+        const clip = store.seq.clips[c.id];
+        const f = findFx(c.id, fx.id);
+        if (!clip || !f) return;
+        if (!begun) {
+          store.begin(`${pdef.label} 변경`);
+          begun = dragging = true;
+        }
+        edit.rawSetParam(clip, f, key, Number(slider.value));
+        store.changed();
+      });
+      slider.addEventListener('change', () => {
+        if (!begun) return;
+        begun = dragging = false;
+        store.commit();
+        afterDrag();
+      });
+      slider.addEventListener('dblclick', () => mutate(`${pdef.label} 재설정`, c, fx, (f) => edit.rawSetParam(store.seq.clips[c.id], f, key, pdef.default)));
+      updaters.push(() => {
+        const p = getP();
+        if (p && !begun) slider.value = evalParam(p, tLocal(c.id));
+      });
+    }
+    const left = h('div.ec-l.ecp', twirl, stopwatch, label, h('span.ec-val', slider, scr), tools);
     const cell = h('div.ec-t');
     const row = h(`div.ec-row.ec-prow${animated ? '.has-kf' : ''}`, left, cell);
     buildLane(c, fx, key, cell);

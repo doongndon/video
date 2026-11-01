@@ -42,18 +42,24 @@ export function createSourceMonitor() {
     ZOOM_LEVELS.map(([v, l]) => h('option', { value: v, selected: v === String(zoom) }, l)));
   zoomSel.addEventListener('change', () => setZoom(zoomSel.value));
   const safeBtn = iconButton('safe', '안전 여백 (TV 가장자리 잘림 확인)', () => setSafe(!safe));
-  const settingsBtn = iconButton('gear', '설정: 확대/축소 레벨·안전 여백', (e) => {
+  const settingsBtn = iconButton('wrench', '설정: 확대/축소 레벨·안전 여백', (e) => {
     const r = e.currentTarget.getBoundingClientRect();
     showMenu([
       { label: '확대/축소 레벨', submenu: ZOOM_LEVELS.map(([v, l]) => ({ label: l, checked: String(zoom) === v, action: () => setZoom(v) })) },
       { label: '안전 여백', checked: safe, action: () => setSafe(!safe) },
     ], r.left, r.top - 4);
   });
+  // Premiere's layout: timecode · 맞추기 … wrench · duration above the scrub bar, the transport
+  // buttons centred below it (phones keep the title bar and a timecode copy in the button row)
+  const infoTitle = h('span.monitor-title');
+  const mTc = h('span.tc.pm-mtc');
+  const info = h('div.pm-info', tcEl, zoomSel, h('span.grow'), infoTitle, h('span.grow'), settingsBtn, durEl);
   const transport = h('div.transport',
-    tcEl, zoomSel,
-    h('span.grow'),
+    mTc,
+    h('span.t-side'),
     iconButton('markIn', '시작 표시 (I)', () => markIn()),
     iconButton('markOut', '끝 표시 (O)', () => markOut()),
+    h('span.sep'),
     iconButton('goIn', '시작 표시로 이동 (Shift+I)', () => goIn()),
     iconButton('stepBack', '1프레임 뒤로 (←)', () => step(-1)),
     playBtn,
@@ -63,10 +69,8 @@ export function createSourceMonitor() {
     iconButton('insert', '삽입: 재생헤드 위치에 끼워 넣고 뒤를 밀기 (,)', () => insert('insert'), { label: '삽입' }),
     iconButton('overwrite', '덮어쓰기: 재생헤드 위치에 덮어 놓기 (.)', () => insert('overwrite'), { label: '덮어쓰기' }),
     subBtn,
-    dragVideo, dragAudio, safeBtn, settingsBtn,
-    h('span.grow'),
-    durEl);
-  const root = h('div.monitor', h('div.panel-toolbar', titleEl), view, scrubBar, transport);
+    h('span.t-side.end', dragVideo, dragAudio, safeBtn));
+  const root = h('div.monitor', h('div.panel-toolbar', titleEl), view, info, scrubBar, transport);
 
   let mediaId = null;
   let shuttleRate = 0;
@@ -174,6 +178,11 @@ export function createSourceMonitor() {
   function draw() {
     const m = media();
     tcEl.textContent = formatTimecode(current(), fps());
+    mTc.textContent = tcEl.textContent;
+    if (infoTitle.textContent !== titleEl.textContent) {
+      infoTitle.textContent = titleEl.textContent;
+      infoTitle.title = titleEl.textContent;
+    }
     const inP = inOf(m);
     const outP = outOf(m);
     durEl.textContent = m ? `${formatTimecode(Math.max(0, outP - inP), fps())}` : '';

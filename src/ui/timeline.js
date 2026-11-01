@@ -29,10 +29,11 @@ const EDGE_PX = 7;
 const EDGE_PX_TOUCH = 18;
 const COARSE = typeof window !== 'undefined' && window.matchMedia?.('(pointer: coarse)').matches;
 
+// Premiere Pro 2025's default labels: video and stills violet, audio green
 const COLORS = {
-  video: ['#5d5fb8', '#8487e6'],
-  image: ['#7a5bb8', '#a284e6'],
-  audio: ['#2f7d55', '#4fb183'],
+  video: ['#7b58c2', '#a585ea'],
+  image: ['#7b58c2', '#a585ea'],
+  audio: ['#2c7a45', '#4daa69'],
   text: ['#a1518a', '#d07ab8'],
   color: ['#2f7680', '#53a9b5'],
   adjustment: ['#9a5f3c', '#cf8a5f'],
@@ -96,6 +97,23 @@ export function createTimeline() {
   const headersInner = h('div.tl-headers-inner');
   const rulerSpacer = h('div.tl-ruler-spacer', h('span', '트랙'));
   const headers = h('div.tl-headers', rulerSpacer, headersInner);
+  // Premiere 2025: snap / linked selection / marker / settings sit under the timecode, left of the
+  // ruler; phones keep them in the top row
+  const headTools = [snapBtn, linkBtn, markerBtn, settingsBtn];
+  const placeHeadTools = () => {
+    const desk = !document.body.classList.contains('mobile');
+    if (desk === (snapBtn.parentNode === rulerSpacer)) return;
+    if (desk) rulerSpacer.replaceChildren(...headTools);
+    else {
+      rulerSpacer.replaceChildren(h('span', '트랙'));
+      top.insertBefore(snapBtn, zoomOutBtn);
+      top.insertBefore(linkBtn, zoomOutBtn);
+      top.insertBefore(markerBtn, zoomOutBtn);
+      top.append(settingsBtn);
+    }
+  };
+  placeHeadTools();
+  window.addEventListener('resize', placeHeadTools);
   const canvas = h('canvas', { tabindex: 0 });
   const vscroll = h('div.tl-vscroll', h('div'));
   const wrap = h('div.tl-canvas-wrap', canvas, vscroll);
@@ -501,7 +519,7 @@ export function createTimeline() {
 
   function drawStatic(ctx, W, H) {
     const s = store.seq;
-    ctx.fillStyle = '#202020';
+    ctx.fillStyle = '#1c1c1c';
     ctx.fillRect(0, 0, W, H);
 
     // lanes
@@ -512,9 +530,9 @@ export function createTimeline() {
     for (const row of view.rows) {
       const y = rowY(row);
       if (y > H || y + row.h < RULER_H) continue;
-      ctx.fillStyle = row.track.targeted ? '#262a30' : '#242424';
+      ctx.fillStyle = row.track.targeted ? '#25272b' : '#222';
       ctx.fillRect(0, y, W, row.h - 1);
-      ctx.fillStyle = '#1a1a1a';
+      ctx.fillStyle = '#121212';
       ctx.fillRect(0, y + row.h - 1, W, 1);
       if (row.track.locked) {
         ctx.save();
@@ -585,6 +603,12 @@ export function createTimeline() {
     ctx.beginPath();
     ctx.rect(Math.max(-2, x), y, Math.min(w, view.width + 4 - Math.max(-2, x)), hh);
     ctx.clip();
+    // Premiere 2025's clips have slightly rounded corners
+    if (w > 8 && ctx.roundRect) {
+      ctx.beginPath();
+      ctx.roundRect(x, y, w, hh, 3);
+      ctx.clip();
+    }
     ctx.fillStyle = offline ? '#7a2222' : selected ? light : base;
     ctx.fillRect(x, y, w, hh);
 
@@ -708,7 +732,11 @@ export function createTimeline() {
     // edges
     ctx.strokeStyle = selected ? '#ffffff' : 'rgba(0,0,0,0.6)';
     ctx.lineWidth = selected ? 2 : 1;
-    ctx.strokeRect(x + 0.5, y + 0.5, w - 1, hh - 1);
+    if (w > 8 && ctx.roundRect) {
+      ctx.beginPath();
+      ctx.roundRect(x + 0.5, y + 0.5, w - 1, hh - 1, 3);
+      ctx.stroke();
+    } else ctx.strokeRect(x + 0.5, y + 0.5, w - 1, hh - 1);
     if (selected && COARSE && w > 30 && !ghost) {
       // finger-sized trim handles on the selected clip
       ctx.fillStyle = '#ffffff';
@@ -931,16 +959,17 @@ export function createTimeline() {
 
   function drawRuler(ctx, W) {
     const s = store.seq;
-    ctx.fillStyle = '#2a2a2a';
+    // Premiere's ruler: the panel colour, thin grey ticks, small grey timecodes
+    ctx.fillStyle = '#1f1f1f';
     ctx.fillRect(0, 0, W, RULER_H);
-    ctx.fillStyle = '#151515';
+    ctx.fillStyle = '#0d0d0d';
     ctx.fillRect(0, RULER_H - 1, W, 1);
     const step = rulerStep();
     const minor = step / 5;
     const t0 = Math.floor(tOf(0) / minor) * minor;
-    ctx.strokeStyle = '#6a6a6a';
-    ctx.fillStyle = '#a8a8a8';
-    ctx.font = `${fpx(11)}px ui-monospace, Menlo, monospace`;
+    ctx.strokeStyle = '#555';
+    ctx.fillStyle = '#9a9a9a';
+    ctx.font = `${fpx(10)}px ui-monospace, Menlo, monospace`;
     ctx.beginPath();
     for (let t = Math.max(0, t0); xOf(t) < W; t += minor) {
       const x = Math.round(xOf(t)) + 0.5;

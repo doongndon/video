@@ -1052,7 +1052,7 @@ export function applyBrightness(v = brightness(), { save = true } = {}) {
   const base = 7 + v * 30;
   const grey = (l) => `hsl(0 0% ${clamp(l, 0, 100).toFixed(1)}%)`;
   const st = document.documentElement.style;
-  const set = { '--bg': 0, '--bg-2': 2.5, '--bg-3': 3.5, '--bg-4': 9, '--bg-5': 14, '--line': 6, '--line-2': 15 };
+  const set = { '--gutter': -5, '--bg': 0, '--bg-2': 2.5, '--bg-3': 3.5, '--bg-4': 9, '--bg-5': 14, '--line': 6, '--line-2': 15 };
   for (const [k, d] of Object.entries(set)) st.setProperty(k, grey(base + d));
   st.setProperty('--text-faint', grey(57 + v * 14));
   st.setProperty('--text-dim', grey(78 + v * 8));

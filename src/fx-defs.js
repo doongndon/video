@@ -488,12 +488,13 @@ export const LUMETRI_PARAMS = [
   // 크리에이티브
   select('look', 'Look', '', 'looks', { group: '크리에이티브' }),
   num('lookIntensity', '강도', 100, { min: 0, max: 200, unit: '%', group: '크리에이티브' }),
-  num('fadedFilm', '바랜 필름', 0, { min: 0, max: 100, group: '크리에이티브' }),
-  num('sharpen', '선명하게', 0, { min: -100, max: 100, group: '크리에이티브' }),
-  num('vibrance', '활기', 0, { min: -100, max: 100, group: '크리에이티브' }),
-  num('creativeSat', '채도 (크리에이티브)', 100, { min: 0, max: 200, unit: '%', group: '크리에이티브' }),
+  // Premiere's Korean names: 크리에이티브 ▸ 조정
+  num('fadedFilm', '빛바랜 필름', 0, { min: 0, max: 100, group: '크리에이티브' }),
+  num('sharpen', '선명', 0, { min: -100, max: 100, group: '크리에이티브' }),
+  num('vibrance', '생동감', 0, { min: -100, max: 100, group: '크리에이티브' }),
+  num('creativeSat', '채도', 100, { min: 0, max: 200, unit: '%', group: '크리에이티브' }),
   { key: 'shadowTint', label: '어두운 영역 색조', type: 'wheel', default: WHEEL0(), group: '크리에이티브' },
-  { key: 'highlightTint', label: '밝은 영역 색조', type: 'wheel', default: WHEEL0(), group: '크리에이티브' },
+  { key: 'highlightTint', label: '강조 표시 색조', type: 'wheel', default: WHEEL0(), group: '크리에이티브' },
   num('tintBalance', '색조 균형', 0, { min: -100, max: 100, group: '크리에이티브' }),
   // 곡선
   { key: 'curves', label: 'RGB 곡선', type: 'curves', default: { master: [[0, 0], [1, 1]], r: [[0, 0], [1, 1]], g: [[0, 0], [1, 1]], b: [[0, 0], [1, 1]] }, group: '곡선' },

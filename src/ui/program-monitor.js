@@ -95,40 +95,43 @@ export function createProgramMonitor() {
   const keyBtn = iconButton('key', '키프레임 기록: 켜면 화면에서 옮기거나 크기·회전을 바꿀 때마다 재생헤드 위치에 키프레임이 생깁니다', () => setAutoKey(!store.ui.autoKey), { cls: 'autokey' });
   const safeBtn = iconButton('safe', '안전 여백 (TV 가장자리 잘림 확인)', () => setSafe(!safe));
   const compareBtn = iconButton('compare', '비교 보기: 참조 프레임 또는 효과 적용 전 화면과 나란히 비교', () => setCompare(!cmp.on));
-  const settingsBtn = iconButton('gear', '설정: 해상도·투명도 격자·안전 여백·눈금자·안내선·비교 보기', (e) => {
+  const settingsBtn = iconButton('wrench', '설정: 해상도·투명도 격자·안전 여백·눈금자·안내선·비교 보기', (e) => {
     const r = e.currentTarget.getBoundingClientRect();
     showMenu(settingsMenu(), r.left, r.top - 4);
   });
   const resSel = h('select', { title: '재생 해상도 (낮추면 재생이 빨라짐)', 'aria-label': '재생 해상도' },
-    RESOLUTIONS.map(([v, l]) => h('option', { value: v, selected: v === String(resolution) }, v === 'auto' ? '해상도 자동' : l)));
+    RESOLUTIONS.map(([v, l]) => h('option', { value: v, selected: v === String(resolution) }, v === 'auto' ? '자동' : l)));
   const zoomSel = h('select', { title: '확대/축소 레벨 (확대하면 손 도구나 휠 가운데 버튼으로 화면 이동)', 'aria-label': '확대/축소 레벨' },
     ZOOM_LEVELS.map(([v, l]) => h('option', { value: v, selected: v === String(zoom) }, l)));
   resSel.addEventListener('change', () => setResolution(resSel.value));
   zoomSel.addEventListener('change', () => setZoom(zoomSel.value));
 
+  // Premiere's layout: timecode · 맞추기 … 해상도 · wrench · duration above the scrub bar, the
+  // transport buttons centred below it (phones show their own short row with a timecode copy)
+  const mTc = h('span.tc.pm-mtc');
+  const info = h('div.pm-info', tcEl, zoomSel, h('span.grow'), resSel, settingsBtn, durEl);
   const transport = h('div.transport',
-    tcEl, zoomSel, resSel,
-    h('span.grow'),
+    mTc,
+    h('span.t-side'),
+    iconButton('marker', '마커 추가 (M)', () => edit.addMarker()),
     iconButton('markIn', '시작 표시 (I)', () => edit.setSequenceInOut('in', store.ui.playhead)),
     iconButton('markOut', '끝 표시 (O)', () => edit.setSequenceInOut('out', store.ui.playhead)),
-    iconButton('marker', '마커 추가 (M)', () => edit.addMarker()),
+    h('span.sep'),
     iconButton('goIn', '시작 표시로 이동 (Shift+I)', () => { playback.stop(); store.setPlayhead(store.seq.inPoint ?? 0); }),
     iconButton('stepBack', '1프레임 뒤로 (←)', () => playback.step(-1)),
     playBtn,
     iconButton('stepForward', '1프레임 앞으로 (→)', () => playback.step(1)),
     iconButton('goOut', '끝 표시로 이동 (Shift+O)', () => { playback.stop(); store.setPlayhead(store.seq.outPoint ?? sequenceDuration(store.seq)); }),
-    keyBtn,
     h('span.sep'),
     iconButton('lift', '들어내기: 시작~끝 구간을 지우고 빈자리 남김 (;)', () => edit.liftExtract(false)),
     iconButton('extract', '추출: 시작~끝 구간을 지우고 당기기 (\')', () => edit.liftExtract(true)),
     iconButton('camera', '프레임 내보내기 (Ctrl+Shift+E)', () => openExportFrameDialog()),
-    loopBtn, safeBtn, compareBtn, settingsBtn,
-    h('span.grow'),
-    durEl);
+    compareBtn,
+    h('span.t-side.end', keyBtn, loopBtn, safeBtn));
   // 멀티 카메라 보기 (Premiere: 프로그램 모니터 설정 ▸ 멀티 카메라, Shift+0): the angles on the left,
   // the program on the right; the angle grid is a second copy of the 멀티 카메라 panel
   const mcHost = h('div.pm-multicam');
-  const root = h('div.monitor', h('div.pm-row', mcHost, view), scrubBar, transport);
+  const root = h('div.monitor', h('div.pm-row', mcHost, view), info, scrubBar, transport);
   let mcPanel = null;
   let mcView = false;
   async function setMulticamView(on) {
@@ -2197,41 +2200,120 @@ export function createProgramMonitor() {
     dnd.payload = null;
   });
 
-  // ---- mini scrubber
+  // ---- mini scrubber: a thin time bar over a zoom bar whose round ends set the part shown (Premiere's
+  // zoom handles; double-click the zoom bar to see everything again)
+  const sv = { a: 0, b: 1 };
+  // phones keep the plain bar: the whole sequence, easy to scrub with a finger
+  const zoomBar = () => (document.body.classList.contains('mobile') ? 0 : 8);
   function drawScrub() {
     const { ctx, w, h: hh } = fitCanvasToBox(scrub);
     const s = store.seq;
     const d = Math.max(1, sequenceDuration(s));
+    // keep the playhead in a zoomed view while playing or stepping
+    const ph = store.ui.playhead / d;
+    const span = sv.b - sv.a;
+    const moved = store.ui.playhead !== sv.lastPh;
+    sv.lastPh = store.ui.playhead;
+    if (span < 1 && moved && (ph < sv.a || ph > sv.b)) {
+      sv.a = clamp(ph - span / 2, 0, 1 - span);
+      sv.b = sv.a + span;
+    }
+    const X = (t) => ((t / d - sv.a) / (sv.b - sv.a)) * w;
+    const ZOOM_BAR = zoomBar();
+    if (!ZOOM_BAR) {
+      sv.a = 0;
+      sv.b = 1;
+    }
+    const top = hh - ZOOM_BAR;
     ctx.clearRect(0, 0, w, hh);
-    ctx.fillStyle = '#3a3f48';
-    ctx.fillRect(0, hh / 2 - 2, w, 4);
+    ctx.fillStyle = '#3a3a3a';
+    ctx.fillRect(0, top - 3, w, 1);
+    // frame ticks: about one every 50 px
+    const step = niceStep(((sv.b - sv.a) * d * 50) / Math.max(1, w));
+    ctx.fillStyle = '#4a4a4a';
+    for (let t = Math.ceil((sv.a * d) / step) * step; t <= sv.b * d; t += step) ctx.fillRect(Math.round(X(t)), top - 7, 1, 4);
     if (s.inPoint != null || s.outPoint != null) {
-      const a = ((s.inPoint ?? 0) / d) * w;
-      const b = ((s.outPoint ?? d) / d) * w;
-      ctx.fillStyle = 'rgba(90,150,240,0.6)';
-      ctx.fillRect(a, 2, b - a, hh - 4);
+      const ia = X(s.inPoint ?? 0);
+      const ib = X(s.outPoint ?? d);
+      ctx.fillStyle = 'rgba(90,150,240,0.45)';
+      ctx.fillRect(ia, top - 9, ib - ia, 6);
     }
     for (const mk of s.markers) {
       ctx.fillStyle = mk.color;
-      ctx.fillRect((mk.time / d) * w - 1, 0, 3, 7);
+      ctx.fillRect(X(mk.time) - 1, 1, 3, 6);
     }
     if (cmp.on && cmp.kind === 'frame' && cmp.refT != null) {
       // the reference frame's position
       ctx.fillStyle = '#ffd666';
-      ctx.fillRect(Math.min(w - 2, (cmp.refT / d) * w) - 1, hh - 6, 3, 6);
+      ctx.fillRect(Math.min(w - 2, X(cmp.refT)) - 1, top - 8, 3, 6);
     }
+    // the zoom bar and its handles
+    const za = sv.a * w;
+    const zb = sv.b * w;
+    const zy = top + ZOOM_BAR / 2;
+    if (ZOOM_BAR) {
+      ctx.fillStyle = '#2b2b2b';
+      ctx.fillRect(0, zy - 1, w, 2);
+      ctx.fillStyle = '#5a5a5a';
+      ctx.fillRect(za, zy - 2, Math.max(2, zb - za), 4);
+      ctx.fillStyle = '#9a9a9a';
+    }
+    for (const hx of ZOOM_BAR ? [Math.max(4, za), Math.min(w - 4, zb)] : []) {
+      ctx.beginPath();
+      ctx.arc(hx, zy, 3.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    // the playhead: a blue line with a small head
+    const px = clamp(X(store.ui.playhead), 1, w - 1);
     ctx.fillStyle = '#4aa3ff';
-    ctx.fillRect(Math.min(w - 2, (store.ui.playhead / d) * w) - 1, 0, 3, hh);
+    ctx.fillRect(Math.round(px) - 1, 0, 2, top - 2);
+    ctx.beginPath();
+    ctx.moveTo(px - 4, 0);
+    ctx.lineTo(px + 4, 0);
+    ctx.lineTo(px + 4, 4);
+    ctx.lineTo(px, 8);
+    ctx.lineTo(px - 4, 4);
+    ctx.closePath();
+    ctx.fill();
+  }
+  function niceStep(raw) {
+    const fr = 1 / Math.max(1, store.seq.fps);
+    for (const v of [fr, 2 * fr, 5 * fr, 10 * fr, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1800, 3600]) if (v >= raw) return v;
+    return 3600;
   }
   scrubBar.addEventListener('pointerdown', (e) => {
     scrubBar.setPointerCapture(e.pointerId);
-    playback.stop();
-    const go = (ev) => {
-      const r = scrubBar.getBoundingClientRect();
-      const d = Math.max(1, sequenceDuration(store.seq));
-      store.setPlayhead(clamp((ev.clientX - r.left) / r.width, 0, 1) * d);
-      playback.scrubAudio();
-    };
+    const r = scrubBar.getBoundingClientRect();
+    const fx = (ev) => clamp((ev.clientX - r.left) / r.width, 0, 1);
+    let go;
+    if (zoomBar() && e.clientY - r.top >= r.height - zoomBar() - 3) {
+      // zoom bar: drag a round end to zoom, the middle to move the view
+      const f0 = fx(e);
+      const tol = 7 / r.width;
+      const a0 = sv.a;
+      const b0 = sv.b;
+      const min = Math.min(1, 1 / Math.max(1, sequenceDuration(store.seq) * store.seq.fps) * 8);
+      const mode = Math.abs(f0 - a0) <= tol ? 'a' : Math.abs(f0 - b0) <= tol ? 'b' : f0 > a0 && f0 < b0 ? 'pan' : 'jump';
+      go = (ev) => {
+        const f = fx(ev);
+        if (mode === 'a') sv.a = clamp(f, 0, sv.b - min);
+        else if (mode === 'b') sv.b = clamp(f, sv.a + min, 1);
+        else {
+          const span = b0 - a0;
+          const c = mode === 'pan' ? a0 + (f - f0) : f - span / 2;
+          sv.a = clamp(c, 0, 1 - span);
+          sv.b = sv.a + span;
+        }
+        drawScrub();
+      };
+    } else {
+      playback.stop();
+      go = (ev) => {
+        const d = Math.max(1, sequenceDuration(store.seq));
+        store.setPlayhead((sv.a + fx(ev) * (sv.b - sv.a)) * d);
+        playback.scrubAudio();
+      };
+    }
     go(e);
     const up = () => {
       scrubBar.removeEventListener('pointermove', go);
@@ -2241,6 +2323,13 @@ export function createProgramMonitor() {
     scrubBar.addEventListener('pointermove', go);
     scrubBar.addEventListener('pointerup', up);
     scrubBar.addEventListener('pointercancel', up);
+  });
+  scrubBar.addEventListener('dblclick', (e) => {
+    const r = scrubBar.getBoundingClientRect();
+    if (!zoomBar() || e.clientY - r.top < r.height - zoomBar() - 3) return;
+    sv.a = 0;
+    sv.b = 1;
+    drawScrub();
   });
 
   tcEl.addEventListener('click', () => {
@@ -2264,6 +2353,7 @@ export function createProgramMonitor() {
   function refresh() {
     const s = store.seq;
     tcEl.textContent = formatTimecode(store.ui.playhead, s.fps);
+    mTc.textContent = tcEl.textContent;
     const io = s.inPoint != null || s.outPoint != null;
     const d = io ? (s.outPoint ?? sequenceDuration(s)) - (s.inPoint ?? 0) : sequenceDuration(s);
     durEl.textContent = formatTimecode(Math.max(0, d), s.fps);

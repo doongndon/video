@@ -293,7 +293,7 @@ function videoMenus() {
       },
       { label: '프로젝트 열기…', key: `${mod}O`, action: c.openProject },
       '-',
-      { label: '저장', key: `${mod}S`, hint: '프로젝트 파일', action: c.saveProject },
+      { label: '저장', key: `${mod}S`, hint: '프로젝트 파일', action: () => c.saveProject() },
       { label: '다른 이름으로 저장…', key: `${mod}Shift+S`, action: saveAs },
       { label: '프로젝트 이름 바꾸기…', action: c.renameProject },
       '-',
@@ -593,7 +593,8 @@ export function createMenubar(el) {
   menubarApi.video = () => menus;
   el.append(h('span.brand', 'Montage'));
   // 영상 / 사진: the two editors share this bar; each brings its own menus
-  const modeBtns = [['video', '영상 편집'], ['photo', '사진 편집']].map(([id, label]) => h('button.mode-btn', { 'data-mode': id, 'aria-pressed': 'false', onclick: () => setMode(id) }, label));
+  // the short label ("영상") shows on the compact bars; " 편집" is spelled out on wider ones
+  const modeBtns = [['video', '영상'], ['photo', '사진']].map(([id, label]) => h('button.mode-btn', { 'data-mode': id, 'aria-pressed': 'false', 'aria-label': `${label} 편집`, title: `${label} 편집기로 바꾸기`, onclick: () => setMode(id) }, label, h('span.mode-sfx', ' 편집')));
   el.append(h('div.mode-switch', { role: 'group', 'aria-label': '편집기 바꾸기' }, modeBtns));
   const menuWrap = h('div.menu-btns', { role: 'menubar' });
   el.append(menuWrap);
@@ -658,7 +659,8 @@ export function createMenubar(el) {
   const name = h('span.project-name');
   const saved = h('span.saved');
   // in the photo editor the same button lists its shortcuts
-  const guideBtn = h('button.guide-btn', { onclick: () => (appMode.isPhoto() ? photoShortcutsItem()?.action?.() : c.guide()), title: '처음 쓰는 분을 위한 안내' }, '시작 가이드');
+  const guideLabel = h('span', '시작 가이드');
+  const guideBtn = h('button.guide-btn', { onclick: () => (appMode.isPhoto() ? photoShortcutsItem()?.action?.() : c.guide()), title: '처음 쓰는 분을 위한 안내', 'aria-label': '시작 가이드' }, icon('help', 16), guideLabel);
   const exportBtn = h('button.primary.export-btn', { onclick: () => (appMode.isPhoto() ? appMode.P.exportDialog() : c.exportMedia()) }, '내보내기');
   const docsBtn = h('button.docs-open-btn', { onclick: () => openManual(), title: '모든 기능 설명서', 'aria-label': '설명서' }, icon('book', 16), h('span', '설명서'));
   el.append(h('span.spacer'), name, saved, docsBtn, guideBtn, exportBtn);
@@ -666,7 +668,8 @@ export function createMenubar(el) {
     const P = appMode.isPhoto() ? appMode.P : null;
     name.textContent = P ? (P.doc ? `${P.doc.name} · ${P.doc.width}×${P.doc.height}` : '사진 편집') : store.project.name;
     name.title = name.textContent;
-    guideBtn.textContent = P ? '단축키' : '시작 가이드';
+    guideLabel.textContent = P ? '단축키' : '시작 가이드';
+    guideBtn.setAttribute('aria-label', guideLabel.textContent);
     guideBtn.title = P ? '사진 편집 단축키' : '처음 쓰는 분을 위한 안내';
     for (const b of modeBtns) {
       const on = b.dataset.mode === appMode.current;

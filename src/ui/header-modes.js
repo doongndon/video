@@ -335,31 +335,19 @@ function buildExportPage() {
 
 // ---------------------------------------------------------------- the bar
 
-function workspaceTabs(box) {
-  const paint = () => {
-    const cur = currentWorkspace();
-    box.replaceChildren(...allWorkspaces().map((w) => {
-      const b = h(`button.hm-ws-tab${w.id === cur ? '.on' : ''}`, { 'data-workspace': w.id, role: 'tab', 'aria-selected': String(w.id === cur), title: w.hint || w.name }, w.name);
-      b.addEventListener('click', () => {
-        applyWorkspace(w.id);
-        setHeaderMode('edit');
-      });
-      b.addEventListener('contextmenu', (e) => {
-        e.preventDefault();
-        showMenu([
-          { label: '저장된 레이아웃으로 재설정', key: 'Alt+Shift+0', action: () => { applyWorkspace(w.id); resetWorkspace(); } },
-          { label: '새 작업 영역으로 저장…', action: saveWorkspaceAs },
-          '-',
-          { label: '작업 영역 메뉴', submenu: () => workspaceMenuItem().submenu() },
-        ], e.clientX, e.clientY);
-      });
-      return b;
-    }));
-    box.querySelector('.on')?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
-  };
-  window.addEventListener('montage:workspace', paint);
-  paint();
-  return paint;
+// 작업 영역 (Premiere 2025: the icon at the right of the header): the workspaces with their
+// Alt+Shift+number keys, then reset / save / delete
+function openWorkspaceMenu(anchor) {
+  const r = anchor.getBoundingClientRect();
+  const items = workspaceMenuItem().submenu().map((it) => (it && it.action && allWorkspaces().some((w) => w.name === it.label)
+    ? { ...it, action: () => { it.action(); setHeaderMode('edit'); } }
+    : it));
+  showMenu(items, Math.max(4, r.right - 280), r.bottom + 2);
+}
+
+function toggleFullscreen() {
+  if (document.fullscreenElement) document.exitFullscreen?.().catch(() => {});
+  else document.documentElement.requestFullscreen?.().catch(() => toast('이 브라우저에서는 전체 화면을 쓸 수 없습니다'));
 }
 
 export function initHeaderModes() {
@@ -399,29 +387,57 @@ export function initHeaderModes() {
   for (const p of Object.values(pages)) ws.append(p.el);
 
   const btn = (id, label) => h('button.hm-mode', { 'data-hmode': id, 'aria-pressed': 'false', onclick: () => setHeaderMode(id) }, label);
-  const homeBtn = h('button.hm-mode.hm-home', { 'data-hmode': 'home', 'aria-pressed': 'false', title: '홈', 'aria-label': '홈', onclick: () => setHeaderMode('home') }, icon('homeIcon', 18));
-  const title = h('button.hm-title', { title: '프로젝트 이름 (눌러서 바꾸기)', onclick: () => c.renameProject() });
-  const tabs = h('div.hm-ws', { role: 'tablist', 'aria-label': '작업 영역' });
-  const paintTabs = workspaceTabs(tabs);
-  const wsMenu = h('button.icon.hm-ws-menu', {
-    title: '작업 영역', 'aria-label': '작업 영역 메뉴',
-    onclick: (e) => {
-      const r = e.currentTarget.getBoundingClientRect();
-      showMenu(workspaceMenuItem().submenu(), Math.max(4, r.right - 260), r.bottom + 2);
-    },
-  }, icon('grid', 16));
+  const homeBtn = h('button.hm-mode.hm-home', { 'data-hmode': 'home', 'aria-pressed': 'false', title: '홈', 'aria-label': '홈', onclick: () => setHeaderMode('home') }, icon('homeIcon', 16));
+  // the project name in the middle, "- 편집됨" after changes not yet saved as a project file
+  // (Ctrl+S) — the browser keeps an automatic copy all the time
+  const titleName = h('span.hm-name');
+  const titleEdited = h('span.hm-edited', ' - 편집됨');
+  const title = h('button.hm-title', { onclick: () => c.renameProject() }, titleName, titleEdited);
+  const iconBtn = (ic, label, fn, extra = {}) => h('button.hm-icon', { type: 'button', title: label, 'aria-label': label, onclick: (e) => fn(e.currentTarget), ...extra }, icon(ic, 16));
+  const wsMenu = iconBtn('workspace', '작업 영역 (Alt+Shift+1~9로 바꾸기)', openWorkspaceMenu, { 'aria-haspopup': 'menu' });
+  wsMenu.classList.add('hm-ws-menu');
+  const wsName = h('span.hm-ws-name', { onclick: () => openWorkspaceMenu(wsMenu), title: '작업 영역' });
+  const quickBtn = iconBtn('share', '빠른 내보내기 (편집 화면에서 바로 파일 만들기)', () => (appMode.isPhoto() ? appMode.P?.exportDialog() : openExportSettings()));
+  const fullBtn = iconBtn('maximize', '전체 화면 (다시 누르거나 Esc로 돌아가기)', toggleFullscreen);
   header = h('header#pr-header', { 'aria-label': '헤더 표시줄' },
     h('nav.hm-modes', { 'aria-label': '모드' }, homeBtn, ...MODES.map(([id, label]) => btn(id, label))),
     title,
-    tabs, wsMenu);
+    h('div.hm-right', wsName, wsMenu, quickBtn, fullBtn));
   document.getElementById('menubar').after(header);
-  refreshTabs = () => { tabs.hidden = mode !== 'edit'; };
-  const paintTitle = () => {
-    title.textContent = store.project.name || '제목 없는 프로젝트';
+  const paintWs = () => {
+    const cur = allWorkspaces().find((w) => w.id === currentWorkspace());
+    wsName.textContent = cur ? cur.name : '';
   };
-  store.on('change', paintTitle);
+  window.addEventListener('montage:workspace', paintWs);
+  refreshTabs = () => { wsName.hidden = mode !== 'edit'; };
+  let edited = false;
+  let savedAt = null;
+  const paintTitle = () => {
+    titleName.textContent = store.project.name || '제목 없는 프로젝트';
+    titleEdited.hidden = !edited;
+    title.title = `${store.project.name || '제목 없는 프로젝트'} (눌러서 이름 바꾸기)\n${edited ? '프로젝트 파일로 저장하지 않은 변경 내용이 있습니다 (Ctrl+S: 저장)' : '변경 내용 없음'}${savedAt ? `\n브라우저 자동 저장: ${savedAt.toLocaleTimeString('ko-KR')}` : ''}`;
+  };
+  // every undoable step marks the project edited; opening or starting a project starts clean
+  let loading = false;
+  store.on('change', (reason) => {
+    if (reason === 'load') loading = true;
+    paintTitle();
+  });
+  store.on('history', () => {
+    edited = !loading && store.undoStack.length > 0;
+    loading = false;
+    paintTitle();
+  });
+  store.on('saved', (d) => { savedAt = d; paintTitle(); });
+  const saveFile = c.saveProject;
+  c.saveProject = async (...args) => {
+    const r = await saveFile(...args);
+    edited = false;
+    paintTitle();
+    return r;
+  };
   paintTitle();
-  paintTabs();
+  paintWs();
   // the photo editor has its own header: leave the pages there
   appMode.on((m) => { if (m === 'photo' && mode !== 'edit') setHeaderMode('edit'); });
   // Premiere 2022+: 파일 ▸ 내보내기 ▸ 미디어 (Ctrl+M) opens the 내보내기 mode (phones keep the dialog)
