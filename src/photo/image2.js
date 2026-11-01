@@ -13,6 +13,7 @@
 import { h, clamp, downloadBlob } from '../util.js';
 import { openModal, toast, formRow, promptDialog, confirmDialog } from '../ui/common.js';
 import { newLayer, makeCanvas, cloneCanvas, lid } from './doc.js';
+import { transformMasksBy } from './transform.js';
 import { ADJUSTMENTS } from './adjust.js';
 import { compositeOnto, BLEND_MODES } from './blend.js';
 import { applyToLayer } from './pdialogs.js';
@@ -332,7 +333,9 @@ export function installImage2(P) {
           const w = l.smart.warp;
           l.smart = { ...l.smart, m: [...nm, tx, ty], corners: l.smart.corners?.map(map), warp: w?.ctrl ? { ...w, ctrl: w.ctrl.map(map) } : w };
         }
-        if (l.mask) l.mask = { ...l.mask, canvas: rot(l.mask.canvas, l.mask.x, l.mask.y), x: 0, y: 0 };
+        // layer, vector and smart filter masks turn with the picture
+        const [c0, s0] = [Math.cos(t), Math.sin(t)];
+        transformMasksBy(doc, l, [c0, s0, -s0, c0, NW / 2 - (c0 * W - s0 * H) / 2, NH / 2 - (s0 * W + c0 * H) / 2], { all: true, W: NW, H: NH });
         l._styled = null;
         l._cache = null;
         l.rev++;

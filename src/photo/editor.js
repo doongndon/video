@@ -35,7 +35,7 @@ import { buildSwatchesPanel, buildGlyphsPanel, buildAdjustmentsPanel, buildToolP
 import { mixIntoMask } from './selectx.js';
 import { buildPathsPanel, buildCharacterPanel, installTypeCommands, warpTextDialog } from './panels2.js';
 import * as PT from './paths.js';
-import { Transformer, TRANSFORM_MODES, WARP_STYLES, applyM, composeM, unprojectQuad } from './transform.js';
+import { Transformer, TRANSFORM_MODES, WARP_STYLES, applyM, composeM, unprojectQuad, transformMasksBy, mapMaskCanvas } from './transform.js';
 import { FX_NAMES } from './styles.js';
 import { buildToolbar, buildToolStrip, buildOptionsBar, buildLayersPanel, buildColorPanel, buildPropertiesPanel, buildHistoryPanel } from './panels.js';
 import { installCore2, arrangeMenus } from './core2.js';
@@ -1417,14 +1417,8 @@ export function createPhotoEditor(root) {
       // everything inside comes along (groups inside only turn their masks: their layers are listed too)
       for (const d of doc.descendants(l.id)) P.transformLayerBy(d, M, true);
     }
-    if (l.mask && l.mask.linked !== false) {
-      const mc = makeCanvas(doc.width, doc.height);
-      const mg = mc.getContext('2d');
-      // outside the old mask stays as the mask's edge says (white masks show, black hide)
-      mg.setTransform(M[0], M[1], M[2], M[3], M[4], M[5]);
-      mg.drawImage(l.mask.canvas, l.mask.x, l.mask.y);
-      l.mask = { ...l.mask, canvas: mc, x: 0, y: 0 };
-    }
+    // linked masks come along (outside the old mask stays as its edge says: white shows, black hides)
+    transformMasksBy(doc, l, M);
     l._styled = null;
     doc.touch(l);
   };
@@ -2375,9 +2369,23 @@ function installCommands(P) {
         l.canvas = out;
         l.x = Math.round(ob.x + ob.w / 2 - out.width / 2);
         l.y = Math.round(ob.y + ob.h / 2 - out.height / 2);
+        // the linked masks turn the same way, about the same middle
+        const R = { cw: [0, 1, -1, 0], ccw: [0, -1, 1, 0], 180: [-1, 0, 0, -1], flipH: [-1, 0, 0, 1], flipV: [1, 0, 0, -1] }[kind];
+        if (R) {
+          const [ox, oy] = [ob.x + ob.w / 2, ob.y + ob.h / 2];
+          transformMasksBy(doc, l, [...R, l.x + out.width / 2 - (R[0] * ox + R[2] * oy), l.y + out.height / 2 - (R[1] * ox + R[3] * oy)]);
+        }
       } else {
-        l.rotation = ((l.rotation || 0) + (kind === 'cw' ? 90 : kind === 'ccw' ? -90 : kind === '180' ? 180 : 0)) % 360;
+        const a = kind === 'cw' ? 90 : kind === 'ccw' ? -90 : kind === '180' ? 180 : 0;
+        l.rotation = ((l.rotation || 0) + a) % 360;
         if (kind.startsWith('flip')) toast('글자·모양 레이어는 뒤집을 수 없어 회전만 됩니다 (래스터화하면 가능)');
+        const b = a && doc.bounds(l);
+        if (b) {
+          const t = (a * Math.PI) / 180;
+          const [c, s] = [Math.round(Math.cos(t)), Math.round(Math.sin(t))];
+          const [cx, cy] = [b.x + b.w / 2, b.y + b.h / 2];
+          transformMasksBy(doc, l, [c, s, -s, c, cx - c * cx + s * cy, cy - s * cx - c * cy]);
+        }
       }
       l._styled = null;
       doc.touch(l);
@@ -2404,13 +2412,9 @@ function installCommands(P) {
         l._cache = null;
         l.rev++;
       }
-      // masks are kept doc-size
+      // masks are kept doc-size (new canvas around a white mask shows, as its edge says)
       for (const l of doc.layers) {
-        if (!l.mask) continue;
-        const m = makeCanvas(r.w, r.h);
-        const g = m.getContext('2d');
-        g.drawImage(l.mask.canvas, l.mask.x, l.mask.y);
-        l.mask = { ...l.mask, canvas: m, x: 0, y: 0 };
+        if (l.mask) l.mask = { ...l.mask, canvas: mapMaskCanvas(l.mask, [1, 0, 0, 1, 0, 0], r.w, r.h), x: 0, y: 0 };
       }
       doc.width = r.w;
       doc.height = r.h;
@@ -2442,12 +2446,8 @@ function installCommands(P) {
         l.x = Math.round(l.x * kx);
         l.y = Math.round(l.y * ky);
         if (l.artboard) { const a = l.artboard; l.artboard = { ...a, x: Math.round(a.x * kx), y: Math.round(a.y * ky), w: Math.max(1, Math.round(a.w * kx)), h: Math.max(1, Math.round(a.h * ky)) }; }
-        if (l.mask) {
-          const m = makeCanvas(W, H);
-          const g = m.getContext('2d');
-          g.drawImage(l.mask.canvas, l.mask.x * kx, l.mask.y * ky, l.mask.canvas.width * kx, l.mask.canvas.height * ky);
-          l.mask = { ...l.mask, canvas: m, x: 0, y: 0 };
-        }
+        // layer masks, vector masks and smart filter masks scale with the picture
+        transformMasksBy(doc, l, [kx, 0, 0, ky, 0, 0], { all: true, W, H });
         l._styled = null;
         l._cache = null;
         l.rev++;
@@ -2501,7 +2501,8 @@ function installCommands(P) {
           const s = l.smart;
           if (M) l.smart = { ...s, m: composeM(M, s.m), corners: s.corners?.map((q) => applyM(M, q)) || s.corners, warp: s.warp?.ctrl ? { ...s.warp, ctrl: s.warp.ctrl.map((q) => applyM(M, q)) } : s.warp };
         }
-        if (l.mask) l.mask = { ...l.mask, canvas: tf(l.mask.canvas, l.mask.x, l.mask.y), x: 0, y: 0 };
+        // every mask turns with the canvas (layer, vector and smart filter masks)
+        transformMasksBy(doc, l, { cw: [0, 1, -1, 0, H, 0], ccw: [0, -1, 1, 0, 0, W], 180: [-1, 0, 0, -1, W, H], flipH: [-1, 0, 0, 1, W, 0], flipV: [1, 0, 0, -1, 0, H] }[kind], { all: true, W: rot ? H : W, H: rot ? W : H });
         l._styled = null;
         l._cache = null;
         l.rev++;

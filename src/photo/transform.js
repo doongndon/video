@@ -2,7 +2,7 @@
 // presets (arc, bulge, flag…). Pixels are mapped triangle by triangle with affine draws, so any
 // canvas-capable browser can do it quickly.
 
-import { makeCanvas, setWarpRenderer } from './doc.js';
+import { makeCanvas, setWarpRenderer, maskAlpha } from './doc.js';
 
 // ---------------------------------------------------------------- homography
 
@@ -511,7 +511,122 @@ export class Transformer {
       this.mode = mode = 'free';
     }
     if (mode === 'warp') this.startWarp();
+    this.setupMasks();
     this.update();
+  }
+
+  // ---------------------------------------------------------------- masks that go along
+
+  /**
+   * The masks linked to the layer (layer mask, vector mask, smart filter mask) take the same mapping
+   * as the layer, as in Photoshop (the chain between the thumbnails). Not when the mask itself is the
+   * target, nor for pixels lifted out of a selection (the masks stay where they are then).
+   */
+  setupMasks() {
+    const l = this.layer;
+    this.carry = [];
+    if (!l || !['pixels', 'smart', 'shape', 'text', 'group'].includes(this.kind) || this.selLift || this.copy) return;
+    for (const key of ['mask', 'filterMask', 'vmask']) {
+      const m = l[key];
+      if (!m || m.linked === false || (key === 'vmask' ? !m.subpaths?.length : !m.canvas)) continue;
+      this.carry.push({ key, m0: m, reveal: key === 'vmask' ? null : maskReveals(m) });
+    }
+    if (!this.carry.length) return;
+    // doc → source box (local coords), and the box's own affine when it has one
+    this.H0i = invertH(homography([[0, 0], [this.w, 0], [this.w, this.h], [0, this.h]], this.q0));
+    this.m0 = isAffineQuad(this.q0) ? quadAffine(this.q0, this.w, this.h) : null;
+  }
+
+  /** The whole change as one doc-space affine, or null (distort, perspective, warp). */
+  docAffine() {
+    const m = this.affine();
+    return m && this.m0 ? composeM(m, invertM(this.m0)) : null;
+  }
+
+  /** Where a document point goes (any mode). */
+  docMap(p) {
+    const [u, v] = applyH(this.H0i, p[0], p[1]);
+    return this.mapPoint(u, v);
+  }
+
+  /** Move the carried masks to match the current box (live while dragging; fine: the final quality). */
+  updateMasks(fine = false) {
+    if (!this.carry?.length) return;
+    const l = this.layer;
+    const doc = this.E.doc;
+    const same = this.q.every((p, i) => near(p, this.q0[i], 1e-6)) && (this.warp ? JSON.stringify(this.warp) : null) === this.warp0;
+    const T = same ? null : this.docAffine();
+    for (const c of this.carry) {
+      if (same) l[c.key] = c.m0;
+      else if (c.key === 'vmask') l.vmask = mapVmask(c.m0, T ? (p) => applyM(T, p) : (p) => this.docMap(p));
+      else {
+        // while dragging an affine change redraws into one buffer; the final one gets its own canvas
+        const canvas = T ? mapMaskCanvas(c.m0, T, doc.width, doc.height, c.reveal, fine ? undefined : (c.buf ||= makeCanvas(doc.width, doc.height))) : this.warpMaskCanvas(c, fine);
+        if (canvas) l[c.key] = { ...c.m0, canvas, x: 0, y: 0 };
+      }
+    }
+    l._styled = null;
+    doc.touch(l);
+  }
+
+  /** A raster mask through a non-affine change (the part over the box; outside it the mask's edge colour). */
+  warpMaskCanvas(c, fine) {
+    const doc = this.E.doc;
+    c.src ||= this.boxSource(c.m0);
+    const r = this.tryRender(c.src, fine);
+    if (!r) return null;
+    const out = makeCanvas(doc.width, doc.height);
+    const g = out.getContext('2d');
+    if (c.reveal) {
+      // outside the warped box: shown (a white mask's edge)
+      const n = 16;
+      const outline = [];
+      for (let i = 0; i < n; i++) outline.push(this.mapPoint((i / n) * this.w, 0));
+      for (let i = 0; i < n; i++) outline.push(this.mapPoint(this.w, (i / n) * this.h));
+      for (let i = n; i > 0; i--) outline.push(this.mapPoint((i / n) * this.w, this.h));
+      for (let i = n; i > 0; i--) outline.push(this.mapPoint(0, (i / n) * this.h));
+      g.beginPath();
+      g.rect(0, 0, out.width, out.height);
+      outline.forEach(([x, y], i) => (i ? g.lineTo(x, y) : g.moveTo(x, y)));
+      g.closePath();
+      g.fill('evenodd');
+    }
+    g.drawImage(r.canvas, r.x, r.y);
+    return out;
+  }
+
+  /** The mask laid out on the source box (as the layer's pixels are), for warps and perspective. */
+  boxSource(m) {
+    const q = this.q0;
+    const dw = q[1][0] - q[0][0];
+    const dh = q[3][1] - q[0][1];
+    if (q[0][1] === q[1][1] && q[1][0] === q[2][0] && q[2][1] === q[3][1] && q[3][0] === q[0][0] && dw > 0 && dh > 0) {
+      const c = makeCanvas(Math.max(1, Math.round(dw)), Math.max(1, Math.round(dh)));
+      const g = c.getContext('2d');
+      g.scale(c.width / dw, c.height / dh);
+      g.drawImage(m.canvas, m.x - q[0][0], m.y - q[0][1]);
+      return c;
+    }
+    // a turned or distorted box: straighten it (at about its size on the page)
+    const sw = Math.max(1, Math.round(Math.min(this.w, Math.max(len(sub(q[1], q[0])), len(sub(q[2], q[3]))))));
+    const sh = Math.max(1, Math.round(Math.min(this.h, Math.max(len(sub(q[3], q[0])), len(sub(q[2], q[1]))))));
+    return unprojectQuad(m.canvas, q.map(([x, y]) => [x - m.x, y - m.y]), sw, sh);
+  }
+
+  /** The floating pixels as they will look: through the layer's (moved or unlinked) masks. */
+  maskedFloat(r) {
+    const l = this.layer;
+    const doc = this.E.doc;
+    const mask = l.mask?.canvas && l.mask.enabled;
+    const vmask = l.vmask?.subpaths?.length && l.vmask.enabled !== false && this.E.vectorMaskCanvas;
+    if (!mask && !vmask) return r;
+    const c = makeCanvas(r.canvas.width, r.canvas.height);
+    const g = c.getContext('2d');
+    g.drawImage(r.canvas, 0, 0);
+    g.globalCompositeOperation = 'destination-in';
+    if (mask) g.drawImage(maskAlpha(doc, l.mask), -r.x, -r.y);
+    if (vmask) g.drawImage(this.E.vectorMaskCanvas(l), -r.x, -r.y);
+    return { ...r, canvas: c };
   }
 
   /** Photoshop's interpolation choice for this transform (bicubic unless set). */
@@ -692,6 +807,7 @@ export class Transformer {
     const E = this.E;
     const doc = E.doc;
     const l = this.layer;
+    this.updateMasks(fine);
     if (this.kind === 'smart') {
       const m = this.affine();
       l.smart = { ...l.smart, m: m ? [m[0] * (this.w / l.smart.w), m[1] * (this.w / l.smart.w), m[2] * (this.h / l.smart.h), m[3] * (this.h / l.smart.h), m[4], m[5]] : l.smart.m, corners: m ? null : this.q.map((p) => [...p]), warp: this.warp ? structuredClone(this.warp) : null };
@@ -714,7 +830,9 @@ export class Transformer {
       const r = this.tryRender(this.groupSrc, fine);
       if (r) E.float = { ...r, layerId: null, above: true };
     } else {
-      const r = this.tryRender(this.src, fine);
+      let r = this.tryRender(this.src, fine);
+      // the layer's masks show on the floating pixels already (no mismatch until Enter)
+      if (r && this.kind === 'pixels') r = this.maskedFloat(r);
       if (r) E.float = { ...r, layerId: this.kind === 'pixels' ? l.id : null, above: this.kind !== 'pixels', tint: this.kind === 'selection' ? 'selection' : this.kind === 'mask' ? 'mask' : null };
     }
     E.transformChanged?.(this);
@@ -1246,6 +1364,8 @@ export class Transformer {
         doc.selection = { canvas: c };
       }
     }
+    // the linked masks at full quality, in the same history step
+    this.updateMasks(true);
     if (l) doc.touch(l);
     const m = this.affine();
     if (m) {
@@ -1463,6 +1583,60 @@ function maskDocCanvas(doc, m) {
   const c = makeCanvas(doc.width, doc.height);
   c.getContext('2d').drawImage(m.canvas, m.x, m.y);
   return c;
+}
+
+// ---------------------------------------------------------------- masks under a transform
+
+/** Whether a raster mask's edge shows (white) or hides (black): what lies outside it once moved. */
+export function maskReveals(m) {
+  const c = m.canvas;
+  const g = c.getContext('2d');
+  let n = 0;
+  for (const [x, y] of [[0, 0], [c.width - 1, 0], [0, c.height - 1], [c.width - 1, c.height - 1]]) if (g.getImageData(x, y, 1, 1).data[3] >= 128) n++;
+  return n >= 2;
+}
+
+/** A W×H mask canvas (at 0, 0): mask m pushed through the doc-space affine M; outside it, its edge colour. */
+export function mapMaskCanvas(m, M, W, H, reveal = maskReveals(m), out = makeCanvas(W, H)) {
+  const g = out.getContext('2d');
+  g.setTransform(1, 0, 0, 1, 0, 0);
+  g.clearRect(0, 0, out.width, out.height);
+  if (reveal) {
+    const w = m.canvas.width;
+    const h = m.canvas.height;
+    const cs = [[0, 0], [w, 0], [w, h], [0, h]].map(([x, y]) => applyM(M, [x + m.x, y + m.y]));
+    g.beginPath();
+    g.rect(0, 0, out.width, out.height);
+    cs.forEach(([x, y], i) => (i ? g.lineTo(x, y) : g.moveTo(x, y)));
+    g.closePath();
+    g.fill('evenodd');
+  }
+  g.imageSmoothingQuality = 'high';
+  g.setTransform(M[0], M[1], M[2], M[3], M[4], M[5]);
+  g.drawImage(m.canvas, m.x, m.y);
+  g.setTransform(1, 0, 0, 1, 0, 0);
+  return out;
+}
+
+/** A vector mask with every point sent through f (doc coords); its offset is folded in. */
+export function mapVmask(vm, f) {
+  const dx = vm.dx || 0;
+  const dy = vm.dy || 0;
+  const F = ([x, y]) => f([x + dx, y + dy]);
+  return { ...vm, subpaths: vm.subpaths.map((sp) => ({ ...sp, knots: sp.knots.map((k) => ({ ...k, p: F(k.p), in: F(k.in || k.p), out: F(k.out || k.p) })) })), dx: 0, dy: 0 };
+}
+
+/**
+ * A layer's masks (layer mask, vector mask, smart filter mask) through a doc-space affine M.
+ * all: every mask (image size, canvas rotation); otherwise only the linked ones (layer transforms).
+ * W, H: the document size afterwards.
+ */
+export function transformMasksBy(doc, l, M, { all = false, W = doc.width, H = doc.height } = {}) {
+  for (const key of ['mask', 'filterMask']) {
+    const m = l[key];
+    if (m?.canvas && (all || m.linked !== false)) l[key] = { ...m, canvas: mapMaskCanvas(m, M, W, H), x: 0, y: 0 };
+  }
+  if (l.vmask?.subpaths && (all || l.vmask.linked !== false)) l.vmask = mapVmask(l.vmask, (p) => applyM(M, p));
 }
 
 /** Affine helpers ([a b c d e f] = x' = a x + c y + e, y' = b x + d y + f). */

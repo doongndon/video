@@ -1190,6 +1190,22 @@ export function buildLayersPanel(P) {
         P.emit('layers');
       });
     }
+    // the chain between the layer and its mask (Photoshop): linked masks move and transform with the layer
+    const chain = (key, name) => {
+      const on = l[key].linked !== false;
+      return h(`button.ph-mlink${on ? '.on' : ''}`, {
+        title: on ? `${name}가 레이어와 연결됨 (같이 움직이고 변형됩니다) · 누르면 연결 해제` : `${name} 연결 해제됨 (레이어만 움직입니다) · 누르면 연결`,
+        'aria-label': on ? `${name} 연결 해제` : `${name} 연결`,
+        'aria-pressed': String(on),
+        style: thumbSize ? null : 'display:none',
+        onclick: (e) => {
+          e.stopPropagation();
+          P.run(on ? `${name} 연결 해제` : `${name} 연결`, () => { l[key] = { ...l[key], linked: !on }; doc.touch(l); });
+        },
+      }, on ? icon('link', 10) : null);
+    };
+    const mlink = l.mask ? chain('mask', '레이어 마스크') : null;
+    const vlink = l.vmask ? chain('vmask', '벡터 마스크') : null;
     const vt = l.vmask ? thumb(P, l, 'vmask') : null;
     if (vt) {
       vt.classList.add('mask', 'vmask');
@@ -1243,7 +1259,7 @@ export function buildLayersPanel(P) {
     const row = h(`div.ph-layer${sel.has(l.id) ? '.on' : ''}${l.id === doc.activeId ? '.active' : ''}${doc.shown(l) ? '' : '.hidden'}${l.clip ? '.clipped' : ''}${isBg ? '.bg' : ''}`, {
       role: 'treeitem', 'aria-selected': String(sel.has(l.id)), 'aria-level': String(depth + 1), draggable: 'true', 'data-layer-id': l.id,
       style: { paddingLeft: `${6 + depth * 16 + (l.clip ? 12 : 0)}px` },
-    }, eye, twist, t, mt, vt, name, h('span.ph-badges', badges));
+    }, eye, twist, t, mlink, mt, vlink, vt, name, h('span.ph-badges', badges));
     row.title = 'Alt+클릭(레이어 사이 선): 클리핑 마스크 · Alt+끌기: 복제 · 빈 곳 두 번 클릭: 레이어 스타일';
     row.addEventListener('click', (e) => {
       if (e.altKey && !e.ctrlKey && !e.metaKey) {

@@ -232,6 +232,9 @@ body.mobile.m-land .ph-mnav .m-tool { height: 44px; }
 .ph-subrow { display: flex; align-items: center; gap: 6px; min-height: 24px; font-size: var(--fs-xs); color: var(--text-dim); border-bottom: 1px solid #2a2e35; cursor: default; }
 .ph-subrow .ph-eye.small { width: 20px; height: 20px; }
 .ph-thumb.vmask { background: #777; }
+/* the chain between a layer and its mask: an empty slot when unlinked (click to link again) */
+.ph-mlink { flex: 0 0 12px; width: 12px; height: 24px; margin: 0 -4px; padding: 0; border: 0; background: none; color: var(--text-dim); display: flex; align-items: center; justify-content: center; cursor: pointer; }
+.ph-mlink:hover { color: var(--text); background: rgba(255, 255, 255, 0.06); }
 .ph-lfoot button { font-size: 12px; }
 
 /* layer style dialog */
