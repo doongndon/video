@@ -326,11 +326,32 @@ export function compAlpha(c, w, h, ctx) {
   }
 }
 
+const alphaCache = new Map();
+/** A quick fingerprint of the picture's bytes (for the mask cache). */
+function fingerprint(d) {
+  if (!d) return 0;
+  let s = d.length;
+  const step = Math.max(1, Math.floor(d.length / 8192)) | 0;
+  for (let i = 0; i < d.length; i += step) s = (s * 31 + d[i]) | 0;
+  return s;
+}
+
 /**
- * A mask's alpha (0..1) on a w × h image. ctx: { orig (the picture's own RGBA bytes, for colour,
- * brightness and auto mask), region }.
+ * A mask's alpha (0..1) on a w × h image (shared: do not change it). ctx: { orig (the picture's own
+ * RGBA bytes, for colour, brightness and auto mask), region }.
  */
 export function maskAlpha(m, w, h, ctx) {
+  // the same mask on the same picture again (moving a slider): reuse it
+  const key = `${w}x${h}|${JSON.stringify(ctx.region || 0)}|${m.invert ? 1 : 0}|${fingerprint(ctx.orig)}|${JSON.stringify(m.comps || [])}`;
+  const hit = alphaCache.get(key);
+  if (hit) return hit;
+  const M = buildAlpha(m, w, h, ctx);
+  if (alphaCache.size >= 8) alphaCache.delete(alphaCache.keys().next().value);
+  alphaCache.set(key, M);
+  return M;
+}
+
+function buildAlpha(m, w, h, ctx) {
   const n = w * h;
   let M = null;
   for (const c of m.comps || []) {

@@ -47,8 +47,8 @@ const FILES = {
 // ---------------------------------------------------------------- shared steps
 
 const newLayerStep = (t = '새 레이어 만들기', why = '원본을 건드리지 않고 그 위에서 작업하면 언제든 지우고 다시 할 수 있습니다.') => ({
-  t, d: '레이어 패널 아래의 + 단추(새 레이어)를 누르거나 레이어 ▸ 새로 만들기 ▸ 레이어…를 고르세요.',
-  why, path: ['레이어', '새로 만들기', '레이어…'], key: 'Ctrl+Shift+N', show: { panel: 'layers', sel: '[aria-label="새 레이어"]' },
+  t, d: '레이어 패널 아래의 새 레이어 만들기 단추(+)를 누르거나 레이어 ▸ 새로 만들기 ▸ 레이어…를 고르세요.',
+  why, path: ['레이어', '새로 만들기', '레이어…'], key: 'Ctrl+Shift+N', show: { panel: 'layers', sel: '[aria-label^="새 레이어"]' },
   done: (s) => s.count > s.base.count,
 });
 const dupStep = (t = '레이어 복제하기', d = '레이어 ▸ 새로 만들기 ▸ 복사한 레이어(Ctrl+J)로 지금 레이어를 한 장 더 만드세요.', why = '복사본에서 작업하면 원본이 아래에 그대로 남습니다.') => ({
@@ -56,7 +56,7 @@ const dupStep = (t = '레이어 복제하기', d = '레이어 ▸ 새로 만들�
 });
 const blendStep = (mode, name, why) => ({
   t: `혼합 모드를 '${name}'(으)로`, d: `레이어 패널 위쪽의 혼합 모드 목록(처음에는 '표준')에서 '${name}'을(를) 고르세요.`,
-  why, show: { panel: 'layers', sel: 'select[aria-label="혼합 모드"]' }, done: (s) => s.blend(mode),
+  why, show: { panel: 'layers', sel: '.ph-lhead select[aria-label="혼합 모드"]' }, done: (s) => s.blend(mode),
 });
 const gaussStep = (t, d, why, n = 1) => ({
   t, d, why, path: ['필터', '흐림 효과', '가우시안 흐림 효과…'], done: (s) => s.times(/가우시안 흐림/) >= n,
@@ -82,7 +82,7 @@ export const LESSONS = [
       { t: '이동 도구로 옮기기', d: '이동 도구(V)를 고르고 열기구를 끌어 다른 곳에 놓으세요.', why: '레이어가 나뉘어 있어서 배경은 그대로 두고 열기구만 움직일 수 있습니다.', key: 'V', show: { tool: 'move' }, done: (s) => s.did(/이동/) },
       newLayerStep(),
       { t: '새 레이어에 그리기', d: '브러시 도구(B)를 고르고 하늘에 새나 구름을 그려 보세요.', why: '새 레이어에 그린 것은 배경 사진과 섞이지 않아 나중에 따로 지우거나 옮길 수 있습니다.', key: 'B', show: { tool: 'brush' }, done: (s) => s.did(/브러시/) },
-      { t: '불투명도 낮추기', d: '레이어 패널의 불투명도 칸에 50을 넣거나 숫자 키 5를 누르세요.', why: '불투명도로 레이어를 반쯤 비치게 해서 아래와 자연스럽게 섞습니다.', show: { panel: 'layers', sel: 'input[aria-label="불투명도"]' }, done: (s) => s.layers.some((l) => l.opacity < 1) },
+      { t: '불투명도 낮추기', d: '레이어 패널의 불투명도 칸에 50을 넣거나 숫자 키 5를 누르세요.', why: '불투명도로 레이어를 반쯤 비치게 해서 아래와 자연스럽게 섞습니다.', show: { panel: 'layers', sel: '.ph-lhead input[aria-label="불투명도"]' }, done: (s) => s.layers.some((l) => l.opacity < 1) },
       { t: '레이어 순서 바꾸기', d: '레이어 ▸ 정돈 ▸ 뒤로(Ctrl+[)를 누르거나, 레이어 패널에서 줄을 위아래로 끌어 보세요.', why: '순서가 바뀌면 무엇이 앞에 보이는지가 바뀝니다.', path: ['레이어', '정돈', '뒤로'], key: 'Ctrl+[', done: (s) => s.did(/레이어 순서/) },
       { t: '숨기고 다시 보이기', d: '레이어 줄 왼쪽의 눈 아이콘을 눌러 레이어를 숨겨 보세요. 다시 누르면 보입니다.', why: '숨긴 레이어는 지워지지 않습니다. 전과 후를 비교할 때 자주 씁니다.', show: { panel: 'layers', sel: '.ph-layers' }, done: (s) => s.layers.some((l) => !l.visible) },
     ],
@@ -118,7 +118,7 @@ export const LESSONS = [
       adjStep('levels', '레벨', null, '레벨은 가장 어두운 곳과 가장 밝은 곳을 정해 사진의 대비를 살립니다.'),
       { t: '속성 패널에서 고치기', d: '속성 패널의 히스토그램 아래 흰색 삼각형을 왼쪽으로, 가운데 회색 삼각형도 조금 왼쪽으로 끌어 밝게 하세요.', why: '히스토그램 오른쪽 빈 곳이 없어질 때까지 흰색을 끌면 대비가 좋아집니다.', show: { panel: 'props' }, done: (s) => s.changed('adjust') },
       adjStep('hueSat', '색조/채도', null, '채도를 +20쯤 올리면 색이 살아납니다.'),
-      { t: '조정 레이어 마스크에 칠하기', d: '조정 레이어에는 마스크가 함께 생깁니다. 브러시(B)를 검정으로 두고 하늘을 칠하면 거기만 조정이 빠집니다.', why: '조정을 사진의 일부에만 적용하는 방법입니다.', key: 'B', show: { tool: 'brush' }, done: (s) => s.did(/브러시/) },
+      { t: '조정 레이어 마스크에 칠하기', d: '조정 레이어 줄의 흰 마스크 썸네일을 누르고, 브러시(B)를 검정으로 두고 하늘을 칠하세요. 칠한 곳만 조정이 빠집니다.', why: '조정을 사진의 일부에만 적용하는 방법입니다.', key: 'B', show: { panel: 'layers', sel: '.ph-layers canvas.ph-thumb.mask' }, done: (s) => s.did(/브러시/) },
       { t: '전후 비교', d: '조정 레이어의 눈 아이콘을 눌러 끄고 켜 보세요.', why: '원본이 그대로 있으니 언제든 비교하고 되돌릴 수 있습니다.', show: { panel: 'layers', sel: '.ph-layers' }, done: (s) => s.layers.some((l) => l.kind === 'adjust' && !l.visible) },
     ],
   },
@@ -182,7 +182,7 @@ export const LESSONS = [
       { t: '밝게 칠하기', d: '이마 가운데, 콧등, 광대 위, 턱 끝처럼 빛이 닿는 곳을 칠하세요.', show: { tool: 'dodge' }, done: (s) => s.did(/닷지/) },
       toolStep('burn', '번 도구', '닷지 칸을 오른쪽 클릭해서 번 도구를 고르세요.', '닷지·번·스폰지 도구가 한 칸에 있습니다.', 'O'),
       { t: '어둡게 칠하기', d: '턱선 아래, 볼 옆, 머리카락 경계처럼 그늘지는 곳을 칠하세요.', show: { tool: 'burn' }, done: (s) => s.did(/^번$/) },
-      { t: '세기 조절', d: '회색 레이어의 불투명도를 60%쯤으로 낮춰 자연스럽게 맞추세요.', why: '보정은 덜 한 듯할 때가 가장 자연스럽습니다.', show: { panel: 'layers', sel: 'input[aria-label="불투명도"]' }, done: (s) => s.layers.some((l) => (l.blend === 'overlay' || l.blend === 'soft light') && l.opacity < 1) },
+      { t: '세기 조절', d: '회색 레이어의 불투명도를 60%쯤으로 낮춰 자연스럽게 맞추세요.', why: '보정은 덜 한 듯할 때가 가장 자연스럽습니다.', show: { panel: 'layers', sel: '.ph-lhead input[aria-label="불투명도"]' }, done: (s) => s.layers.some((l) => (l.blend === 'overlay' || l.blend === 'soft light') && l.opacity < 1) },
     ],
   },
   {
@@ -266,7 +266,7 @@ export const LESSONS = [
       { t: '바닥에 눕히기', d: 'Ctrl+T를 누르고 상자 안을 오른쪽 클릭 ▸ 왜곡을 고른 뒤, 위쪽 모서리를 끌어 그림자를 바닥에 비스듬히 눕히고 Enter를 누르세요.', why: '빛이 오는 반대쪽으로 길게 눕혀야 자연스럽습니다.', path: ['편집', '자유 변형'], key: 'Ctrl+T', done: (s) => !s.transforming && s.did(/변형|왜곡/) },
       { t: '그림자를 제품 뒤로', d: '레이어 ▸ 정돈 ▸ 뒤로(Ctrl+[)로 그림자를 제품 아래로 내리세요.', path: ['레이어', '정돈', '뒤로'], key: 'Ctrl+[', done: (s) => s.did(/레이어 순서/) },
       gaussStep('부드럽게', '필터 ▸ 흐림 효과 ▸ 가우시안 흐림 효과…로 그림자 가장자리를 흐리게 하세요(반경 10쯤).', '실제 그림자는 물건에서 멀어질수록 흐려집니다.'),
-      { t: '진하기 맞추기', d: '그림자 레이어 불투명도를 40~60%로 낮추세요.', show: { panel: 'layers', sel: 'input[aria-label="불투명도"]' }, done: (s) => s.layers.some((l) => l.kind === 'raster' && l.opacity < 1) },
+      { t: '진하기 맞추기', d: '그림자 레이어 불투명도를 40~60%로 낮추세요.', show: { panel: 'layers', sel: '.ph-lhead input[aria-label="불투명도"]' }, done: (s) => s.layers.some((l) => l.kind === 'raster' && l.opacity < 1) },
     ],
   },
 
@@ -320,7 +320,7 @@ export const LESSONS = [
     id: 'sns', group: '디자인', title: 'SNS 카드', min: 7, file: 'card',
     intro: '1080×1080 인스타그램 카드를 만듭니다. 모양 안에 사진을 넣는 클리핑 마스크와 정렬을 익힙니다.',
     steps: [
-      { t: '둥근 사각형 그리기', d: '\'배경\'을 고른 채 사각형 도구(U)를 고르고, 옵션 막대에서 모서리 반경을 40쯤 넣은 뒤 가운데에 상자를 그리세요.', why: '모양 레이어는 벡터라서 크기를 바꿔도 깨지지 않습니다.', key: 'U', show: { tool: 'shape' }, done: (s) => s.kind('shape') },
+      { t: '둥근 사각형 그리기', d: '사각형 도구(U)를 고르고, 옵션 막대에서 모서리 반경을 40쯤 넣은 뒤 가운데에 상자를 그리세요.', why: '모양 레이어는 벡터라서 크기를 바꿔도 깨지지 않습니다.', key: 'U', show: { tool: 'shape' }, done: (s) => s.kind('shape') },
       { t: '사진을 모양 위로', d: '\'사진\' 레이어가 모양 레이어 바로 위에 오게 레이어 패널에서 끌어 놓으세요.', show: { panel: 'layers', sel: '.ph-layers' }, done: (s) => { const i = s.layers.findIndex((l) => l.name === '사진'); return i > 0 && s.layers[i - 1].kind === 'shape'; } },
       { t: '클리핑 마스크', d: '\'사진\'을 고른 채 레이어 ▸ 클리핑 마스크 만들기(Ctrl+Alt+G)를 누르세요. 사진이 모양 안에만 보입니다.', why: '레이어 패널에서 두 레이어 사이 경계를 Alt+클릭해도 됩니다.', path: ['레이어', '클리핑 마스크 만들기'], key: 'Ctrl+Alt+G', done: (s) => s.layers.some((l) => l.clip) },
       { t: '제목 넣기', d: '수평 문자 도구(T)로 카드 위나 아래에 제목을 쓰세요.', key: 'T', show: { tool: 'text' }, done: (s) => s.kind('text') },

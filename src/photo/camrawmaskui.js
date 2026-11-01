@@ -525,7 +525,7 @@ export function maskingPanel(ui) {
       g.setTransform(1, 0, 0, 1, 0, 0);
       const hs = handles(c, pane);
       for (const [id, q] of hs) dot(q, id === 'center' ? 6 : 4.5, id === 'center' ? '#2d8cff' : '#fff');
-    } else if (c.type === 'brush' && st.hover && st.hover.pane === pane) {
+    } else if (c.type === 'brush' && st.hover && st.hover.pane.x === pane.x && st.hover.pane.y === pane.y) {
       const R = (st.brush.size / 400) * Math.max(ui.fullW, ui.fullH) * pane.s;
       g.strokeStyle = '#fff';
       g.beginPath();

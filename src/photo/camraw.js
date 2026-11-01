@@ -185,19 +185,20 @@ function baseRaw(img, p0, k = 1, region = null) {
   const tos = (v) => (v <= 0 ? 0 : v >= 1 ? 1 : v <= 0.0031308 ? v * 12.92 : 1.055 * v ** (1 / 2.4) - 0.055);
   // a mask's own pass without white balance or exposure leaves the light alone (no highlight roll-off)
   const plain = p._local && !p.temp && !p.tint && !p.exposure;
-  for (let i = 0; i < n; i++) {
-    if (plain) {
-      R[i] = d[i * 4] / 255;
-      G[i] = d[i * 4 + 1] / 255;
-      B[i] = d[i * 4 + 2] / 255;
-      continue;
-    }
-    const o = i * 4;
-    // highlights roll off softly instead of clipping hard
-    const soft = (v) => (v < 0.8 ? v : 0.8 + 0.2 * (1 - Math.exp(-(v - 0.8) / 0.2)));
-    R[i] = tos(soft(lin[d[o]] * wr * ex));
-    G[i] = tos(soft(lin[d[o + 1]] * wg * ex));
-    B[i] = tos(soft(lin[d[o + 2]] * wb * ex));
+  // highlights roll off softly instead of clipping hard; each channel is a function of its byte (LUTs)
+  const soft = (v) => (v < 0.8 ? v : 0.8 + 0.2 * (1 - Math.exp(-(v - 0.8) / 0.2)));
+  const lutR = new Float32Array(256);
+  const lutG = new Float32Array(256);
+  const lutB = new Float32Array(256);
+  for (let v = 0; v < 256; v++) {
+    lutR[v] = plain ? v / 255 : tos(soft(lin[v] * wr * ex));
+    lutG[v] = plain ? v / 255 : tos(soft(lin[v] * wg * ex));
+    lutB[v] = plain ? v / 255 : tos(soft(lin[v] * wb * ex));
+  }
+  for (let i = 0, o = 0; i < n; i++, o += 4) {
+    R[i] = lutR[d[o]];
+    G[i] = lutG[d[o + 1]];
+    B[i] = lutB[d[o + 2]];
   }
   // ---- 2. profile
   const prof = p.profile || 'color';
@@ -249,7 +250,9 @@ function baseRaw(img, p0, k = 1, region = null) {
     return (L[i] + (L[i + 1] - L[i]) * f) / 255;
   };
   const vigOld = p.vignette || 0;
-  for (let i = 0; i < n; i++) {
+  // (nothing tonal to do: the loop would leave every pixel as it is)
+  const toneOn = con !== 1 || whA || blA || base || fine || pcLut || ptM || ptR || ptG || ptB;
+  for (let i = 0; toneOn && i < n; i++) {
     let y = Y[i];
     if (y <= 1e-5) y = 1e-5;
     let ny = y;
@@ -325,7 +328,8 @@ function baseRaw(img, p0, k = 1, region = null) {
   const vib = (p.vibrance || 0) / 100;
   const sat = (p.saturation || 0) / 100;
   const wts = new Float32Array(8);
-  for (let i = 0; i < n; i++) {
+  const colorOn = anyCal || bw || anyHsl || vib || sat || profSat !== 1 || anyGrade;
+  for (let i = 0; colorOn && i < n; i++) {
     let r = R[i];
     let g = G[i];
     let b = B[i];
@@ -725,10 +729,12 @@ function ensureStyle() {
 .crp-thumb canvas { width: 100%; height: 100%; display: block; object-fit: cover; }
 .crp-del { position: absolute; top: 2px; right: 2px; background: rgba(0,0,0,.6); border-radius: 3px; display: grid; place-items: center; width: 18px; height: 18px; color: #fff; }
 body.mobile .cr { grid-template-columns: 1fr; grid-template-rows: auto auto auto; height: auto; }
-body.mobile .cr-view { height: 44vh; }
-body.mobile .cr-tools { flex-direction: row; border-left: none; border-top: 1px solid var(--line); padding-top: 4px; }
+body.mobile .cr-view { height: 36vh; }
+body.mobile .cr-tools { order: 1; flex-direction: row; border-left: none; border-bottom: 1px solid var(--line); padding-bottom: 4px; }
 body.mobile .cr-tools-gap { flex: 0 0 12px; }
-body.mobile .cr-side { max-height: 40vh; }
+body.mobile .cr-side { order: 2; max-height: 30vh; }
+body.mobile .cr-hist { display: none; }
+body.mobile .cr-bar select { max-width: 150px; }
 body.mobile .cr-tools .ibtn { width: 40px; height: 40px; }
 `;
   document.head.append(h('style', { id: STYLE_ID }, css));

@@ -154,6 +154,7 @@ export function buildToolbar(P) {
   const slotKey = (slot) => slot.join(',');
   const el = h('div.ph-tools', { role: 'toolbar', 'aria-label': '도구', 'aria-orientation': 'vertical' });
   let twoCol = loadPref('photo.toolbar2', false);
+  let autoTwo = false;
   const tip = hoverTip();
   const fly = toolFlyout(P, (slot, id) => pick.set(slotKey(slot), id));
   // like Photoshop, the swatches open the Color Picker (colorpicker.js); the Color panel otherwise
@@ -213,7 +214,7 @@ export function buildToolbar(P) {
   longPress(scr, () => screenMenu(scr));
   const render = () => {
     const { slots } = toolbarLayout();
-    el.classList.toggle('two', twoCol);
+    el.classList.toggle('two', twoCol || autoTwo);
     const cols = h('button.ph-tools-cols', { 'aria-label': twoCol ? '한 열로 보기' : '두 열로 보기', onclick: () => { twoCol = !twoCol; savePref('photo.toolbar2', twoCol); render(); P.redraw(); } }, icon(twoCol ? 'dblChevL' : 'dblChevR', 10));
     tip.attach(cols, twoCol ? '한 열로 보기' : '두 열로 보기');
     const items = [h('div.ph-tools-head', cols)];
@@ -269,6 +270,14 @@ export function buildToolbar(P) {
   P.editToolbar = () => editToolbarDialog(P, render);
   P.renderToolbar = render;
   render();
+  // a window too short for one column of tools gets two, as Photoshop does
+  const fit = () => {
+    if (twoCol || !el.isConnected || !el.clientHeight) return;
+    el.classList.remove('two');
+    autoTwo = el.scrollHeight > el.clientHeight + 1;
+    el.classList.toggle('two', autoTwo);
+  };
+  new ResizeObserver(fit).observe(el);
   return el;
 }
 

@@ -661,7 +661,7 @@ body.photo-mode .ph-stage { background: var(--ps-pasteboard, #282828); }
 .ph-dock-body { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 0; }
 .ph-pgroup, .ph-pgroup:first-child, .ph-pgroup:last-child { flex: 1 1 0; min-height: 70px; max-height: none; border: none; background: var(--bg-2); display: flex; flex-direction: column; }
 .ph-pgroup[hidden] { display: none; }
-.ph-dock-body > .ph-pgroup:not(:last-child) { flex: 0 1 auto; max-height: 40%; }
+.ph-dock-body > .ph-pgroup:not(:last-child) { flex: 0 1 auto; max-height: 32%; }
 .ph-dock-body > .ph-pgroup:last-of-type { flex: 1 1 auto; }
 .ph-ptabbar { display: flex; align-items: stretch; background: var(--bg-3); border-bottom: 1px solid var(--ps-gutter); flex-shrink: 0; }
 .ph-ptabs { flex: 1; min-width: 0; gap: 0; background: none; border: none; scrollbar-width: none; }
