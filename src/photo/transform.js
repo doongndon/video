@@ -523,15 +523,19 @@ export class Transformer {
   /**
    * The masks linked to the layer (layer mask, vector mask, smart filter mask) take the same mapping
    * as the layer, as in Photoshop (the chain between the thumbnails). Not when the mask itself is the
-   * target, nor for pixels lifted out of a selection (the masks stay where they are then).
+   * target. For pixels lifted out of a selection, the selected part of a linked raster mask goes along
+   * with them (vector masks stay where they are then).
    */
   setupMasks() {
     const l = this.layer;
     this.carry = [];
-    if (!l || !['pixels', 'smart', 'shape', 'text', 'group'].includes(this.kind) || this.selLift || this.copy) return;
+    if (!l || !['pixels', 'smart', 'shape', 'text', 'group'].includes(this.kind) || this.copy) return;
+    this.sel0 = this.selLift ? this.E.doc.selection?.canvas || null : null;
+    if (this.selLift && !this.sel0) return;
     for (const key of ['mask', 'filterMask', 'vmask']) {
       const m = l[key];
       if (!m || m.linked === false || (key === 'vmask' ? !m.subpaths?.length : !m.canvas)) continue;
+      if (this.sel0 && key === 'vmask') continue;
       this.carry.push({ key, m0: m, reveal: key === 'vmask' ? null : maskReveals(m) });
     }
     if (!this.carry.length) return;
@@ -559,9 +563,15 @@ export class Transformer {
     const doc = this.E.doc;
     const same = this.q.every((p, i) => near(p, this.q0[i], 1e-6)) && (this.warp ? JSON.stringify(this.warp) : null) === this.warp0;
     const T = same ? null : this.docAffine();
+    let selMoved = null;
     for (const c of this.carry) {
       if (same) l[c.key] = c.m0;
-      else if (c.key === 'vmask') l.vmask = mapVmask(c.m0, T ? (p) => applyM(T, p) : (p) => this.docMap(p));
+      else if (this.sel0) {
+        // pixels lifted out of a selection: the mask's selected part moves with them
+        selMoved ||= this.tryRender(this.selBoxSource(this.sel0, this.selBox ||= {}), fine);
+        const canvas = selMoved && this.selMaskCanvas(c, selMoved, fine);
+        if (canvas) l[c.key] = { ...c.m0, canvas, x: 0, y: 0 };
+      } else if (c.key === 'vmask') l.vmask = mapVmask(c.m0, T ? (p) => applyM(T, p) : (p) => this.docMap(p));
       else {
         // while dragging an affine change redraws into one buffer; the final one gets its own canvas
         const canvas = T ? mapMaskCanvas(c.m0, T, doc.width, doc.height, c.reveal, fine ? undefined : (c.buf ||= makeCanvas(doc.width, doc.height))) : this.warpMaskCanvas(c, fine);
@@ -570,6 +580,31 @@ export class Transformer {
     }
     l._styled = null;
     doc.touch(l);
+  }
+
+  /** A doc-size canvas cut to the lifted box (kept in cache.canvas): the source for renderSource. */
+  selBoxSource(docCanvas, cache) {
+    if (cache.canvas) return cache.canvas;
+    const c = makeCanvas(this.w, this.h);
+    c.getContext('2d').drawImage(docCanvas, -this.q0[0][0], -this.q0[0][1]);
+    return (cache.canvas = c);
+  }
+
+  /**
+   * A raster mask when selected pixels move: as it was, except where the moved selection lands,
+   * which takes the moved mask (the mask's selected part, mapped like the pixels).
+   */
+  selMaskCanvas(c, selMoved, fine) {
+    const doc = this.E.doc;
+    if (!c.base) {
+      c.base = maskDocBase(doc, c.m0, c.reveal);
+      c.part = {};
+      this.selBoxSource(maskPart(c.base, this.sel0), c.part);
+    }
+    const r = this.tryRender(c.part.canvas, fine);
+    if (!r) return null;
+    const out = fine ? makeCanvas(doc.width, doc.height) : (c.buf ||= makeCanvas(doc.width, doc.height));
+    return landMaskPart(out, c.base, selMoved, r);
   }
 
   /** A raster mask through a non-affine change (the part over the box; outside it the mask's edge colour). */
@@ -1599,6 +1634,106 @@ export function maskReveals(m) {
   let n = 0;
   for (const [x, y] of [[0, 0], [c.width - 1, 0], [0, c.height - 1], [c.width - 1, c.height - 1]]) if (g.getImageData(x, y, 1, 1).data[3] >= 128) n++;
   return n >= 2;
+}
+
+/** A raster mask at doc size (at 0, 0); beyond its own canvas, its edge colour. */
+function maskDocBase(doc, m, reveal = maskReveals(m)) {
+  const base = makeCanvas(doc.width, doc.height);
+  const g = base.getContext('2d');
+  if (reveal) {
+    g.fillRect(0, 0, base.width, base.height);
+    g.clearRect(m.x, m.y, m.canvas.width, m.canvas.height);
+  }
+  g.drawImage(m.canvas, m.x, m.y);
+  return base;
+}
+
+/** The part of a doc-size mask under a selection. */
+function maskPart(base, sel) {
+  const part = makeCanvas(base.width, base.height);
+  const g = part.getContext('2d');
+  g.drawImage(base, 0, 0);
+  g.globalCompositeOperation = 'destination-in';
+  g.drawImage(sel, 0, 0);
+  return part;
+}
+
+/** out = the mask as it was, with the moved selection ({canvas, x, y}) taking the moved part. */
+function landMaskPart(out, base, selMoved, part) {
+  const g = out.getContext('2d');
+  g.globalCompositeOperation = 'source-over';
+  g.clearRect(0, 0, out.width, out.height);
+  g.drawImage(base, 0, 0);
+  g.globalCompositeOperation = 'destination-out';
+  g.drawImage(selMoved.canvas, selMoved.x, selMoved.y);
+  g.globalCompositeOperation = 'lighter';
+  g.drawImage(part.canvas, part.x, part.y);
+  g.globalCompositeOperation = 'source-over';
+  return out;
+}
+
+/** Mask m cut to the doc rect (x, y, w, h), as a w×h canvas (its edge colour beyond its own canvas). */
+export function maskRect(m, x, y, w, h, reveal = maskReveals(m)) {
+  const c = makeCanvas(Math.max(1, Math.round(w)), Math.max(1, Math.round(h)));
+  const g = c.getContext('2d');
+  if (reveal) {
+    g.fillRect(0, 0, c.width, c.height);
+    g.clearRect(m.x - x, m.y - y, m.canvas.width, m.canvas.height);
+  }
+  g.drawImage(m.canvas, m.x - x, m.y - y);
+  return c;
+}
+
+/**
+ * A new doc-size canvas for mask m: as it was, except where `cover` ({canvas, x, y}, by its alpha)
+ * lands, which takes `part` ({canvas, x, y}): the mask of pixels that were reshaped there.
+ */
+export function maskWithPart(doc, m, cover, part) {
+  return landMaskPart(makeCanvas(doc.width, doc.height), maskDocBase(doc, m), cover, part);
+}
+
+/**
+ * Selected pixels moved by the move tool or the arrow keys take the selected part of the layer's
+ * linked raster masks along (Photoshop). liftLinkedMasks keeps what is needed; placeLinkedMasks
+ * sets the masks for an offset of (dx, dy) (0, 0: as they were).
+ */
+export function liftLinkedMasks(doc, l, sel) {
+  const out = [];
+  if (!l || !sel) return null;
+  for (const key of ['mask', 'filterMask']) {
+    const m = l[key];
+    if (!m?.canvas || m.linked === false) continue;
+    const base = maskDocBase(doc, m);
+    out.push({ key, m0: m, base, part: maskPart(base, sel) });
+  }
+  return out.length ? { sel, list: out } : null;
+}
+export function placeLinkedMasks(doc, l, lifted, dx, dy, live = false) {
+  if (!lifted || !l) return;
+  for (const c of lifted.list) {
+    // while dragging, one buffer is redrawn; the final masks get their own canvas
+    const out = live ? (c.buf ||= makeCanvas(doc.width, doc.height)) : makeCanvas(doc.width, doc.height);
+    if (!dx && !dy) l[c.key] = c.m0;
+    else l[c.key] = { ...c.m0, canvas: landMaskPart(out, c.base, { canvas: lifted.sel, x: dx, y: dy }, { canvas: c.part, x: dx, y: dy }), x: 0, y: 0 };
+  }
+  l._styled = null;
+  doc.touch(l);
+}
+
+/**
+ * A float lifted from a selection (move tool), with the layer's linked masks going along: the float
+ * shows through its mask while it moves (float.pixels keeps the pixels themselves), and
+ * float.masks / x0 / y0 tell dropFloat where the masks land.
+ */
+export function withLinkedMasks(doc, l, f) {
+  const lifted = doc.selection && liftLinkedMasks(doc, l, doc.selection.canvas);
+  if (!lifted) return f;
+  const shown = makeCanvas(f.canvas.width, f.canvas.height);
+  const g = shown.getContext('2d');
+  g.drawImage(f.canvas, 0, 0);
+  g.globalCompositeOperation = 'destination-in';
+  for (const c of lifted.list) if (c.key === 'mask' && c.m0.enabled !== false) g.drawImage(maskAlpha(doc, c.m0), -f.x, -f.y);
+  return { ...f, canvas: shown, pixels: f.canvas, masks: lifted, x0: f.x, y0: f.y };
 }
 
 /** A W×H mask canvas (at 0, 0): mask m pushed through the doc-space affine M; outside it, its edge colour. */

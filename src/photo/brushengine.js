@@ -534,6 +534,35 @@ function blendAmount(mode, a, t, depth) {
 
 const TAU = Math.PI * 2;
 
+// Coverage canvases are as big as the layer: allocating them for every stroke stalled its first dab
+// on big documents, so the last ones are kept (by kind and size) and cleared where they were painted.
+const spareCoverage = new Map();
+function takeCoverage(kind, w, h, cpu) {
+  const key = `${kind}|${w}x${h}|${cpu ? 1 : 0}`;
+  const c = spareCoverage.get(key);
+  if (!c) return makeCanvas(w, h);
+  spareCoverage.delete(key);
+  const g = c.getContext('2d');
+  g.setTransform(1, 0, 0, 1, 0, 0);
+  g.globalAlpha = 1;
+  g.globalCompositeOperation = 'source-over';
+  return c;
+}
+function giveCoverage(kind, c, used, cpu) {
+  const g = c.getContext('2d');
+  for (let i = 0; i < 16; i++) g.restore();
+  g.setTransform(1, 0, 0, 1, 0, 0);
+  g.globalCompositeOperation = 'source-over';
+  if (used) g.clearRect(used.x - 4, used.y - 4, used.w + 8, used.h + 8);
+  spareCoverage.set(`${kind}|${c.width}x${c.height}|${cpu ? 1 : 0}`, c);
+  // a few sizes at most (the brush preview uses small ones)
+  while (spareCoverage.size > 4) spareCoverage.delete(spareCoverage.keys().next().value);
+  // not painting for a while: let the memory go
+  clearTimeout(coverageTimer);
+  coverageTimer = setTimeout(() => spareCoverage.clear(), 120000);
+}
+let coverageTimer = 0;
+
 /**
  * Make the dab painter for one stroke. ctx: { o (tool options), bo (Stroke options), mode, fg, bg,
  * isAlive() }. Stroke calls the result for every pixel of the path; it returns the changed rectangle
@@ -573,6 +602,8 @@ export function createBrushRun({ o, bo, mode, fg, bg, isAlive = () => true }) {
   let cap = null;
   let capW = 0;
   let scratch = null;
+  // everything the dabs touched in the coverage canvases
+  let covUsed = null;
   let wetS = null;
   let wetE = null;
   let wetM = null;
@@ -671,11 +702,11 @@ export function createBrushRun({ o, bo, mode, fg, bg, isAlive = () => true }) {
     const H = st.bg.canvas.height;
     // read pixel by pixel: kept in memory (reading back from the graphics card is slow)
     if (!cov) {
-      cov = makeCanvas(W, H);
+      cov = takeCoverage('cov', W, H, perPixel);
       covG = cov.getContext('2d', { willReadFrequently: perPixel });
     }
     if (dualOn && !dualC) {
-      dualC = makeCanvas(W, H);
+      dualC = takeCoverage('dual', W, H, perPixel);
       dualG = dualC.getContext('2d', { willReadFrequently: perPixel });
     }
     if (opacityDyn && !cap) {
@@ -1001,13 +1032,19 @@ export function createBrushRun({ o, bo, mode, fg, bg, isAlive = () => true }) {
     }
     if (st0.dueDual) rect = union(rect, dualDab(st, lx, ly));
     if (!rect) return null;
+    if (composeOn) covUsed = union(covUsed, rect);
     if (composeOn) return compose(st, rect);
     return rect;
   };
   /** Stop timers (the stroke ended). */
   engine.end = () => {
+    if (st0.ended) return;
     st0.ended = true;
     clearInterval(st0.timer);
+    // the coverage canvases go back for the next stroke (cleared where this one painted)
+    if (cov) giveCoverage('cov', cov, covUsed, perPixel);
+    if (dualC) giveCoverage('dual', dualC, covUsed, perPixel);
+    cov = covG = dualC = dualG = null;
   };
   engine.settings = D;
   return engine;

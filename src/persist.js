@@ -146,14 +146,15 @@ async function writeProject({ thumb = false, force = false } = {}) {
   const json = store.snapshot();
   const old = await tx('projects', 'readonly', (s) => s.get(currentId));
   const now = Date.now();
+  const same = !!old && json === lastJson;
+  // nothing changed: no write, so no thumbnail either (it would be thrown away)
+  if (same && !thumb) return true;
   let shot = old?.thumb || null;
   // the thumbnail is the frame on screen; taken now and then (and when leaving the project)
   if (thumb || !shot || now - lastThumb > 30000) {
     lastThumb = now;
     shot = (await programThumb()) || shot;
   }
-  const same = !!old && json === lastJson;
-  if (same && !thumb) return true;
   lastJson = json;
   const rec = { id: currentId, name: p.name || '제목 없는 프로젝트', created: old?.created || now, modified: same ? old.modified : now, opened: old?.opened || now, thumb: shot, media: mediaList(p), bytes: json.length * 2 };
   const d = await db();
@@ -192,9 +193,15 @@ async function persistCurrent(opts) {
       });
     }
   }
-  await collectFiles();
+  // unused files can only appear when the media list changed (deleting a project collects on its own)
+  const sig = `${currentId}|${store.project.mediaOrder.join(',')}`;
+  if (sig !== collectedFor) {
+    await collectFiles();
+    collectedFor = sig;
+  }
   return true;
 }
+let collectedFor = '';
 
 export async function saveProjectNow(opts) {
   if (!enabled) return;

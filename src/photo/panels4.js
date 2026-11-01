@@ -485,8 +485,42 @@ const MORE_STYLES = [
 
 /** A small picture of a style on a rounded square, drawn with the real effects engine. */
 const styleThumbs = new Map();
+// drawing every style's picture when the editor started took most of its start-up time: each one is
+// drawn once it first comes into view, a few at a time when the browser is idle
+const thumbQueue = [];
+let thumbTimer = 0;
+const idle = (fn) => (window.requestIdleCallback ? requestIdleCallback(fn, { timeout: 300 }) : setTimeout(() => fn(null), 16));
+function drainThumbs(deadline) {
+  thumbTimer = 0;
+  const until = performance.now() + 12;
+  do {
+    const [t, fx] = thumbQueue.shift();
+    t.getContext('2d').drawImage(drawStyleThumb(fx), 0, 0);
+  } while (thumbQueue.length && (deadline && !deadline.didTimeout ? deadline.timeRemaining() > 2 : performance.now() < until));
+  if (thumbQueue.length) thumbTimer = idle(drainThumbs);
+}
+const thumbSeen = typeof IntersectionObserver === 'function' ? new IntersectionObserver((entries) => {
+  for (const e of entries) {
+    if (!e.isIntersecting) continue;
+    thumbSeen.unobserve(e.target);
+    thumbQueue.push([e.target, e.target._fx]);
+    e.target._fx = null;
+  }
+  if (thumbQueue.length && !thumbTimer) thumbTimer = idle(drainThumbs);
+}) : null;
 function styleThumb(key, fx) {
   if (styleThumbs.has(key)) return styleThumbs.get(key);
+  if (!thumbSeen) {
+    styleThumbs.set(key, drawStyleThumb(fx));
+    return styleThumbs.get(key);
+  }
+  const t = makeCanvas(56, 56);
+  t._fx = fx;
+  thumbSeen.observe(t);
+  styleThumbs.set(key, t);
+  return t;
+}
+function drawStyleThumb(fx) {
   const S = 128;
   const doc = new PhotoDoc({ width: S, height: S, background: '#f0f0f0' });
   const c = makeCanvas(S, S);
@@ -509,7 +543,6 @@ function styleThumb(key, fx) {
   const tg = t.getContext('2d');
   tg.imageSmoothingQuality = 'high';
   tg.drawImage(out, 0, 0, 56, 56);
-  styleThumbs.set(key, t);
   return t;
 }
 const userStylesList = () => {

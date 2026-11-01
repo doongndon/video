@@ -11,6 +11,7 @@ import { icon } from '../ui/icons.js';
 import { BLEND_MODES, compositeOnto } from './blend.js';
 import { GRADIENTS } from './resources.js';
 import { RETOUCH_MODES, retouchMode } from './retouchmix.js';
+import { withLinkedMasks, placeLinkedMasks } from './transform.js';
 
 const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
 const hexRgb = (hex) => {
@@ -93,13 +94,15 @@ export class Stroke {
       this.maskKind = mt.kind;
       this.maskInvert = !!mt.invert;
       this.base = mt.canvas;
-      this.g = mt.edit();
+      // the layer's own mask: every flush marks what it changed, so the copy alone redraws nothing
+      this.g = mt.kind === 'layer' && mt.canvas === this.layer?.mask?.canvas ? doc.editMask(this.layer, { quiet: true }) : mt.edit();
       this.ox = mt.x;
       this.oy = mt.y;
     } else {
       const old = this.layer.canvas;
       const [ox, oy] = [this.layer.x, this.layer.y];
-      this.g = doc.editPixels(this.layer, { x: 0, y: 0, w: doc.width, h: doc.height });
+      // every flush marks the part it changed, so the copy alone doesn't redraw the whole picture
+      this.g = doc.editPixels(this.layer, { x: 0, y: 0, w: doc.width, h: doc.height }, { quiet: true });
       // pre-stroke pixels at the (possibly grown) canvas size: editing swapped in a copy, so the old
       // canvas is exactly that (and is never changed) unless the canvas had to grow
       this.base = sameGeometry(old, ox, oy, this.layer) ? old : cloneCanvas(this.layer.canvas);
@@ -107,8 +110,10 @@ export class Stroke {
       this.oy = this.layer.y;
     }
     const tc = this.g.canvas;
-    this.buf = makeCanvas(tc.width, tc.height);
+    this.buf = takeStrokeBuffer(tc.width, tc.height);
     this.bg = this.buf.getContext('2d');
+    // everything the dabs touched in the buffer (layer coords), cleared again when it is given back
+    this.used = null;
     this.sel = doc.selection?.canvas || null;
     this.last = null;
     this.rest = 0;
@@ -205,6 +210,7 @@ export class Stroke {
       g.restore();
     }
     this.dirty = this.dirty ? union(this.dirty, rect) : rect;
+    this.used = this.used ? union(this.used, rect) : rect;
   }
 
   /** Redraw the changed area of the target: pre-stroke pixels + stroke buffer. */
@@ -261,8 +267,49 @@ export class Stroke {
     // every change was already marked (flush, healing): no need to redraw the whole picture, which
     // made the end of each stroke stall on big documents
     this.E.commit(this.o.label || '브러시', this.before, { touched: true });
+    this.release();
+  }
+
+  /** Give the stroke buffer back for the next stroke (nothing reads it once the stroke ended). */
+  release() {
+    if (!this.buf) return;
+    giveStrokeBuffer(this.buf, this.used);
+    this.buf = null;
+    // a late dab (the airbrush timer) paints into a throwaway buffer instead of the shared one
+    this.bg = makeCanvas(1, 1).getContext('2d');
   }
 }
+
+// The stroke buffer is as big as the layer. A new one for every stroke made the first dab stall on
+// big documents (allocating it) and left a big canvas behind for the garbage collector, so the last
+// one is kept for the next stroke of the same size and only the part that was painted is cleared.
+let spareBuffer = null;
+function takeStrokeBuffer(w, h) {
+  const c = spareBuffer;
+  spareBuffer = null;
+  if (!c || c.width !== w || c.height !== h) return makeCanvas(w, h);
+  const g = c.getContext('2d');
+  g.setTransform(1, 0, 0, 1, 0, 0);
+  g.globalAlpha = 1;
+  g.globalCompositeOperation = 'source-over';
+  g.filter = 'none';
+  g.imageSmoothingEnabled = true;
+  g.imageSmoothingQuality = 'low';
+  return c;
+}
+function giveStrokeBuffer(c, used) {
+  const g = c.getContext('2d');
+  // a stroke can end inside save() (an error half-way): unwind it
+  for (let i = 0; i < 16; i++) g.restore();
+  g.setTransform(1, 0, 0, 1, 0, 0);
+  g.globalCompositeOperation = 'source-over';
+  if (used) g.clearRect(used.x - 4, used.y - 4, used.w + 8, used.h + 8);
+  spareBuffer = c;
+  // not painting for a while: let the memory go
+  clearTimeout(spareTimer);
+  spareTimer = setTimeout(() => { spareBuffer = null; }, 120000);
+}
+let spareTimer = 0;
 
 function E_lum(hex) {
   const [r, g, b] = hexRgb(hex);
@@ -383,7 +430,8 @@ class Retouch {
     this.o = o;
     this.layer = E.doc.active;
     this.before = E.doc.capture();
-    this.g = E.doc.editPixels(this.layer, { x: 0, y: 0, w: E.doc.width, h: E.doc.height });
+    // every change is marked where it happens (mark), so the copy alone doesn't redraw everything
+    this.g = E.doc.editPixels(this.layer, { x: 0, y: 0, w: E.doc.width, h: E.doc.height }, { quiet: true });
     this.last = null;
     this.carry = null;
     // the part of the document changed since the last redraw (doc coords)
@@ -399,6 +447,7 @@ class Retouch {
       if (this.kind !== 'smudge' && this.kind !== 'push') this.apply(p, { x: 0, y: 0 });
       // 손가락 페인팅: the stroke starts with the foreground colour on the finger
       else if (this.kind === 'smudge' && this.o.fingerPaint) this.apply(p, { x: 0, y: 0 }, [...hexRgb(this.E.fg || '#000000'), 255]);
+      this.mark();
       return;
     }
     const step = Math.max(1, this.o.size * 0.2);
@@ -410,9 +459,14 @@ class Retouch {
       this.apply(q, { x: q.x - prev.x, y: q.y - prev.y });
     }
     this.last = p;
+    this.mark();
+  }
+
+  /** Mark what the dabs changed since the last time: only that part is redrawn (unless styles spread it). */
+  mark() {
+    if (!this.dirty) return;
     this.layer._styled = null;
-    // only the brushed part is redrawn (unless styles spread it further)
-    this.E.doc.touch(this.layer, this.dirty && changedRect(this.E.doc, this.layer, this.dirty));
+    this.E.doc.touch(this.layer, changedRect(this.E.doc, this.layer, this.dirty));
     this.dirty = null;
     this.E.redraw();
   }
@@ -557,7 +611,9 @@ class Retouch {
   }
 
   end() {
-    this.E.commit(this.o.label, this.before);
+    this.mark();
+    // every change was marked: the end of the stroke doesn't redraw the whole picture
+    this.E.commit(this.o.label, this.before, { touched: true });
   }
 }
 
@@ -583,7 +639,9 @@ export function liftSelection(E, { copy = false } = {}) {
   const b = SEL.alphaBounds(c) || { x: 0, y: 0, w: 1, h: 1 };
   const t = makeCanvas(b.w, b.h);
   t.getContext('2d').drawImage(c, -b.x, -b.y);
-  return { canvas: t, x: b.x, y: b.y, layerId: l.id };
+  const f = { canvas: t, x: b.x, y: b.y, layerId: l.id };
+  // moved (not copied) pixels take the selected part of the linked masks along
+  return copy ? f : withLinkedMasks(doc, l, f);
 }
 
 export function dropFloat(E, f) {
@@ -591,7 +649,8 @@ export function dropFloat(E, f) {
   const l = doc.layer(f.layerId);
   if (!l) return;
   const g = doc.editPixels(l, { x: f.x, y: f.y, w: f.canvas.width, h: f.canvas.height });
-  g.drawImage(f.canvas, f.x - l.x, f.y - l.y);
+  g.drawImage(f.pixels || f.canvas, f.x - l.x, f.y - l.y);
+  if (f.masks) placeLinkedMasks(doc, l, f.masks, f.x - f.x0, f.y - f.y0);
   l._styled = null;
 }
 
@@ -1411,6 +1470,7 @@ export const TOOLS = [
       dy = Math.round(dy);
       if (d.float) {
         E.float = { ...d.float, x: d.float.x + dx, y: d.float.y + dy };
+        if (d.float.masks) placeLinkedMasks(E.doc, E.doc.layer(d.float.layerId), d.float.masks, dx, dy, true);
         d.offset = { dx, dy };
       } else if (d.maskOnly) {
         const m = d.maskOnly.mask;

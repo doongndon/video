@@ -9,7 +9,7 @@ import { icon } from '../ui/icons.js';
 import { makeCanvas, PhotoDoc } from './doc.js';
 import { FILTERS } from './adjust.js';
 import { alphaBounds } from './selection.js';
-import { meshWarp } from './transform.js';
+import { meshWarp, maskRect, maskWithPart } from './transform.js';
 import { contentAwareFillWorkspace } from './cafill.js';
 import { BLEND_MODES, compositeOnto } from './blend.js';
 import { installCrop2 } from './crop2.js';
@@ -90,9 +90,12 @@ function findSeams(E0, w, hh, k) {
   return removed;
 }
 
-/** Width change of an RGBA image (W×H) to newW with seams found at low resolution. */
-function carveWidth(src, W, H, newW, protect, skin) {
-  if (newW === W) return { data: src, w: W };
+/**
+ * Width change of an RGBA image (W×H) to newW with seams found at low resolution. extra: another
+ * W×H RGBA image (the layer mask) carved along the same seams.
+ */
+function carveWidth(src, W, H, newW, protect, skin, extra = null) {
+  if (newW === W) return { data: src, w: W, extra };
   const k = Math.min(1, 420 / W, 360 / H);
   const lw = Math.max(3, Math.round(W * k));
   const lh = Math.max(3, Math.round(H * k));
@@ -116,6 +119,7 @@ function carveWidth(src, W, H, newW, protect, skin) {
   const span = Math.max(1, Math.floor(W / lw));
   const removed = findSeams(E, lw, lh, Math.min(Math.round(Math.abs(newW - W) / span), lw - 3));
   const out = new Uint8ClampedArray(newW * H * 4);
+  const xout = extra ? new Uint8ClampedArray(newW * H * 4) : null;
   const grow = newW > W;
   // every seam takes (or doubles) the same number of full-size pixels in every row, centred on
   // the seam, so all rows keep the same length and nothing wobbles; the small rest is a plain stretch
@@ -145,9 +149,10 @@ function carveWidth(src, W, H, newW, protect, skin) {
       const b = (y * W + cols[i1]) * 4;
       const o = (y * newW + x) * 4;
       for (let ch = 0; ch < 4; ch++) out[o + ch] = src[a + ch] * (1 - f) + src[b + ch] * f;
+      if (xout) for (let ch = 0; ch < 4; ch++) xout[o + ch] = extra[a + ch] * (1 - f) + extra[b + ch] * f;
     }
   }
-  return { data: out, w: newW };
+  return { data: out, w: newW, extra: xout };
 }
 
 function transpose(d, w, hh) {
@@ -156,9 +161,12 @@ function transpose(d, w, hh) {
   return o;
 }
 
-/** An RGBA image (w×hh) carved to nw × nh: widths first, then heights. protect: RGBA w×hh or null. */
-function carveSize(d, w, hh, nw, nh, protect, skin) {
-  let r = carveWidth(d, w, hh, nw, protect, skin);
+/**
+ * An RGBA image (w×hh) carved to nw × nh: widths first, then heights. protect: RGBA w×hh or null.
+ * Returns { data, extra }: extra is the RGBA w×hh `extra` (a mask) carved the same way, or null.
+ */
+function carveSize(d, w, hh, nw, nh, protect, skin, extra = null) {
+  let r = carveWidth(d, w, hh, nw, protect, skin, extra);
   if (nh !== hh) {
     const t = transpose(r.data, r.w, hh);
     // the protected area for the second pass: the mask stretched to the new width (close enough)
@@ -170,10 +178,10 @@ function carveSize(d, w, hh, nw, nh, protect, skin) {
       ps.getContext('2d').drawImage(pc, 0, 0, nw, hh);
       p2 = transpose(ps.getContext('2d').getImageData(0, 0, nw, hh).data, nw, hh);
     }
-    const r2 = carveWidth(t, hh, r.w, nh, p2, skin);
-    r = { data: transpose(r2.data, r2.w, r.w), w: r.w };
+    const r2 = carveWidth(t, hh, r.w, nh, p2, skin, r.extra && transpose(r.extra, r.w, hh));
+    r = { data: transpose(r2.data, r2.w, r.w), w: r.w, extra: r2.extra && transpose(r2.extra, r2.w, r.w) };
   }
-  return r.data;
+  return { data: r.data, extra: r.extra || null };
 }
 
 // on-canvas sessions (content-aware scale, puppet warp) live in P.transform like the free
@@ -215,21 +223,28 @@ class ContentAwareScale {
     this.src = makeCanvas(b.w, b.h);
     this.src.getContext('2d').drawImage(l.canvas, l.x - b.x, l.y - b.y);
     this.prev = {};
+    // a linked layer mask is carved along the same seams, so a cut-out stays whole
+    if (l.mask?.canvas && l.mask.linked !== false) {
+      this.mask0 = l.mask;
+      this.msrc = maskRect(l.mask, b.x, b.y, b.w, b.h);
+      this.mprev = {};
+    }
     // the pixels float while the box is dragged; the layer keeps the rest
     const g = doc.editPixels(l);
     g.clearRect(b.x - l.x, b.y - l.y, b.w, b.h);
     this.update(true);
   }
 
-  /** A copy of the source at most `max` px across (cached). */
-  copy(max) {
-    if (this.prev[max]) return this.prev[max];
+  /** A copy of the source (or of its mask: mask = true) at most `max` px across (cached). */
+  copy(max, mask = false) {
+    const cache = mask ? this.mprev : this.prev;
+    if (cache[max]) return cache[max];
     const k = Math.min(1, max / Math.max(this.B0.w, this.B0.h));
     const c = makeCanvas(Math.max(4, Math.round(this.B0.w * k)), Math.max(4, Math.round(this.B0.h * k)));
     const g = c.getContext('2d');
     g.imageSmoothingQuality = 'high';
-    g.drawImage(this.src, 0, 0, c.width, c.height);
-    this.prev[max] = c;
+    g.drawImage(mask ? this.msrc : this.src, 0, 0, c.width, c.height);
+    cache[max] = c;
     return c;
   }
 
@@ -242,8 +257,11 @@ class ContentAwareScale {
     return c.getContext('2d').getImageData(0, 0, w, hh).data;
   }
 
-  /** src carved to the box's proportions (양: the rest is a plain stretch), at src's resolution. */
-  carve(src) {
+  /**
+   * src carved to the box's proportions (양: the rest is a plain stretch), at src's resolution;
+   * msrc (the mask, same size) along the same seams. Returns { c, m } (m: null without a mask).
+   */
+  carve(src, msrc = null) {
     const w = src.width;
     const hh = src.height;
     const nw = Math.max(2, Math.round((w * this.box.w) / this.B0.w));
@@ -252,27 +270,41 @@ class ContentAwareScale {
     const iw = Math.max(2, Math.round(w + (nw - w) * a));
     const ih = Math.max(2, Math.round(hh + (nh - hh) * a));
     let c = src;
+    let m = msrc;
     if (iw !== w || ih !== hh) {
-      const d = carveSize(src.getContext('2d').getImageData(0, 0, w, hh).data, w, hh, iw, ih, this.protectData(w, hh), this.skin);
+      const r = carveSize(src.getContext('2d').getImageData(0, 0, w, hh).data, w, hh, iw, ih, this.protectData(w, hh), this.skin, msrc && msrc.getContext('2d').getImageData(0, 0, w, hh).data);
       c = makeCanvas(iw, ih);
-      c.getContext('2d').putImageData(new ImageData(d, iw, ih), 0, 0);
+      c.getContext('2d').putImageData(new ImageData(r.data, iw, ih), 0, 0);
+      if (r.extra) {
+        m = makeCanvas(iw, ih);
+        m.getContext('2d').putImageData(new ImageData(r.extra, iw, ih), 0, 0);
+      }
     }
-    if (c.width === nw && c.height === nh) return c;
-    const o = makeCanvas(nw, nh);
-    const g = o.getContext('2d');
-    g.imageSmoothingQuality = 'high';
-    g.drawImage(c, 0, 0, nw, nh);
-    return o;
+    const fit = (x) => {
+      if (!x || (x.width === nw && x.height === nh)) return x;
+      const o = makeCanvas(nw, nh);
+      const g = o.getContext('2d');
+      g.imageSmoothingQuality = 'high';
+      g.drawImage(x, 0, 0, nw, nh);
+      return o;
+    };
+    return { c: fit(c), m: fit(m) };
   }
 
   update(fine = false) {
     const E = this.E;
     const b = this.box;
-    const r = this.carve(this.copy(fine ? 640 : 220));
+    const max = fine ? 640 : 220;
+    const r = this.carve(this.copy(max), this.msrc ? this.copy(max, true) : null);
     const c = makeCanvas(Math.max(1, Math.round(b.w)), Math.max(1, Math.round(b.h)));
     const g = c.getContext('2d');
     g.imageSmoothingQuality = 'high';
-    g.drawImage(r, 0, 0, c.width, c.height);
+    g.drawImage(r.c, 0, 0, c.width, c.height);
+    // the float shows through its (carved) mask, as the result will
+    if (r.m && this.mask0.enabled !== false) {
+      g.globalCompositeOperation = 'destination-in';
+      g.drawImage(r.m, 0, 0, c.width, c.height);
+    }
     E.float = { canvas: c, x: Math.round(b.x), y: Math.round(b.y), layerId: this.layer.id };
     if (this.inputs) {
       this.inputs.w.value = Math.round((b.w / this.B0.w) * 1000) / 10;
@@ -373,14 +405,24 @@ class ContentAwareScale {
       E.afterHistory?.();
       return;
     }
-    const r = this.carve(this.src);
+    const r = this.carve(this.src, this.msrc);
     const x = Math.round(b.x);
     const y = Math.round(b.y);
     const w = Math.max(1, Math.round(b.w));
     const hh = Math.max(1, Math.round(b.h));
     const g = doc.editPixels(l, { x, y, w, h: hh });
     g.imageSmoothingQuality = 'high';
-    g.drawImage(r, x - l.x, y - l.y, w, hh);
+    g.drawImage(r.c, x - l.x, y - l.y, w, hh);
+    if (r.m) {
+      // the carved mask takes the new box; the rest of the mask stays as it was
+      const part = makeCanvas(w, hh);
+      const pg = part.getContext('2d');
+      pg.imageSmoothingQuality = 'high';
+      pg.drawImage(r.m, 0, 0, w, hh);
+      const cover = makeCanvas(w, hh);
+      cover.getContext('2d').fillRect(0, 0, w, hh);
+      l.mask = { ...this.mask0, canvas: maskWithPart(doc, this.mask0, { canvas: cover, x, y }, { canvas: part, x, y }), x: 0, y: 0 };
+    }
     l._styled = null;
     doc.touch(l);
     E.commit('내용 인식 비율', this.before);
@@ -744,6 +786,18 @@ class PuppetWarp {
       this.src = l.canvas;
       this.ox = l.x;
       this.oy = l.y;
+      // a linked layer mask bends along with the pixels; while warping, the float shows through it
+      if (l.mask?.canvas && l.mask.linked !== false) {
+        this.mask0 = l.mask;
+        this.msrc = maskRect(l.mask, l.x, l.y, l.canvas.width, l.canvas.height);
+        if (l.mask.enabled !== false) {
+          this.shown = makeCanvas(l.canvas.width, l.canvas.height);
+          const sg = this.shown.getContext('2d');
+          sg.drawImage(l.canvas, 0, 0);
+          sg.globalCompositeOperation = 'destination-in';
+          sg.drawImage(this.msrc, 0, 0);
+        }
+      }
       const g = doc.editPixels(l);
       g.clearRect(0, 0, g.canvas.width, g.canvas.height);
     }
@@ -796,9 +850,9 @@ class PuppetWarp {
         E.toast('고급 개체에서는 개체의 테두리 밖으로 나간 부분이 잘려요. 더 크게 움직이려면 래스터화한 뒤 쓰세요.');
       }
     } else if (this.mesh && this.pins.length) {
-      const r = puppetRender(this.src, this.mesh, this.pts, this.pins, fine ? this.interp : 'bilinear');
+      const r = puppetRender(this.shown || this.src, this.mesh, this.pts, this.pins, fine ? this.interp : 'bilinear');
       E.float = { canvas: r.canvas, x: r.x + this.ox, y: r.y + this.oy, layerId: l.id };
-    } else E.float = { canvas: this.src, x: this.ox, y: this.oy, layerId: l.id };
+    } else E.float = { canvas: this.shown || this.src, x: this.ox, y: this.oy, layerId: l.id };
     E.redraw();
   }
 
@@ -983,11 +1037,20 @@ class PuppetWarp {
       E.commit('고급 필터: 퍼펫 뒤틀기', this.before);
       return;
     }
-    const r = puppetRender(this.src, this.mesh, puppetPoints(this.mesh, this.pins, this.mode), this.pins, this.interp);
+    const pts = puppetPoints(this.mesh, this.pins, this.mode);
+    const r = puppetRender(this.src, this.mesh, pts, this.pins, this.interp);
     const x = r.x + this.ox;
     const y = r.y + this.oy;
     const g = doc.editPixels(l, { x, y, w: r.canvas.width, h: r.canvas.height });
     g.drawImage(r.canvas, x - l.x, y - l.y);
+    if (this.msrc) {
+      // the mask through the same mesh; where the mesh lands, it replaces the old mask
+      const rm = puppetRender(this.msrc, this.mesh, pts, this.pins, this.interp);
+      const full = makeCanvas(this.src.width, this.src.height);
+      full.getContext('2d').fillRect(0, 0, full.width, full.height);
+      const rc = puppetRender(full, this.mesh, pts, this.pins, 'bilinear');
+      l.mask = { ...this.mask0, canvas: maskWithPart(doc, this.mask0, { canvas: rc.canvas, x: rc.x + this.ox, y: rc.y + this.oy }, { canvas: rm.canvas, x: rm.x + this.ox, y: rm.y + this.oy }), x: 0, y: 0 };
+    }
     l._styled = null;
     doc.touch(l);
     E.commit('퍼펫 뒤틀기', this.before);

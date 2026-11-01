@@ -543,6 +543,15 @@ export function createEssentialGraphicsPanel() {
     });
   };
   store.on('selection', later);
+  // as in Premiere: picking a title or shape on the timeline brings up the 편집 tab with its
+  // controls (once per newly selected graphic, so 찾아보기 can still be clicked afterwards)
+  let lastGraphic = null;
+  store.on('selection', () => {
+    const sel = store.selectedClips();
+    const g = sel.length === 1 && (sel[0].kind === 'text' || sel[0].kind === 'shape') ? sel[0].id : null;
+    if (g && g !== lastGraphic && visible && tab === 'browse') setTab('edit');
+    lastGraphic = g;
+  });
   store.on('change', later);
   store.on('sequence', later);
   // the layer list follows the playhead (cheap: it rebuilds only when its rows change)

@@ -11,6 +11,7 @@ import { TOOLS, TOOL_BY_ID, TOOL_GROUPS } from './tools.js';
 import * as PT from './paths.js';
 import { GRADIENTS, GRADIENT_STYLES, boxGradient, gradientSwatch, listPatterns, patternCanvas, resolveStopColor } from './resources.js';
 import { SHAPE_LIB } from './shapelib.js';
+import { transformMasksBy, composeM, invertM } from './transform.js';
 
 export const DASHES = [['solid', '실선', null], ['dash', '파선', [4, 2]], ['dot', '점선', [0, 2]]];
 export const ALIGNS = [['inside', '안쪽'], ['center', '가운데'], ['outside', '바깥쪽']];
@@ -793,8 +794,19 @@ function shapeProperties(P, l, live) {
   const rows = [];
   const kindName = { rect: '사각형', round: '둥근 사각형', ellipse: '타원', triangle: '삼각형', polygon: '다각형', star: '별', line: '선', custom: '사용자 정의 모양', path: '패스' }[s.type] || '모양';
   rows.push(h('div.ph-sub', `모양 속성 · ${kindName}${s.type === 'custom' ? `: ${P.customShapeName(s.custom)}` : ''}`));
-  // transform: W / H / X / Y / angle
-  const resize = (patch) => live('모양 크기', () => {
+  // transform: W / H / X / Y / angle; the linked masks follow (as with Free Transform)
+  const frame = () => {
+    const r = ((l.rotation || 0) * Math.PI) / 180;
+    const [c, sn, w, hh] = [Math.cos(r), Math.sin(r), l.shape.w, l.shape.h];
+    return [c * w, sn * w, -sn * hh, c * hh, l.x + w / 2 - (c * w - sn * hh) / 2, l.y + hh / 2 - (sn * w + c * hh) / 2];
+  };
+  const follow = (fn) => () => {
+    const f0 = frame();
+    fn();
+    const M = composeM(frame(), invertM(f0));
+    if (M.some((v, i) => Math.abs(v - [1, 0, 0, 1, 0, 0][i]) > 1e-9)) transformMasksBy(P.doc, l, M);
+  };
+  const resize = (patch) => live('모양 크기', follow(() => {
     const cx = l.x + s.w / 2;
     const cy = l.y + s.h / 2;
     const w = patch.w ?? s.w;
@@ -805,10 +817,10 @@ function shapeProperties(P, l, live) {
       l.x = Math.round(cx - w / 2);
       l.y = Math.round(cy - hh / 2);
     }
-  }, true);
+  }), true);
   rows.push(field('W × H', num(s.w, 1, 30000, 1, (v) => resize({ w: v }), '폭'), h('span', '×'), num(s.h, 1, 30000, 1, (v) => resize({ h: v }), '높이')),
-    field('X / Y', num(l.x, -30000, 30000, 1, (v) => live('위치', () => { l.x = v; }, true), 'X'), num(l.y, -30000, 30000, 1, (v) => live('위치', () => { l.y = v; }, true), 'Y')),
-    field('회전 (°)', num(l.rotation || 0, -360, 360, 0.1, (v) => live('회전', () => { l.rotation = v; }, true), '회전')));
+    field('X / Y', num(l.x, -30000, 30000, 1, (v) => live('위치', follow(() => { l.x = v; }), true), 'X'), num(l.y, -30000, 30000, 1, (v) => live('위치', follow(() => { l.y = v; }), true), 'Y')),
+    field('회전 (°)', num(l.rotation || 0, -360, 360, 0.1, (v) => live('회전', follow(() => { l.rotation = v; }), true), '회전')));
   // appearance
   const fillDef = s.fill == null && (!s.fillType || s.fillType === 'color') ? { kind: 'none' } : s.fillType === 'gradient' ? { kind: 'gradient', gradient: s.fillGradient?.gradient, style: s.fillGradient?.style, angle: s.fillGradient?.angle, scale: s.fillGradient?.scale, reverse: s.fillGradient?.reverse } : s.fillType === 'pattern' ? { kind: 'pattern', pattern: s.fillPattern?.id, scale: s.fillPattern?.scale } : { kind: 'color', color: s.fill };
   const strokeVisible = s.type === 'line' || (s.strokeWidth > 0 && (s.stroke || s.strokeType === 'gradient' || s.strokeType === 'pattern'));

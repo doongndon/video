@@ -373,9 +373,14 @@ export class PhotoDoc {
 
   // ---------------------------------------------------------------- copy-on-write editing
 
-  /** Make the layer's pixels safe to change; grows the canvas so it covers `rect` (doc coords). */
-  editPixels(layer, rect = null) {
+  /**
+   * Make the layer's pixels safe to change; grows the canvas so it covers `rect` (doc coords).
+   * `quiet`: the caller marks every part it changes itself (doc.touch with a rectangle), so when the
+   * canvas keeps its size and place the copy changes nothing on screen and the picture isn't redrawn.
+   */
+  editPixels(layer, rect = null, { quiet = false } = {}) {
     if (layer.kind !== 'raster') return null;
+    const had = !!layer.canvas;
     if (!layer.canvas) {
       layer.canvas = makeCanvas(this.width, this.height);
       layer.x = 0;
@@ -386,19 +391,22 @@ export class PhotoDoc {
     const y0 = Math.min(layer.y, Math.floor(want.y));
     const x1 = Math.max(layer.x + layer.canvas.width, Math.ceil(want.x + want.w));
     const y1 = Math.max(layer.y + layer.canvas.height, Math.ceil(want.y + want.h));
+    const same = had && x0 === layer.x && y0 === layer.y && x1 - x0 === layer.canvas.width && y1 - y0 === layer.canvas.height;
     const c = makeCanvas(x1 - x0, y1 - y0);
     c.getContext('2d').drawImage(layer.canvas, layer.x - x0, layer.y - y0);
     layer.canvas = c;
     layer.x = x0;
     layer.y = y0;
-    this.touch(layer);
+    this.touch(layer, quiet && same ? { x: 0, y: 0, w: 0, h: 0 } : null);
     return c.getContext('2d');
   }
 
-  editMask(layer) {
+  /** Make the layer's mask safe to change (`quiet`: as in editPixels, the caller marks its changes). */
+  editMask(layer, { quiet = false } = {}) {
+    const had = !!layer.mask;
     if (!layer.mask) this.addMask(layer, 'white', false);
     layer.mask = { ...layer.mask, canvas: cloneCanvas(layer.mask.canvas) };
-    this.touch(layer);
+    this.touch(layer, quiet && had ? { x: 0, y: 0, w: 0, h: 0 } : null);
     return layer.mask.canvas.getContext('2d');
   }
 

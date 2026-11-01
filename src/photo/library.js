@@ -122,13 +122,16 @@ const blobBytes = (o, seen = new Set()) => {
 /** A small picture of the document (WebP keeps transparency; PNG where WebP can't be written). */
 async function thumbOf(doc, P) {
   const k = Math.min(1, 360 / Math.max(doc.width, doc.height));
-  const full = makeCanvas(doc.width, doc.height);
-  doc.render(full.getContext('2d'), { fg: P.fg, bg: P.bg });
+  // the document on screen: the editor's own picture of it (kept up to date, with smaller copies) —
+  // drawing the whole document again here held up the editor for a moment after every few edits
+  const shown = doc === P.doc && !P.showMaskOnly && P.viewSource ? P.viewSource(k) : null;
+  const full = shown || makeCanvas(doc.width, doc.height);
+  if (!shown) doc.render(full.getContext('2d'), { fg: P.fg, bg: P.bg });
   const c = makeCanvas(Math.max(1, Math.round(doc.width * k)), Math.max(1, Math.round(doc.height * k)));
   const g = c.getContext('2d');
   g.imageSmoothingQuality = 'high';
   g.drawImage(full, 0, 0, c.width, c.height);
-  full.width = full.height = 0;
+  if (!shown) full.width = full.height = 0;
   return new Promise((r) => c.toBlob(r, 'image/webp', 0.82));
 }
 
@@ -156,7 +159,8 @@ export function put(P, doc, { force = false } = {}) {
       const old = get(doc.id);
       const meta = {
         id: doc.id, name: doc.name, w: doc.width, h: doc.height, time: Date.now(), bytes: 0, thumb: await thumbOf(doc, P),
-        deleted: 0, srcKey: doc.recentId || old?.srcKey || null, edited: !!(old?.edited || doc.history?.serial), kind: 'doc',
+        // a document moved to 삭제됨 while still open stays there when it is written again
+        deleted: old?.deleted || 0, srcKey: doc.recentId || old?.srcKey || null, edited: !!(old?.edited || doc.history?.serial), kind: 'doc',
       };
       meta.bytes = blobBytes(rec) + (meta.thumb?.size || 0);
       // a file opened from disk again replaces its untouched earlier entry

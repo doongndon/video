@@ -279,9 +279,26 @@ export function antsImage(sel, view, w, h, phase) {
         if (x === 0 || y === 0 || x === w - 1 || y === h - 1 || !inside(i - 1) || !inside(i + 1) || !inside(i - w) || !inside(i + w)) edges.push(i);
       }
     }
-    sel._ants = { key, edges: Int32Array.from(edges) };
+    // the box around the edges (the caller can put back just that part)
+    let x0 = w;
+    let y0 = h;
+    let x1 = -1;
+    let y1 = -1;
+    for (const i of edges) {
+      const x = i % w;
+      const y = (i / w) | 0;
+      if (x < x0) x0 = x;
+      if (x > x1) x1 = x;
+      if (y < y0) y0 = y;
+      if (y > y1) y1 = y;
+    }
+    sel._ants = { key, edges: Int32Array.from(edges), box: x1 < 0 ? null : { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 } };
   }
-  const img = new ImageData(w, h);
+  // the same picture every tick (only the edge pixels change): a new screen-sized one each time kept
+  // the garbage collector busy while the ants ran
+  let img = sel._ants.img;
+  if (!img || img.width !== w || img.height !== h) img = sel._ants.img = new ImageData(w, h);
+  img.box = sel._ants.box;
   const out = img.data;
   for (const i of sel._ants.edges) {
     const x = i % w;

@@ -235,6 +235,8 @@ body.mobile.m-land .ph-mnav .m-tool { height: 44px; }
 /* the chain between a layer and its mask: an empty slot when unlinked (click to link again) */
 .ph-mlink { flex: 0 0 12px; width: 12px; height: 24px; margin: 0 -4px; padding: 0; border: 0; background: none; color: var(--text-dim); display: flex; align-items: center; justify-content: center; cursor: pointer; }
 .ph-mlink:hover { color: var(--text); background: rgba(255, 255, 255, 0.06); }
+.ph-mlink-slot { display: block; width: 6px; height: 10px; border: 1px dashed var(--text-faint); border-radius: 2px; opacity: 0.8; }
+.ph-mlink.off:hover .ph-mlink-slot { border-color: var(--text); opacity: 1; }
 .ph-lfoot button { font-size: 12px; }
 
 /* layer style dialog */

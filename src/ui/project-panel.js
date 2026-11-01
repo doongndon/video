@@ -70,6 +70,8 @@ export function pickFiles({ accept = 'video/*,audio/*,image/*,.cube,.ttf,.otf,.w
   return new Promise((resolve) => {
     const input = h('input', { type: 'file', accept, multiple });
     input.addEventListener('change', () => resolve([...input.files]));
+    // closing the picker without a file: callers get an empty list instead of waiting forever
+    input.addEventListener('cancel', () => resolve([]));
     input.click();
   });
 }

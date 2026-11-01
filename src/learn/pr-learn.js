@@ -239,6 +239,8 @@ export function createLearnPanel() {
   // the step completes by itself when the project state matches
   let timer = null;
   const tick = () => {
+    // nothing to check while the tab is hidden or the photo editor is up (appMode.on hides the coach)
+    if (document.hidden || appMode.isPhoto()) return;
     const L = lesson();
     if (!L || busy || cur.step >= L.steps.length) return syncCoach();
     const st = L.steps[cur.step];
@@ -421,14 +423,18 @@ export function createLearnPanel() {
   document.body.append(coach);
   function syncCoach() {
     const L = lesson();
-    const on = !!L && !busy && cur.step < L.steps.length && !appMode.isPhoto() && !visible(el) && !document.querySelector('.modal-backdrop');
+    // not over the 홈 screen (no lesson step happens there)
+    const on = !!L && !busy && cur.step < L.steps.length && !appMode.isPhoto() && !visible(el) && !document.querySelector('.modal-backdrop')
+      && document.body.dataset.hmode !== 'home';
     coach.hidden = !on;
     if (!on) return;
     coachText.textContent = `${cur.step + 1}/${L.steps.length} · ${L.steps[cur.step].t}`;
     // on the timeline's header row, clear of the picture
     const r = document.querySelector('#pg-timeline')?.getBoundingClientRect();
     if (isMobile()) Object.assign(coach.style, { left: '50%' });
-    else if (r && r.width) Object.assign(coach.style, { top: `${Math.round(r.top + 2)}px`, left: `${Math.round(r.left + r.width * 0.62)}px` });
+    else if (r && r.width && (document.body.dataset.hmode || 'edit') === 'edit') Object.assign(coach.style, { top: `${Math.round(r.top + 2)}px`, left: `${Math.round(r.left + r.width * 0.62)}px` });
+    // the 가져오기 / 내보내기 pages cover the timeline: just under the header, in the middle
+    else Object.assign(coach.style, { top: `${Math.round((document.querySelector('#pr-header')?.getBoundingClientRect().bottom || 60) + 6)}px`, left: '50%' });
   }
 
   // ---------------------------------------------------------------- the panel
@@ -441,7 +447,8 @@ export function createLearnPanel() {
       h('div.prl-dim', '강의 예제 파일은 파일 ▸ 가져오기(Ctrl+I)로 가져오고, 아래 실습의 단계를 그대로 따라 하세요. 연습 파일은 이 브라우저에서 바로 만들어지므로 내려받을 필요가 없습니다.'),
       info,
       h('div.prl-row',
-        h('button.small', { onclick: () => import('../ui/project-panel.js').then((m) => (m.pickFiles ? m.pickFiles() : null)) }, icon('folder', 13), ' 가져오기…'),
+        // 파일 ▸ 가져오기: pick the files and import them (picking alone did nothing)
+        h('button.small', { onclick: () => import('../ui/project-panel.js').then((m) => m.importDialog()) }, icon('folder', 13), ' 가져오기…'),
         usage?.items.length ? h('button.small', {
           onclick: async () => {
             if (!(await confirmDialog('연습 파일 지우기', '이 브라우저에 저장해 둔 연습 파일을 지울까요? 프로젝트에 이미 넣은 파일은 그대로 남고, 다음에 실습을 열면 다시 만듭니다.'))) return;

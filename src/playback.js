@@ -5,8 +5,9 @@ import { store } from './store.js';
 import { mediaUrl, getRuntime, mediaStatus, decodeAudioRange, interpretRatio } from './media.js';
 import {
   clipEnd, clipsOnTrack, mediaTimeAt, transitionExtents, evalEffect, audioTracks, videoTracks,
-  sequenceDuration, transitionsOnTrack, remapSpeedAt, sourceOut,
+  sequenceDuration, remapSpeedAt, sourceOut,
 } from './model.js';
+import { trackWindows } from './compositor.js';
 import { Emitter, clamp, dbToGain, snapFrame } from './util.js';
 import { createChain, chainSignature, loadAudioWorklets, measureNodeDelays } from './audio-fx.js';
 import './audio-fx2.js';
@@ -392,6 +393,15 @@ class Playback extends Emitter {
 
   /** Align media elements (including those inside nested sequences) with time t. */
   sync(t) {
+    windowCache = new Map();
+    try {
+      this.syncAt(t);
+    } finally {
+      windowCache = null;
+    }
+  }
+
+  syncAt(t) {
     const seq = store.seq;
     const keepV = new Set();
     const keepA = new Set();
@@ -433,8 +443,22 @@ class Playback extends Emitter {
     const fps = seq.fps;
     const anySolo = audioTracks(seq).some((tr) => tr.solo);
     const playingFwd = this.playing && this.rate > 0 && ctx.playing;
+    // longest half transition on each track: clips far from t are skipped without looking up their
+    // neighbours (transitionExtents scans every clip, which made long timelines stutter)
+    const reach = new Map();
+    const reachOf = (trackId) => {
+      let r = reach.get(trackId);
+      if (r === undefined) {
+        r = 0;
+        for (const c of Object.values(seq.clips)) if (c.trackId === trackId && c.transIn) r = Math.max(r, c.transIn.duration / 2 || 0);
+        reach.set(trackId, r);
+      }
+      return r;
+    };
 
     const span = (clip) => {
+      const lead0 = clip.transIn ? clip.transIn.duration / 2 || 0 : 0;
+      if (t < clip.start - lead0 - PREROLL || t >= clipEnd(clip) + reachOf(clip.trackId)) return { s: clip.start, active: false, preroll: false };
       const { lead, tail } = transitionExtents(seq, clip);
       const s = clip.start - lead;
       const e = clipEnd(clip) + tail;
@@ -830,10 +854,20 @@ export function clipPan(clip, t) {
   return fx ? clamp(evalEffect(fx, t - clip.start).balance / 100, -1, 1) : 0;
 }
 
+// transition windows per track, remembered while one sync() runs (the lookup scans every clip)
+let windowCache = null;
+function windowsOn(seq, trackId) {
+  if (!windowCache) return trackWindows(seq, trackId);
+  const key = `${seq.id}\u0000${trackId}`;
+  let w = windowCache.get(key);
+  if (!w) windowCache.set(key, (w = trackWindows(seq, trackId)));
+  return w;
+}
+
 /** Gain multiplier from audio transitions touching a clip at time t. */
 export function audioTransitionGain(seq, clip, t) {
   let g = 1;
-  for (const w of transitionsOnTrack(seq, clip.trackId)) {
+  for (const w of windowsOn(seq, clip.trackId)) {
     if (t < w.start || t >= w.end) continue;
     if (w.a?.id !== clip.id && w.b?.id !== clip.id) continue;
     const p = clamp((t - w.start) / Math.max(1e-6, w.end - w.start), 0, 1);

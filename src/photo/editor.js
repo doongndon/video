@@ -647,9 +647,16 @@ export function createPhotoEditor(root) {
         dirty = compRev === doc.rev ? moved : doc.takeDirty(compRev);
         if (dirty) dirty = unionRect(dirty, moved);
       } else dirty = doc.takeDirty(NaN);
-      const clip = dirty && clipRect(dirty, doc.width, doc.height);
+      // nothing on screen changed (a layer copied before painting on it): keep the picture as it is
+      const nothing = !!dirty && !(dirty.w > 0 && dirty.h > 0);
+      const clip = dirty && !nothing && clipRect(dirty, doc.width, doc.height);
       compMask = P.showMaskOnly;
       compDoc = doc;
+      if (nothing) {
+        compRev = doc.rev;
+        compFloat = fl;
+        return comp;
+      }
       if (clip && clip.w * clip.h < doc.width * doc.height * 0.6) {
         doc.render(comp.getContext('2d'), { float: fl, fg: P.fg, bg: P.bg, clip });
         if (mipDirty !== 'all') mipDirty = mipDirty ? unionRect(mipDirty, clip) : clip;
@@ -754,8 +761,13 @@ export function createPhotoEditor(root) {
   // top-left corner sits inside the bigger canvas
   let off = { x: 0, y: 0 };
   let cssKey = '';
+  // the stage's size, read once after it changes (the ResizeObserver below forgets it): reading it on
+  // every frame made the browser lay out the page again whenever a panel had just changed
+  let stageBox = null;
   function sizeCanvases() {
-    const r = stage.getBoundingClientRect();
+    const r = stageBox || (stageBox = stage.getBoundingClientRect());
+    // hidden (video mode) or not laid out yet: ask again next time
+    if (!(r.width > 0 && r.height > 0)) stageBox = null;
     const dpr = window.devicePixelRatio || 1;
     const rot = P.doc?.view?.rot || 0;
     // View ▸ Flip Horizontal mirrors the view (not the picture)
@@ -947,7 +959,9 @@ export function createPhotoEditor(root) {
       const ants = SEL.antsImage(doc.selection, { zoom: v.zoom * dpr, x: (v.x + OX) * dpr, y: (v.y + OY) * dpr }, over.width, over.height, antsPhase);
       if (ants) {
         og.setTransform(1, 0, 0, 1, 0, 0);
-        og.putImageData(ants, 0, 0);
+        // the overlay was cleared above: only the part with the edges needs putting back
+        const b = ants.box;
+        if (b) og.putImageData(ants, 0, 0, b.x, b.y, b.w, b.h);
         og.setTransform(dpr, 0, 0, dpr, OX * dpr, OY * dpr);
       }
     }
@@ -1680,6 +1694,7 @@ export function createPhotoEditor(root) {
     else P.openFiles(files);
   }, true);
   new ResizeObserver(() => {
+    stageBox = null;
     if (P.doc && (!P.doc.view.fitted || P.doc.view.auto)) P.fit();
     P.redraw();
     placeTextBox();

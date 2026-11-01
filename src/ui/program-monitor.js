@@ -28,7 +28,7 @@ let HANDLE = 7; // handle hit radius in px (bigger for fingers)
 
 /** 확대/축소 레벨 (Premiere: 맞추기, 10% … 400%). */
 export const ZOOM_LEVELS = [['fit', '맞추기'], ['0.1', '10%'], ['0.25', '25%'], ['0.5', '50%'], ['0.75', '75%'], ['1', '100%'], ['1.5', '150%'], ['2', '200%'], ['4', '400%']];
-/** 재생 해상도 / 일시 정지 해상도. 'auto' renders at the monitor's own pixel size. */
+/** 재생 해상도 / 일시 정지 해상도. 'auto' renders at the monitor's own pixel size (capped while playing, see renderScale). */
 export const RESOLUTIONS = [['auto', '자동 (화면 크기에 맞춤)'], ['1', '전체'], ['0.5', '1/2'], ['0.25', '1/4'], ['0.125', '1/8']];
 const RULER = 18; // ruler strip size in px
 const GUIDE_COLOR = '#36d1ff';
@@ -332,8 +332,11 @@ export function createProgramMonitor() {
     const s = store.seq;
     const res = playback.playing ? resolution : pauseRes;
     if (res === 'auto') {
+      // while playing, sharp phone / retina screens (2-3 device pixels per CSS pixel) render at most
+      // 1.5 per CSS pixel: a moving picture looks the same and costs a third to a half of the work.
+      // The paused frame is drawn again at full sharpness.
       const dpr = window.devicePixelRatio || 1;
-      return clamp((fr.w * dpr) / s.width, 0.1, 1);
+      return clamp((fr.w * (playback.playing ? Math.min(dpr, 1.5) : dpr)) / s.width, 0.1, 1);
     }
     return clamp(parseFloat(res) || 1, 0.05, 1);
   }

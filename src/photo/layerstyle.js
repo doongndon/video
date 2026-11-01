@@ -457,11 +457,13 @@ export function layerStyleDialog(P, start = 'blending') {
     else if (b.bottom > a.bottom) list.scrollTop += b.bottom - a.bottom;
   }
 
-  // a list row: Enter / Space choose it (instead of pressing 확인)
+  // a list row: Space chooses it; Enter is 확인 as everywhere in Photoshop's dialogs (a row keeps
+  // the focus after a click, and Enter used to turn on the effect under it instead of closing)
   const item = (cls, onPick, ...kids) => h(`div.pls-item${cls}`, {
     role: 'button', tabindex: 0, onclick: onPick,
     onkeydown: (e) => {
-      if (e.key !== 'Enter' && e.key !== ' ') return;
+      // (Space on the row's own check box toggles the box)
+      if (e.key !== ' ' || e.target !== e.currentTarget) return;
       e.preventDefault();
       onPick();
     },

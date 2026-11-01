@@ -13,6 +13,7 @@ import { toast, openModal, formRow, promptDialog } from '../ui/common.js';
 import { TOOLS, TOOL_BY_ID, TOOL_GROUPS } from './tools.js';
 import { PhotoDoc, newLayer, makeCanvas } from './doc.js';
 import { translatePath } from './paths.js';
+import { maskReveals } from './transform.js';
 import { encodeImage, quickExportPrefs, docMeta } from './exportas.js';
 
 /** Photoshop-style size presets: [label, width, height]. */
@@ -126,7 +127,15 @@ function shiftDoc(doc, dx, dy, W, H) {
   for (const l of doc.layers) {
     const m = l.mask;
     if (!m || (m.x <= 0 && m.y <= 0 && m.x + m.canvas.width >= W && m.y + m.canvas.height >= H)) continue;
-    l.mask = { ...m, canvas: moveCanvas(m.canvas, m.x, m.y), x: 0, y: 0 };
+    // the new area takes the mask's edge colour: a mask that shows everything keeps showing there
+    const c = makeCanvas(W, H);
+    const g = c.getContext('2d');
+    if (maskReveals(m)) {
+      g.fillRect(0, 0, W, H);
+      g.clearRect(m.x, m.y, m.canvas.width, m.canvas.height);
+    }
+    g.drawImage(m.canvas, m.x, m.y);
+    l.mask = { ...m, canvas: c, x: 0, y: 0 };
     l._styled = null;
     l.rev++;
   }

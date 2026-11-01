@@ -9,14 +9,14 @@
 // effect with its input; masks on 불투명도 cut out the clip. Transitions come from transitionPlan
 // (clip options / pieces) or shader plans (transitions2.js) that receive both clips rendered alone.
 
-import { clipsOnTrack, clipEnd, evalEffect, mediaTimeAt, transitionsOnTrack, videoTracks, getTrack } from './model.js';
+import { clipsOnTrack, clipEnd, evalEffect, mediaTimeAt, videoTracks, getTrack } from './model.js';
 import { ensureFont, fontSheetPending, isGenericFamily } from './fonts.js';
 import { EFFECTS } from './effects.js';
 import { clamp } from './util.js';
 import { PIXEL_FX, TRANSITION_PLANS } from './fx-registry.js';
 import { blurCanvas } from './fx-video.js';
 import './transitions2.js';
-import { MaskRaster, activeMasks } from './masks.js';
+import { MaskRaster, activeMasks, evalMask } from './masks.js';
 import { applyLumetri, applyLut, curveTable } from './lumetri.js';
 
 export { PIXEL_FX, TRANSITION_PLANS, curveTable };
@@ -162,7 +162,6 @@ export class Compositor {
     this.stageB = makeCanvas();
     this.small = makeCanvas();
     this.trackLayer = makeCanvas();
-    this.adjust = makeCanvas();
     this.textCache = new Map();
     this.solidCache = new Map();
     this.onAsyncReady = onAsyncReady || (() => {});
@@ -172,9 +171,7 @@ export class Compositor {
     this.subs = new Map();
     this.matteA = makeCanvas();
     this.matteB = makeCanvas();
-    this.maskCanvas = makeCanvas();
     this.stabCache = new Map();
-    this.masks = new MaskRaster();
     this.preMask = makeCanvas();
     this.layerA = makeCanvas();
     this.layerB = makeCanvas();
@@ -212,19 +209,35 @@ export class Compositor {
 
     const vts = videoTracks(seq);
     const mattes = this.matteTracksAt(seq, t);
-    for (let i = 0; i < vts.length; i++) {
-      const track = vts[i];
-      if (angle != null ? i !== angle - 1 : track.hidden) continue;
-      if (mattes.has(track.id)) continue;
-      const job = this.trackJob(seq, track, t);
-      if (!job) continue;
-      try {
-        this.drawJob(ctx, job, t, W, H);
-      } catch (err) {
-        console.error('render failed for track', track.name, err);
+    // transition windows are looked up once per track for this frame (the lookup scans every clip)
+    this.windowCache = new Map();
+    try {
+      for (let i = 0; i < vts.length; i++) {
+        const track = vts[i];
+        if (angle != null ? i !== angle - 1 : track.hidden) continue;
+        if (mattes.has(track.id)) continue;
+        const job = this.trackJob(seq, track, t);
+        if (!job) continue;
+        try {
+          this.drawJob(ctx, job, t, W, H);
+        } catch (err) {
+          console.error('render failed for track', track.name, err);
+        }
       }
+    } finally {
+      this.windowCache = null;
     }
     ctx.restore();
+  }
+
+  /** transitionsOnTrack, remembered while one frame renders. */
+  windowsOn(seq, trackId) {
+    const cache = this.windowCache;
+    if (!cache) return trackWindows(seq, trackId);
+    const key = `${seq.id}\u0000${trackId}`;
+    let w = cache.get(key);
+    if (!w) cache.set(key, (w = trackWindows(seq, trackId)));
+    return w;
   }
 
   /** Tracks used (and hidden) as track mattes by clips visible at time t. */
@@ -242,7 +255,7 @@ export class Compositor {
   trackJob(seq, track, t) {
     const clips = clipsOnTrack(seq, track.id).filter((c) => c.enabled !== false);
     if (!clips.length) return null;
-    const windows = transitionsOnTrack(seq, track.id);
+    const windows = this.windowsOn(seq, track.id);
     for (const w of windows) {
       if (t < w.start || t >= w.end) continue;
       const p = clamp((t - w.start) / Math.max(1e-6, w.end - w.start), 0, 1);
@@ -1157,7 +1170,7 @@ export class Compositor {
       pctx.drawImage(cur, 0, 0);
       run(type, v, fxObj);
       flushFilters();
-      const m = this.masks.render(masks, tl, w, h, ps, inner);
+      const m = this.maskCoverage(masks, tl, w, h, ps, inner);
       if (!m) continue;
       cctx.save();
       cctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -1174,7 +1187,7 @@ export class Compositor {
     flushFilters();
     if (extra.opMasks) {
       // masks on 불투명도: the clip only shows inside them
-      const m = this.masks.render(extra.opMasks, tl, w, h, ps, inner);
+      const m = this.maskCoverage(extra.opMasks, tl, w, h, ps, inner);
       if (m) {
         cctx.save();
         cctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -1192,6 +1205,30 @@ export class Compositor {
       cctx.restore();
     }
     return cur;
+  }
+
+  /**
+   * MaskRaster.render, kept while the masks look the same: a still (or held) feathered mask was
+   * drawn and blurred again every frame. Each mask set has its own raster, so a moving mask costs
+   * nothing extra. The returned canvas is only read by the caller.
+   */
+  maskCoverage(masks, tl, w, h, ps, rect) {
+    w = Math.max(1, Math.round(w));
+    h = Math.max(1, Math.round(h));
+    const key = JSON.stringify([masks.map((m) => evalMask(m, tl)), w, h, ps, rect]);
+    const slots = this.maskSlots || (this.maskSlots = new Map());
+    const id = masks.map((m) => m.id).join('|');
+    let slot = slots.get(id);
+    if (!slot) {
+      if (slots.size >= 16) slots.clear();
+      slot = { raster: new MaskRaster(), key: null, out: null };
+      slots.set(id, slot);
+    }
+    if (slot.key !== key) {
+      slot.out = slot.raster.render(masks, tl, w, h, ps, rect);
+      slot.key = key;
+    }
+    return slot.out;
   }
 
   /** Warm/cool + magenta/green grade using overlay blending, preserving alpha. */
@@ -1217,7 +1254,20 @@ export class Compositor {
 
   /** Mask alpha canvas (w×h, source space) for mask / censor effects. */
   buildMask(v, w, h, ps) {
-    const mctx = sizeCanvas(this.maskCanvas, w, h);
+    // a mask that does not move keeps its drawn (and blurred) canvas; a few are kept so that a mask
+    // and a censor on one clip do not push each other out. Callers only read the canvas.
+    const key = JSON.stringify([v, w, h, ps]);
+    const kept = this.maskCanvases || (this.maskCanvases = new Map());
+    const hit = kept.get(key);
+    if (hit) return hit.getContext('2d');
+    let canvas = null;
+    if (kept.size >= 4) {
+      const [oldKey, oldCanvas] = kept.entries().next().value;
+      kept.delete(oldKey);
+      canvas = oldCanvas;
+    }
+    canvas = canvas || makeCanvas();
+    const mctx = sizeCanvas(canvas, w, h);
     const feather = Math.max(0, v.feather || 0) * ps;
     const exp = (v.expansion || 0) * ps;
     if (feather > 0.3) mctx.filter = `blur(${feather / 2}px)`;
@@ -1252,6 +1302,7 @@ export class Compositor {
       mctx.setTransform(1, 0, 0, 1, 0, 0);
     }
     mctx.filter = 'none';
+    kept.set(key, canvas);
     return mctx;
   }
 
@@ -1352,11 +1403,10 @@ export class Compositor {
     if (!userFx.length) return;
     const cw = ctx.canvas.width;
     const ch = ctx.canvas.height;
-    const actx = sizeCanvas(this.adjust, cw, ch);
-    actx.drawImage(ctx.canvas, 0, 0);
-    // the frame below is the source: sizes in sequence pixels scale with the preview resolution
+    // the frame below is the source: sizes in sequence pixels scale with the preview resolution.
+    // processStage copies it onto its stage first, so no extra full-frame copy is needed here
     const s = this.scale || 1;
-    const processed = this.processStage({ img: this.adjust, w: cw / s, h: ch / s }, userFx, null, s, clip, tl, { opMasks });
+    const processed = this.processStage({ img: ctx.canvas, w: cw / s, h: ch / s }, userFx, null, s, clip, tl, { opMasks });
     ctx.save();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.globalAlpha = clamp(opacity * strength, 0, 1);
@@ -1406,6 +1456,51 @@ export class Compositor {
       return [m.posX + lx * cos - ly * sin, m.posY + lx * sin + ly * cos];
     });
   }
+}
+
+/**
+ * Same result as model.transitionsOnTrack, but the neighbour lookups use sorted indexes instead of
+ * scanning every clip for each clip (a long timeline full of transitions rendered in O(n²) per frame).
+ * The neighbour picked is the same: the first matching clip in seq.clips order.
+ */
+export function trackWindows(seq, trackId) {
+  const all = Object.values(seq.clips);
+  const own = [];
+  for (let i = 0; i < all.length; i++) if (all[i].trackId === trackId) own.push({ c: all[i], i, start: all[i].start, end: clipEnd(all[i]) });
+  if (!own.some((o) => o.c.transIn || o.c.transOut)) return [];
+  const byEnd = [...own].sort((a, b) => a.end - b.end);
+  const byStart = [...own].sort((a, b) => a.start - b.start);
+  // first entry (in seq.clips order) whose key is within 1e-4 of v, other than clip `self`
+  const near = (list, key, v, self) => {
+    let lo = 0;
+    let hi = list.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (list[mid][key] < v - 2e-4) lo = mid + 1;
+      else hi = mid;
+    }
+    let best = null;
+    for (let k = lo; k < list.length && list[k][key] <= v + 2e-4; k++) {
+      const o = list[k];
+      if (o.c.id === self.id || !(Math.abs(o[key] - v) < 1e-4)) continue;
+      if (!best || o.i < best.i) best = o;
+    }
+    return best ? best.c : undefined;
+  };
+  const out = [];
+  for (const { c, start, end } of byStart) {
+    if (c.transIn) {
+      const prev = near(byEnd, 'end', start, c);
+      const d = c.transIn.duration;
+      if (prev) out.push({ clip: c, edge: 'in', type: c.transIn.type, start: c.start - d / 2, end: c.start + d / 2, a: prev, b: c });
+      else out.push({ clip: c, edge: 'in', type: c.transIn.type, start: c.start, end: c.start + d, a: null, b: c });
+    }
+    if (c.transOut && !near(byStart, 'start', end, c)?.transIn) {
+      const d = c.transOut.duration;
+      out.push({ clip: c, edge: 'out', type: c.transOut.type, start: end - d, end, a: c, b: null });
+    }
+  }
+  return out;
 }
 
 /** Direction a transition moves content in, as a unit vector. */

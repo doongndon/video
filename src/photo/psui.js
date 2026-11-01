@@ -305,6 +305,11 @@ export function buildHome(P, { newDoc, open, openFromVideo }) {
   }, true);
 
   // ---- cards
+  /** An open document's latest changes are written first (a copy or a download takes what is kept). */
+  const writeIfOpen = async (id) => {
+    const d = P.docs.find((dd) => dd.id === id);
+    if (d) await LIB.put(P, d);
+  };
   const menuFor = (x) => (x.deleted ? [
     { label: '복원', action: () => LIB.restore(x.id).then(() => toast(`"${x.name}"을(를) 되살렸습니다`)) },
     '-',
@@ -323,8 +328,13 @@ export function buildHome(P, { newDoc, open, openFromVideo }) {
         P.renderTabs?.();
       }
     } },
-    { label: '복제', action: () => LIB.duplicate(P, x.id).then((c) => c && toast(`"${c.name}"을(를) 만들었습니다`)) },
+    { label: '복제', action: async () => {
+      await writeIfOpen(x.id);
+      const c = await LIB.duplicate(P, x.id);
+      if (c) toast(`"${c.name}"을(를) 만들었습니다`);
+    } },
     { label: '컴퓨터에 저장 (.mphoto)', action: async () => {
+      await writeIfOpen(x.id);
       const blob = await LIB.projectBlob(x.id);
       if (blob) downloadBlob(blob, `${x.name}.mphoto`);
     } },

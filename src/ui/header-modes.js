@@ -146,6 +146,11 @@ function buildImportPage() {
     let n = 1;
     while (names.has(`시퀀스 ${String(n).padStart(2, '0')}`)) n++;
     seqName.value = `시퀀스 ${String(n).padStart(2, '0')}`;
+    // and a bin name not used yet (a second import made another "새 저장소")
+    const bins = new Set(Object.values(store.project.bins || {}).map((b) => b.name));
+    let b = 1;
+    while (bins.has(b > 1 ? `새 저장소 ${b}` : '새 저장소')) b++;
+    binName.value = b > 1 ? `새 저장소 ${b}` : '새 저장소';
     projLine.replaceChildren(icon('film', 14), h('span', `프로젝트: ${store.project.name}`), h('span.note', ' · 이 브라우저에 저장'));
     const here = new Set(store.project.mediaOrder.map((id) => `${store.project.media[id]?.name}|${store.project.media[id]?.size}`));
     const seen = new Set();
@@ -355,13 +360,16 @@ export function initHeaderModes() {
   const home = buildHomePage({
     go: setHeaderMode,
     newProject: () => newProjectDialog({ onCreated: (goImport) => setHeaderMode(goImport ? 'import' : 'edit') }),
+    // cancelling the file picker or the confirm question stays on the home screen
     openFile: async () => {
+      const was = store.project;
       await c.openProject();
-      setHeaderMode('edit');
+      if (store.project !== was && mode === 'home') setHeaderMode('edit');
     },
     sample: async () => {
+      const was = store.project;
       await c.loadSample();
-      setHeaderMode('edit');
+      if (store.project !== was && mode === 'home') setHeaderMode('edit');
     },
   });
   // files dropped on the home screen go to the import page
@@ -420,7 +428,12 @@ export function initHeaderModes() {
   // every undoable step marks the project edited; opening or starting a project starts clean
   let loading = false;
   store.on('change', (reason) => {
-    if (reason === 'load') loading = true;
+    if (reason === 'load') {
+      loading = true;
+      // a project opened from the menu bar while 홈 / 가져오기 / 내보내기 is up (파일 ▸ 샘플
+      // 프로젝트 열기, 프로젝트 열기…): show it, rather than a page about the previous project
+      if (mode !== 'edit') setHeaderMode('edit');
+    }
     paintTitle();
   });
   store.on('history', () => {

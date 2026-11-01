@@ -15,6 +15,15 @@ import { TOOLS, TOOL_BY_ID, TOOL_GROUPS } from './tools.js';
 import { ADJUSTMENTS } from './adjust.js';
 import { createColorPicker } from './colorpicker.js';
 import { paramEditors } from './pdialogs.js';
+import { transformMasksBy } from './transform.js';
+
+/** Turn a layer's linked masks by `deg` degrees about (cx, cy) (a rotation typed in the properties panel). */
+const turnMasks = (doc, l, deg, cx, cy) => {
+  const a = (deg * Math.PI) / 180;
+  if (!a) return;
+  const [c, s] = [Math.cos(a), Math.sin(a)];
+  transformMasksBy(doc, l, [c, s, -s, c, cx - c * cx + s * cy, cy - s * cx - c * cy]);
+};
 
 const SWATCHES = ['#000000', '#ffffff', '#7f7f7f', '#c0c0c0', '#ff0000', '#ff7f00', '#ffd400', '#7fd400', '#00b050', '#00b0b0', '#0070c0', '#3a3aff', '#7030a0', '#ff4fa3', '#8b4513', '#f5deb3', '#ffe680', '#a8e6ff', '#2b2b2b', '#e8eaed'];
 
@@ -778,6 +787,13 @@ export function buildOptionsBar(P) {
   P.on('opts', render);
   P.on('transform', render);
   P.on('layers', render);
+  // Enter in a number field sets the value and gives the keys back to the picture (Photoshop), so
+  // the next shortcut (5 for 50%, ] for a bigger brush) is not typed into the field
+  el.addEventListener('keydown', (e) => {
+    const f = e.target;
+    if (!(f instanceof HTMLInputElement) || !['number', 'text'].includes(f.type) || e.isComposing) return;
+    if (e.key === 'Enter') setTimeout(() => f.isConnected && f.blur(), 0);
+  });
   render();
   return el;
 }
@@ -1191,21 +1207,28 @@ export function buildLayersPanel(P) {
       });
     }
     // the chain between the layer and its mask (Photoshop): linked masks move and transform with the layer
-    const chain = (key, name) => {
+    const chain = (key, name, short) => {
       const on = l[key].linked !== false;
-      return h(`button.ph-mlink${on ? '.on' : ''}`, {
-        title: on ? `${name}가 레이어와 연결됨 (같이 움직이고 변형됩니다) · 누르면 연결 해제` : `${name} 연결 해제됨 (레이어만 움직입니다) · 누르면 연결`,
+      return h(`button.ph-mlink${on ? '.on' : '.off'}`, {
+        title: on ? `레이어와 ${short} 연결됨 (누르면 연결 해제)\n연결되어 있으면 옮기거나 크기를 바꿀 때 같이 움직입니다` : `연결 끊김 (누르면 연결)\n지금은 레이어와 ${short}가 따로 움직입니다`,
         'aria-label': on ? `${name} 연결 해제` : `${name} 연결`,
         'aria-pressed': String(on),
         style: thumbSize ? null : 'display:none',
+        // a double click must not open Layer Style (the row's double click)
+        ondblclick: (e) => e.stopPropagation(),
         onclick: (e) => {
           e.stopPropagation();
-          P.run(on ? `${name} 연결 해제` : `${name} 연결`, () => { l[key] = { ...l[key], linked: !on }; doc.touch(l); });
+          // read the state now: two quick clicks before the panel redraws still toggle twice
+          const cur = doc.layer(l.id);
+          if (!cur?.[key]) return;
+          const was = cur[key].linked !== false;
+          P.run(was ? `${name} 연결 해제` : `${name} 연결`, () => { cur[key] = { ...cur[key], linked: !was }; doc.touch(cur); });
+          toast(was ? `${short} 연결을 끊었습니다: 이제 레이어와 따로 움직입니다` : `${short}를 다시 연결했습니다: 레이어와 같이 움직입니다`);
         },
-      }, on ? icon('link', 10) : null);
+      }, on ? icon('link', 10) : h('span.ph-mlink-slot'));
     };
-    const mlink = l.mask ? chain('mask', '레이어 마스크') : null;
-    const vlink = l.vmask ? chain('vmask', '벡터 마스크') : null;
+    const mlink = l.mask ? chain('mask', '레이어 마스크', '마스크') : null;
+    const vlink = l.vmask ? chain('vmask', '벡터 마스크', '벡터 마스크') : null;
     const vt = l.vmask ? thumb(P, l, 'vmask') : null;
     if (vt) {
       vt.classList.add('mask', 'vmask');
@@ -1573,7 +1596,12 @@ export function buildPropertiesPanel(P) {
         h('div.ph-prow', tog('bold', '굵게'), tog('italic', '기울임'), align),
         field('줄 간격', numIn(t.lineHeight || 1.2, 0.5, 4, 0.05, (v) => live('줄 간격', () => { l.text = { ...l.text, lineHeight: v }; }, true))),
         field('자간 (px)', numIn(t.letterSpacing || 0, -50, 200, 0.5, (v) => live('자간', () => { l.text = { ...l.text, letterSpacing: v }; }, true))),
-        field('회전 (°)', numIn(l.rotation || 0, -360, 360, 1, (v) => live('회전', () => { l.rotation = v; }, true))),
+        field('회전 (°)', numIn(l.rotation || 0, -360, 360, 1, (v) => live('회전', () => {
+          // the linked masks turn along, about the text box's middle (as Free Transform turns it)
+          const L = P.textBox(l);
+          turnMasks(doc, l, v - (l.rotation || 0), l.x + L.w / 2, l.y + L.h / 2);
+          l.rotation = v;
+        }, true))),
         h('div.ph-prow', h('button.small', { onclick: () => P.cmd.rasterize() }, '이미지로 바꾸기 (래스터화)')));
     } else if (l.kind === 'shape' && P.shapeProperties) {
       rows.push(...P.shapeProperties(l, live));

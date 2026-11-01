@@ -5,11 +5,12 @@ import { playback } from '../playback.js';
 import { runtime, mediaEvents, mediaStatus, importFiles } from '../media.js';
 import * as edit from '../edit.js';
 import {
-  clipEnd, clipsOnTrack, videoTracks, audioTracks, getTrack, sequenceDuration, transitionsOnTrack,
+  clipEnd, clipsOnTrack, videoTracks, audioTracks, getTrack, sequenceDuration,
   mediaTimeAt, linkedClips, prevAdjacent, nextAdjacent, editPoints, isAnimated, isTimed, hasSpeedRamp, LABEL_COLORS,
   evalParam, newKey, KF_INTERP, kfInterp, setKeyInterp, contentTime, MARKER_COLORS,
 } from '../model.js';
 import { EFFECTS, TRANSITIONS } from '../effects.js';
+import { trackWindows } from '../compositor.js';
 import { h, clamp, EPS, formatTimecode, parseTimecode, snapFrame, dbToGain, modKey } from '../util.js';
 import { showMenu, loadPref, savePref, fitCanvasToBox, promptDialog, toast, dnd, inlineEdit, uiScale } from './common.js';
 import { openSpeedDialog, openExtractAudioDialog } from './dialogs.js';
@@ -571,7 +572,7 @@ export function createTimeline() {
         drawClip(ctx, c, x0, y + 1, x1 - x0, row.h - 3, { dim: dragIds?.has(c.id) && !drag.duplicate });
       }
       // transitions
-      for (const tw of transitionsOnTrack(s, row.track.id)) {
+      for (const tw of trackWindows(s, row.track.id)) {
         const x0 = xOf(tw.start);
         const x1 = xOf(tw.end);
         if (x1 < 0 || x0 > W) continue;
@@ -1155,7 +1156,7 @@ export function createTimeline() {
     const s = store.seq;
     const ry = rowY(row);
     // transitions (drawn in the top part of the track)
-    for (const tw of transitionsOnTrack(s, row.track.id)) {
+    for (const tw of trackWindows(s, row.track.id)) {
       const x0 = xOf(tw.start);
       const x1 = Math.max(x0 + 4, xOf(tw.end));
       if (x >= x0 && x <= x1 && y >= ry && y <= ry + Math.min(row.h - 3, 22)) {

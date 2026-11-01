@@ -755,6 +755,8 @@ body:not(.photo-mode):not(.mobile) #statusbar { height: calc(22px * var(--ui-sca
 body:not(.photo-mode):not(.mobile) .media-item { grid-template-columns: 48px 1fr auto; padding: 2px 8px; gap: 8px; border-bottom-color: transparent; }
 body:not(.photo-mode):not(.mobile) .media-item .thumb { width: 48px; height: 27px; border-radius: 2px; }
 body:not(.photo-mode):not(.mobile) .project-list.grid .media-item .thumb { width: 100%; height: 72px; }
+/* 목록 보기 with columns: the thumbnail fits its 40px column (wider, it ran under the name) */
+body:not(.photo-mode):not(.mobile) .project-list.cols .media-item .thumb { width: 40px; height: 24px; }
 
 /* monitors: a black viewer, the blue timecode with 맞추기 at the left, 1/2 · wrench · duration at the
    right, a thin scrub bar, then the transport buttons centred in one row */
@@ -870,6 +872,10 @@ body:not(.mobile) [data-panel="lumetri"] .ecp:has(.ec-lslider) { grid-template-c
 body:not(.mobile) [data-panel="lumetri"] .ecp:has(.ec-lslider) > :is(.ec-twirl, .stopwatch, .ec-ptools) { visibility: hidden; width: 0; overflow: hidden; }
 body:not(.mobile) [data-panel="lumetri"] .ecp:has(.ec-lslider) > .label { padding-left: calc(18px * var(--ui-scale)); }
 body:not(.mobile) [data-panel="lumetri"] .ec-prow:has(.ec-lslider) > .ec-t { display: none; }
+/* the other rows (입력 LUT, 흰색 균형 선택기, 룩 …) line up with the sliders' names */
+body:not(.mobile) [data-panel="lumetri"] .ec-prow > .ecp:not(:has(.ec-lslider)) { grid-template-columns: 0 0 minmax(64px, 0.7fr) minmax(110px, 1.6fr) 0; }
+body:not(.mobile) [data-panel="lumetri"] .ec-prow > .ecp:not(:has(.ec-lslider)) > :is(.ec-twirl, .stopwatch, .ec-ptools) { visibility: hidden; width: 0; overflow: hidden; }
+body:not(.mobile) [data-panel="lumetri"] .ec-prow > .ecp:not(:has(.ec-lslider)) > .label { padding-left: calc(18px * var(--ui-scale)); }
 /* two colour wheels side by side, the name under each */
 .ec-full.ec-wheels { display: flex; justify-content: space-around; gap: 6px; padding: 4px 6px; }
 .ec-full.ec-wheels > .ec-wide { padding: 0; display: flex; flex-direction: column-reverse; align-items: center; gap: 2px; min-width: 0; }
