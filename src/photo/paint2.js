@@ -1,7 +1,7 @@
 // Gradient tool presets / styles / editor, pattern fill for the paint bucket, the pattern stamp
 // tool and Edit ▸ Define Pattern (kept in this browser).
 
-import { h } from '../util.js';
+import { h, clamp } from '../util.js';
 import { toast, promptDialog, loadPref, savePref } from '../ui/common.js';
 import { makeCanvas } from './doc.js';
 import { TOOLS, TOOL_BY_ID, TOOL_GROUPS, Stroke, brushOpts, needRaster, sampleColor, rgbHex } from './tools.js';
@@ -9,8 +9,67 @@ import { GRADIENTS, GRADIENT_STYLES, paintGradient, gradientLut, gradientSwatch,
 import { colorPickerDialog } from './colorpicker.js';
 import { gradientEditorDialog, importGradientFiles } from './gradedit.js';
 import { keepImportedPatterns } from './resources.js';
+import { BRUSH_BAR } from './brushpanel.js';
 
 const patternList = () => listPatterns().map((p) => [p.id, p.name]);
+
+/**
+ * The pattern stamp's 인상파 효과: a pattern tile repainted as short daubs, each the colour of the
+ * tile where it starts, laid at a random slant (a quick painterly look, like Photoshop's). The daubs
+ * are laid over the tile repeated 3×3 and the middle is kept, so the result still tiles.
+ */
+const daubCache = new Map();
+function impressionistTile(id, scale, r) {
+  const key = `${id}|${scale}|${r}`;
+  if (daubCache.has(key)) return daubCache.get(key);
+  const p = patternCanvas(id);
+  const k = Math.max(0.01, scale / 100);
+  const tw = Math.max(1, Math.round(p.width * k));
+  const th = Math.max(1, Math.round(p.height * k));
+  const big = makeCanvas(tw * 3, th * 3);
+  const bg = big.getContext('2d', { willReadFrequently: true });
+  for (let y = 0; y < 3; y++) for (let x = 0; x < 3; x++) bg.drawImage(p, x * tw, y * th, tw, th);
+  const daubs = impressionist(big, r);
+  const tile = makeCanvas(tw, th);
+  tile.getContext('2d').drawImage(daubs, tw, th, tw, th, 0, 0, tw, th);
+  if (daubCache.size > 16) daubCache.delete(daubCache.keys().next().value);
+  daubCache.set(key, tile);
+  return tile;
+}
+
+function impressionist(src, r) {
+  const W = src.width;
+  const H = src.height;
+  const d = src.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, W, H).data;
+  const out = makeCanvas(W, H);
+  const g = out.getContext('2d');
+  // the tile's own colours under the daubs, so no gaps show
+  g.drawImage(src, 0, 0);
+  g.lineCap = 'round';
+  let seed = 9;
+  const rnd = () => {
+    seed = (seed * 16807) % 2147483647;
+    return seed / 2147483647;
+  };
+  const step = Math.max(2, Math.round(r * 0.8));
+  for (let y = 0; y < H + step; y += step) {
+    for (let x = 0; x < W + step; x += step) {
+      const px = Math.min(W - 1, Math.max(0, Math.round(x + (rnd() - 0.5) * step)));
+      const py = Math.min(H - 1, Math.max(0, Math.round(y + (rnd() - 0.5) * step)));
+      const i = (py * W + px) * 4;
+      if (!d[i + 3]) continue;
+      const a = rnd() * Math.PI;
+      const len = r * (1 + rnd() * 1.5);
+      g.strokeStyle = `rgba(${d[i]},${d[i + 1]},${d[i + 2]},${d[i + 3] / 255})`;
+      g.lineWidth = r * (0.8 + rnd() * 0.6);
+      g.beginPath();
+      g.moveTo(px - Math.cos(a) * len, py - Math.sin(a) * len);
+      g.lineTo(px + Math.cos(a) * len, py + Math.sin(a) * len);
+      g.stroke();
+    }
+  }
+  return out;
+}
 
 export function installPaint2(P) {
   const C = P.cmd;
@@ -224,7 +283,9 @@ export function installPaint2(P) {
   // ---- pattern stamp
   const stamp = {
     id: 'patternStamp', name: '패턴 도장', key: 'S', icon: 'patternStamp', group: 'retouch', cursor: 'brush',
-    options: [['size', '크기', 'range', 1, 1000, 60, 'px'], ['hardness', '경도', 'range', 0, 100, 60, '%'], ['opacity', '불투명도', 'range', 1, 100, 100, '%'], ['flow', '흐름', 'range', 1, 100, 100, '%'], ['airbrush', '에어브러시', 'bool', null, null, false], ['pattern', '패턴', 'select', null, null, 'checker', patternList], ['scale', '패턴 크기 (%)', 'range', 10, 400, 100], ['pressureSize', '압력: 크기', 'bool', null, null, false]],
+    // Photoshop's order: brush, mode, opacity, flow, airbrush, pattern, aligned, impressionist
+    options: [...BRUSH_BAR.filter((x) => x[0] !== 'pressureSize'), ['pattern', '패턴', 'select', null, null, 'checker', patternList], ['scale', '패턴 크기 (%)', 'range', 10, 400, 100],
+      ['aligned', '정렬', 'bool', null, null, true], ['impressionist', '인상파 효과', 'bool', null, null, false], ['pressureSize', '압력: 크기', 'bool', null, null, false]],
     leadButtons() {
       return P.brushOptionButtons?.('patternStamp') || [];
     },
@@ -233,7 +294,20 @@ export function installPaint2(P) {
       if (E.maskTarget?.()) return void toast('패턴 도장은 레이어 내용에만 칠합니다');
       const o = E.opts('patternStamp');
       const bo = brushOpts(o, E, { label: '패턴 도장' });
-      bo.srcCanvas = paintPattern(E.doc.width, E.doc.height, o.pattern, o.scale);
+      // 정렬: the tiles stay put on the document; off: each stroke starts the pattern where it starts
+      const at = o.aligned === false ? p : { x: 0, y: 0 };
+      const ox = Math.round(at.x);
+      const oy = Math.round(at.y);
+      if (o.impressionist) {
+        // the painterly tile, laid like paintPattern lays the plain one
+        const tile = impressionistTile(o.pattern, o.scale ?? 100, clamp(Math.round((o.size || 60) / 12), 2, 24));
+        const c = makeCanvas(E.doc.width, E.doc.height);
+        const cg = c.getContext('2d');
+        cg.translate(ox, oy);
+        cg.fillStyle = cg.createPattern(tile, 'repeat');
+        cg.fillRect(-ox, -oy, c.width, c.height);
+        bo.srcCanvas = c;
+      } else bo.srcCanvas = paintPattern(E.doc.width, E.doc.height, o.pattern, o.scale, ox, oy);
       bo.cloneOffset = { x: 0, y: 0 };
       // brush tips and brush settings (brushengine.js) paint the pattern through
       bo.cloneSrc = bo.srcCanvas;

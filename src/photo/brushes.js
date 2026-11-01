@@ -13,7 +13,7 @@ import { inpaint, healBlend, solveLaplace } from './inpaint.js';
 import { createBrushRun, normDyn } from './brushengine.js';
 import { listPatterns, paintPattern } from './resources.js';
 import { installCloneSource, sampleCanvas, ALIGNED_OPT, SAMPLE_OPT, IGNORE_ADJ_OPT } from './clonesrc.js';
-import { installBrushPanels, BRUSH_BAR } from './brushpanel.js';
+import { installBrushPanels, BRUSH_BAR, BRUSH_MODES } from './brushpanel.js';
 
 const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
 const hexRgb = (hex) => {
@@ -432,7 +432,13 @@ export function installBrushTools(P) {
       Object.assign(bo, { size, hardness: 1, opacity: 1, flow: 1 });
       o = { size, tip: 'block', hardness: 100, spacing: 25, smoothing: o.smoothing };
     }
-    if (id === 'pencil' || (mode === 'clone' && !bo.cloneSrc)) return null;
+    if (id === 'pencil') {
+      // the pencil: Stroke's own hard dab, with the options bar's mode and smoothing
+      if (o.blend && o.blend !== 'source-over') bo.blend = o.blend;
+      bo.smoothing = clamp(o.smoothing || 0, 0, 100) / 100;
+      return null;
+    }
+    if (mode === 'clone' && !bo.cloneSrc) return null;
     const D = normDyn(o);
     bo.smoothing = D.smoothingOn ? D.smoothing / 100 : 0;
     // the painter places the dabs itself (spacing follows the current size and pen pressure), so
@@ -452,6 +458,37 @@ export function installBrushTools(P) {
 
   // tool options, presets, the Brush Settings and Brushes panels, Define Brush, .abr import
   installBrushPanels(P);
+
+  // ---- the pencil: Photoshop's options bar (mode, smoothing, Auto Erase)
+  const pencil = TOOL_BY_ID.pencil;
+  pencil.options = [
+    ['size', '크기', 'range', 1, 1000, 2, 'px'], ['blend', '모드', 'select', null, null, 'source-over', BRUSH_MODES],
+    ['opacity', '불투명도', 'range', 1, 100, 100, '%'], ['smoothing', '보정', 'range', 0, 100, 0, '%'],
+    ['autoErase', '자동 지우기', 'bool', null, null, false], ['pressureSize', '압력: 크기', 'bool', null, null, false],
+  ];
+  const pencilDown = pencil.down;
+  pencil.down = function down(E, p, e) {
+    // 자동 지우기: a stroke that starts on the foreground colour paints the background colour
+    const l = E.doc?.active;
+    if (E.opts('pencil').autoErase && !e.altKey && l?.canvas && !E.maskTarget?.() && !E.editMask) {
+      const x = Math.floor(p.x - l.x);
+      const y = Math.floor(p.y - l.y);
+      if (x >= 0 && y >= 0 && x < l.canvas.width && y < l.canvas.height) {
+        const d = l.canvas.getContext('2d').getImageData(x, y, 1, 1).data;
+        const f = hexRgb(E.fg);
+        if (d[3] > 127 && Math.abs(d[0] - f[0]) + Math.abs(d[1] - f[1]) + Math.abs(d[2] - f[2]) < 12) {
+          const fg = E.fg;
+          E.fg = E.bg;
+          try {
+            return pencilDown.call(this, E, p, e);
+          } finally {
+            E.fg = fg;
+          }
+        }
+      }
+    }
+    return pencilDown.call(this, E, p, e);
+  };
 
   // ---- the eraser's 작업 내역 지우기 (or Alt+drag): paint back the History panel's source state
   const eraser = TOOL_BY_ID.eraser;

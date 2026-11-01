@@ -45,6 +45,10 @@ export function ensureAdjStyle() {
 .ph-fbox { width: min(240px, 100%); height: auto; background: #26282d; border: 1px solid var(--line-2); border-radius: 4px; cursor: grab; touch-action: none; }
 .ph-fboxwrap .inline { display: inline-flex; gap: 6px; align-items: center; }
 body.ph-picking .ph-stage, body.ph-picking .ph-stage canvas { cursor: crosshair !important; }
+.ph-pin { position: fixed; width: 24px; height: 24px; margin: -12px 0 0 -12px; border-radius: 50%; border: 2px solid #fff; background: rgba(30, 110, 255, .3); box-shadow: 0 0 0 1px rgba(0,0,0,.65), inset 0 0 0 1px rgba(0,0,0,.65); cursor: move; touch-action: none; display: grid; place-items: center; }
+.ph-pin::after { content: ''; width: 5px; height: 5px; border-radius: 50%; background: #fff; box-shadow: 0 0 0 1px rgba(0,0,0,.6); }
+.ph-pin[hidden] { display: none; }
+.modal-backdrop.peeking .ph-pin { pointer-events: auto; }
 .nf { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 12px; min-height: 300px; }
 .nf-list { display: flex; flex-direction: column; gap: 4px; }
 .nf-item { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; cursor: pointer; }

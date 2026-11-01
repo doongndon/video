@@ -678,8 +678,39 @@ export function selMaskFor(P, c) {
 
 // adjustments whose result at a pixel depends only on that pixel: a smaller copy previews them exactly
 const PER_PIXEL = new Set(['brightness', 'levels', 'curves', 'exposure', 'vibrance', 'hueSat', 'colorBalance', 'bw', 'photoFilter', 'invert', 'posterize', 'threshold', 'gradientMap', 'desaturate', 'selectiveColor', 'channelMixer', 'replaceColor', 'colorLookup']);
+// [x, y] parameters (percent of the layer) a filter dialog shows as pins on the picture
+const POS_PAIRS = [['x', 'y'], ['x1', 'y1'], ['x2', 'y2'], ['fx', 'fy']];
 // filters that look the same on a smaller copy (their sizes are relative to the picture)
 const SCALE_FREE = new Set(['vignette', 'spherize', 'pinch', 'twirl', 'lensCorrection', 'polar', 'oil', 'depthBlur', 'skinSmoothing']);
+
+/** A dialog that can be dragged by its title bar, to see the picture under it (as in Photoshop). */
+function movable(modal) {
+  const head = modal.querySelector('header');
+  if (!head) return;
+  head.style.cursor = 'move';
+  head.style.touchAction = 'none';
+  let at = [0, 0];
+  head.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0 || e.target.closest('button, input, select')) return;
+    e.preventDefault();
+    head.setPointerCapture(e.pointerId);
+    const x0 = e.clientX - at[0];
+    const y0 = e.clientY - at[1];
+    const mv = (ev) => {
+      // the title bar stays on the screen
+      at = [clamp(ev.clientX - x0, -window.innerWidth / 2, window.innerWidth / 2), clamp(ev.clientY - y0, -window.innerHeight / 2 + 40, window.innerHeight / 2)];
+      modal.style.translate = `${at[0]}px ${at[1]}px`;
+    };
+    const up = () => {
+      head.removeEventListener('pointermove', mv);
+      head.removeEventListener('pointerup', up);
+      head.removeEventListener('pointercancel', up);
+    };
+    head.addEventListener('pointermove', mv);
+    head.addEventListener('pointerup', up);
+    head.addEventListener('pointercancel', up);
+  });
+}
 
 /**
  * Run `compute(baseCanvas, params)` live on the active layer (inside the selection), OK keeps it.
@@ -823,12 +854,14 @@ function liveLayerDialog(P, { title, defs, params, compute, label, slow = false,
     P.redraw();
   };
   const sampleAt = (x, y) => spot(base, x - bx, y - by);
+  const ctls = {};
+  let placePins = null;
   const dlg = openModal({
     title,
     width: box ? '560px' : '460px',
     peek: true,
     compare,
-    body: [...(boxRow ? [boxRow] : []), ...paramEditors(defs, params, () => schedule(false), P, { source: () => base, sampleAt }), h('div.inline', pv.el), status],
+    body: [...(boxRow ? [boxRow] : []), ...paramEditors(defs, params, () => { schedule(false); placePins?.(true); }, P, { source: () => base, sampleAt, ctls }), h('div.inline', pv.el), status],
     buttons: [{ label: '취소' }, {
       label: '확인', primary: true, action: () => {
         clearTimeout(timer);
@@ -855,22 +888,102 @@ function liveLayerDialog(P, { title, defs, params, compute, label, slow = false,
       }
     },
   });
-  if (boxC) {
-    // a click on the picture around the window shows that spot in the preview box (Photoshop)
-    const back = dlg.modal.parentElement;
-    const stageAt = (e) => {
-      const r = document.querySelector('.ph-stage')?.getBoundingClientRect();
-      return e.target === back && r && e.clientX >= r.left && e.clientX < r.right && e.clientY >= r.top && e.clientY < r.bottom;
+  movable(dlg.modal);
+  // ---- on the picture around the window: the filter's centres as pins to drag (Lens Flare, Lighting
+  // Effects, Radial Blur, the Blur Gallery), and a click shows that spot in the preview box
+  const back = dlg.modal.parentElement;
+  // the window stays above the pins
+  dlg.modal.style.position = 'relative';
+  dlg.modal.style.zIndex = '1';
+  const gate = (a) => (a.endsWith('2') && defs.some((d) => d[0] === 'two') ? () => !!params.two : () => true);
+  const pins = POS_PAIRS.filter(([a, b]) => defs.some((d) => d[0] === a && d[2] === 0 && d[3] === 100) && defs.some((d) => d[0] === b))
+    .map(([a, b], i, all) => ({ a, b, on: gate(a), el: h('div.ph-pin', { title: all.length > 1 ? `핀 ${i + 1} (끌어서 옮기기)` : '중심 (끌어서 옮기기)' }) }));
+  const pinAt = (pin) => [bx + (base.width * params[pin.a]) / 100, by + (base.height * params[pin.b]) / 100];
+  const toClient = (x, y) => {
+    // the inverse of P.toDoc (the view may be zoomed, moved or turned)
+    const o = P.toDoc(0, 0);
+    const ex = P.toDoc(1, 0);
+    const ey = P.toDoc(0, 1);
+    const a = ex.x - o.x;
+    const b = ey.x - o.x;
+    const c = ex.y - o.y;
+    const d = ey.y - o.y;
+    const det = a * d - b * c || 1;
+    return [(d * (x - o.x) - b * (y - o.y)) / det, (-c * (x - o.x) + a * (y - o.y)) / det];
+  };
+  let viewKey = '';
+  placePins = (force = false) => {
+    const o = P.toDoc(0, 0);
+    const e = P.toDoc(1, 1);
+    const key = `${o.x},${o.y},${e.x},${e.y}`;
+    if (!force && key === viewKey) return;
+    viewKey = key;
+    for (const pin of pins) {
+      pin.el.hidden = !pin.on();
+      const [cx, cy] = toClient(...pinAt(pin));
+      pin.el.style.left = `${cx}px`;
+      pin.el.style.top = `${cy}px`;
+    }
+  };
+  const movePin = (pin, e) => {
+    const pt = P.toDoc(e.clientX, e.clientY);
+    for (const [k, v] of [[pin.a, ((pt.x - bx) / base.width) * 100], [pin.b, ((pt.y - by) / base.height) * 100]]) {
+      params[k] = clamp(Math.round(v), 0, 100);
+      ctls[k]?.(params[k]);
+    }
+    placePins(true);
+    schedule(false);
+  };
+  const dragPin = (pin, e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    pin.el.setPointerCapture(e.pointerId);
+    const mv = (ev) => movePin(pin, ev);
+    const up = () => {
+      pin.el.removeEventListener('pointermove', mv);
+      pin.el.removeEventListener('pointerup', up);
+      pin.el.removeEventListener('pointercancel', up);
     };
+    pin.el.addEventListener('pointermove', mv);
+    pin.el.addEventListener('pointerup', up);
+    pin.el.addEventListener('pointercancel', up);
+  };
+  for (const pin of pins) {
+    pin.el.addEventListener('pointerdown', (e) => dragPin(pin, e));
+    back.append(pin.el);
+  }
+  const stageAt = (e) => {
+    const r = document.querySelector('.ph-stage')?.getBoundingClientRect();
+    return e.target === back && r && e.clientX >= r.left && e.clientX < r.right && e.clientY >= r.top && e.clientY < r.bottom;
+  };
+  if (boxC || pins.length) {
     back.addEventListener('pointermove', (e) => {
       back.style.cursor = stageAt(e) ? 'crosshair' : '';
     });
     back.addEventListener('pointerdown', (e) => {
       if (!stageAt(e) || picking) return;
       const pt = P.toDoc(e.clientX, e.clientY);
-      bc = { x: pt.x - bx, y: pt.y - by };
-      drawBox();
+      if (boxC) {
+        bc = { x: pt.x - bx, y: pt.y - by };
+        drawBox();
+      }
+      // the nearest pin jumps there and follows the drag
+      const near = pins.filter((pin) => pin.on()).sort((p1, p2) => Math.hypot(...pinAt(p1).map((v, i) => v - [pt.x, pt.y][i])) - Math.hypot(...pinAt(p2).map((v, i) => v - [pt.x, pt.y][i])))[0];
+      if (near) {
+        movePin(near, e);
+        dragPin(near, e);
+      }
     });
+  }
+  if (pins.length) {
+    // follow the view while it is zoomed or moved (the window hidden with H)
+    const watch = () => {
+      if (!back.isConnected) return;
+      placePins();
+      requestAnimationFrame(watch);
+    };
+    placePins(true);
+    requestAnimationFrame(watch);
   }
   schedule(true);
 }
@@ -1060,7 +1173,7 @@ function maskDialog(P, kind, id) {
       }
     }
   }
-  openModal({
+  const dlg = openModal({
     title: `${def.name} — ${name}`,
     width: '460px',
     peek: true,
@@ -1083,6 +1196,7 @@ function maskDialog(P, kind, id) {
       }
     },
   });
+  movable(dlg.modal);
   preview();
   return true;
 }
@@ -1219,7 +1333,7 @@ export function smartFilterDialog(P, id, params, index = null) {
   const op = { opacity: Math.round((entry.opacity ?? 1) * 100) };
   // the smart object's own content before this filter: what eyedroppers and histograms look at
   const source = () => doc.rasterizeLayer(l);
-  openModal({
+  const dlg = openModal({
     title: `고급 필터: ${filterName(id)}`,
     width: '460px',
     body: [...paramEditors(defs, p, () => { clearTimeout(timer); timer = setTimeout(apply, 60); }, P, { source, sampleAt: (x, y) => spot(doc.flatten({ fg: P.fg, bg: P.bg }), x, y) }),
@@ -1235,6 +1349,7 @@ export function smartFilterDialog(P, id, params, index = null) {
       }
     },
   });
+  movable(dlg.modal);
   apply();
   return undefined;
 }

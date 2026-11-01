@@ -941,6 +941,8 @@ export function installPathTools(P) {
       P.redraw();
     },
     down(E, p, e) {
+      this.corner = !direct && !!P.liveCorners?.down(p, e);
+      if (this.corner) return;
       let sps = P.getPath();
       // clicking a path shape layer on the canvas targets it
       if (!sps.length || (hitSub(sps, p) < 0 && !hitKnot(sps, p) && !(direct && hitHandle(sps, p)))) {
@@ -1014,6 +1016,10 @@ export function installPathTools(P) {
       P.redraw();
     },
     move(E, p, e) {
+      if (this.corner) {
+        P.liveCorners.move(p);
+        return;
+      }
       const d = this.d;
       if (!d) return;
       if (d.kind === 'marquee') {
@@ -1058,6 +1064,11 @@ export function installPathTools(P) {
       P.setPath(sps);
     },
     up() {
+      if (this.corner) {
+        this.corner = false;
+        P.liveCorners.up();
+        return;
+      }
       const d = this.d;
       if (d?.kind === 'marquee') {
         const x0 = Math.min(d.a.x, d.b.x);
@@ -1123,6 +1134,7 @@ export function installPathTools(P) {
     },
     overlay(E, g) {
       P.drawPathOverlay(g);
+      if (!direct) P.liveCorners?.draw(g);
       const d = this.d;
       if (d?.kind === 'marquee') {
         const [x1, y1] = P.toScreen(d.a.x, d.a.y);
