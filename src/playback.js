@@ -138,7 +138,11 @@ class Playback extends Emitter {
     this.openEnded = false; // keep playing past the sequence end (voice-over recording)
     this.requestRender = this.requestRender.bind(this);
     this.tick = this.tick.bind(this);
-    requestAnimationFrame(this.tick);
+    // the frame loop sleeps once nothing has changed for a second (no CPU / GPU use while idle);
+    // play(), requestRender() and resuming wake it again
+    this.looping = false;
+    this.idleFrames = 0;
+    this.wake();
 
     store.on('change', () => this.requestRender());
     store.on('playhead', () => this.requestRender());
@@ -177,6 +181,15 @@ class Playback extends Emitter {
 
   requestRender() {
     this.dirty = true;
+    this.wake();
+  }
+
+  /** Start the frame loop if it is asleep. */
+  wake() {
+    this.idleFrames = 0;
+    if (this.looping) return;
+    this.looping = true;
+    requestAnimationFrame(this.tick);
   }
 
   ensureAudio() {
@@ -255,6 +268,7 @@ class Playback extends Emitter {
     this.rate = rate;
     this.playing = true;
     this.lastTick = performance.now();
+    this.wake();
     this.emit('state');
   }
 
@@ -325,14 +339,22 @@ class Playback extends Emitter {
       this.stop();
       this.videoPool.pauseAll();
       this.audioPool.pauseAll();
-    }
+    } else this.requestRender();
   }
 
   // ---- main loop
 
   tick(now) {
-    requestAnimationFrame(this.tick);
+    this.looping = false;
     if (this.suspended) return;
+    // keep running while playing, and for a second after the last change so media elements that
+    // are still seeking or loading get synced; then sleep until something wakes the loop
+    if (this.playing || this.dirty) this.idleFrames = 0;
+    else this.idleFrames++;
+    if (this.playing || this.idleFrames < 60 || performance.now() < this.scrubUntil) {
+      this.looping = true;
+      requestAnimationFrame(this.tick);
+    }
     const seq = store.seq;
     if (this.playing) {
       const dt = Math.min(0.25, (now - this.lastTick) / 1000);

@@ -1000,10 +1000,45 @@ export function fitRect(cw, ch, w, h, zoom = 0) {
   return { x: Math.round((cw - dw) / 2), y: Math.round((ch - dh) / 2), w: Math.round(dw), h: Math.round(dh), s };
 }
 
-/** Resize a canvas backing store to its CSS size × devicePixelRatio. Returns ctx scaled to CSS px. */
-export function fitCanvasToBox(canvas) {
-  const dpr = window.devicePixelRatio || 1;
+// CSS sizes of canvases that are drawn every frame (monitors, meters, timeline), kept by a
+// ResizeObserver: measuring with getBoundingClientRect after a DOM change makes the browser lay out
+// the page again, several times per frame during playback. The observer is made when this module
+// loads, before the panels' own observers, so a panel that redraws on resize sees the new size.
+const canvasSizes = new WeakMap();
+const sizedCanvases = new Set();
+const canvasSizeObserver = typeof ResizeObserver === 'function'
+  ? new ResizeObserver((entries) => {
+    for (const e of entries) canvasSizes.delete(e.target);
+    for (const c of sizedCanvases) {
+      if (c.isConnected) continue;
+      canvasSizeObserver.unobserve(c);
+      sizedCanvases.delete(c);
+    }
+  })
+  : null;
+
+function cachedBox(canvas) {
+  const known = canvasSizes.get(canvas);
+  if (known) return known;
   const r = canvas.getBoundingClientRect();
+  const size = { width: r.width, height: r.height };
+  if (canvasSizeObserver && canvas.isConnected && r.width > 0 && r.height > 0) {
+    canvasSizes.set(canvas, size);
+    if (!sizedCanvases.has(canvas)) {
+      sizedCanvases.add(canvas);
+      canvasSizeObserver.observe(canvas);
+    }
+  }
+  return size;
+}
+
+/**
+ * Resize a canvas backing store to its CSS size × devicePixelRatio. Returns ctx scaled to CSS px.
+ * { cached: true } for canvases redrawn every frame: their size is remembered until it changes.
+ */
+export function fitCanvasToBox(canvas, { cached = false } = {}) {
+  const dpr = window.devicePixelRatio || 1;
+  const r = cached ? cachedBox(canvas) : canvas.getBoundingClientRect();
   const w = Math.max(1, Math.round(r.width * dpr));
   const hh = Math.max(1, Math.round(r.height * dpr));
   if (canvas.width !== w || canvas.height !== hh) {

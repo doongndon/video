@@ -494,7 +494,7 @@ export function createTimeline() {
   }
 
   function draw() {
-    const { ctx, w, h: hh, dpr } = fitCanvasToBox(canvas);
+    const { ctx, w, h: hh, dpr } = fitCanvasToBox(canvas, { cached: true });
     if (w < 2 || hh < 2) return;
     if (view.width !== w || view.height !== hh) {
       view.width = w;

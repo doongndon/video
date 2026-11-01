@@ -1402,12 +1402,21 @@ export function createMeters(el) {
     holds[1] = { v: -Infinity, t: 0 };
   });
   let idle = 0;
-  function draw(now) {
+  let looping = false;
+  // the meters sleep once playback has stopped and the bars have fallen; playback wakes them
+  const wake = () => {
+    idle = 0;
+    if (looping) return;
+    looping = true;
     requestAnimationFrame(draw);
-    // stopped and settled: nothing changes, skip the redraw
+  };
+  function draw(now) {
+    looping = false;
     if (!playback.playing && idle > 90) return;
+    looping = true;
+    requestAnimationFrame(draw);
     idle = playback.playing ? 0 : idle + 1;
-    const { ctx, w, h: hh } = fitCanvasToBox(canvas);
+    const { ctx, w, h: hh } = fitCanvasToBox(canvas, { cached: true });
     if (w < 4) return;
     ctx.fillStyle = '#1b1b1b';
     ctx.fillRect(0, 0, w, hh);
@@ -1442,8 +1451,10 @@ export function createMeters(el) {
     ctx.textAlign = 'right';
     for (const t of ticks) ctx.fillText(String(t), x0 - 2, y(t, hh) + 3);
   }
-  requestAnimationFrame(draw);
-  window.addEventListener('resize', () => { idle = 0; });
+  wake();
+  playback.on('state', wake);
+  canvas.addEventListener('click', wake);
+  window.addEventListener('resize', wake);
 }
 
 // ---------------------------------------------------------------- tools

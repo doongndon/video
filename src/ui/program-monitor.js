@@ -1151,7 +1151,7 @@ export function createProgramMonitor() {
   // ---- overlay
 
   function drawOverlay() {
-    const { ctx, w, h: hh } = fitCanvasToBox(overlay);
+    const { ctx, w, h: hh } = fitCanvasToBox(overlay, { cached: true });
     ctx.clearRect(0, 0, w, hh);
     const s = store.seq;
     drawFrameOverlays(ctx, s, fr);
@@ -2206,7 +2206,7 @@ export function createProgramMonitor() {
   // phones keep the plain bar: the whole sequence, easy to scrub with a finger
   const zoomBar = () => (document.body.classList.contains('mobile') ? 0 : 8);
   function drawScrub() {
-    const { ctx, w, h: hh } = fitCanvasToBox(scrub);
+    const { ctx, w, h: hh } = fitCanvasToBox(scrub, { cached: true });
     const s = store.seq;
     const d = Math.max(1, sequenceDuration(s));
     // keep the playhead in a zoomed view while playing or stepping
