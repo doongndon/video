@@ -56,9 +56,10 @@ injectStyle('eg-style', `
 .eg-sec label.check { white-space: nowrap; }
 .eg-sec input.tc { width: 104px; }
 .eg-sel { font-weight: 600; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.eg-ec { flex: 1; min-height: 120px; display: flex; flex-direction: column; overflow: hidden; }
-.eg-ec > * { flex: 1; min-height: 0; }
-.eg-ec .ec-top .ibtn.boxed { display: none; }
+.eg-pane.eg-edit.on { display: block; overflow: auto; }
+.eg-ec .ec-panel { flex: none; min-height: 0; }
+.eg-ec .ec { flex: none; overflow: visible; }
+.eg-ec .ec-top, .eg-ec .ec-foot { display: none; }
 .eg-empty { padding: 16px; color: var(--text-dim); white-space: pre-line; text-align: center; }
 .eg-sec[aria-disabled=true] { opacity: 0.5; pointer-events: none; }
 `);
@@ -307,7 +308,7 @@ export function createEssentialGraphicsPanel() {
       h('div.row', startOff.el, endOff.el),
       h('div.row', h('span', '사전 롤'), preRoll, h('span', '사후 롤'), postRoll),
       h('div.row', h('span', '감속'), easeIn, h('span', '가속'), easeOut));
-    editPane.append(layerBar, alignSec, ecWrap, rollSec);
+    editPane.append(layerBar, alignSec, rollSec, ecWrap);
   }
 
   const alignComp = new Compositor();

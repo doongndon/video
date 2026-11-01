@@ -399,6 +399,7 @@ export function pickOnPicture(P, sampleAt, cb) {
   if (!P?.doc || !stage) return cb(null);
   // the dialog fades and lets clicks through while the picture is being sampled
   const backs = [...document.querySelectorAll('.modal-backdrop')];
+  const bgs = backs.map((b) => b.style.background);
   for (const b of backs) {
     b.style.pointerEvents = 'none';
     b.style.background = 'transparent';
@@ -413,14 +414,14 @@ export function pickOnPicture(P, sampleAt, cb) {
   const finish = (rgb) => {
     window.removeEventListener('pointerdown', onDown, true);
     window.removeEventListener('keydown', onKey, true);
-    for (const b of backs) {
+    backs.forEach((b, i) => {
       b.style.pointerEvents = '';
-      b.style.background = '';
+      b.style.background = bgs[i];
       b.querySelectorAll(':scope > .modal').forEach((m) => {
         m.style.pointerEvents = '';
         m.style.opacity = '';
       });
-    }
+    });
     document.body.classList.remove('ph-picking');
     stage.style.cursor = prevCursor;
     picking = null;
@@ -683,10 +684,14 @@ const POS_PAIRS = [['x', 'y'], ['x1', 'y1'], ['x2', 'y2'], ['fx', 'fy']];
 // filters that look the same on a smaller copy (their sizes are relative to the picture)
 const SCALE_FREE = new Set(['vignette', 'spherize', 'pinch', 'twirl', 'lensCorrection', 'polar', 'oil', 'depthBlur', 'skinSmoothing']);
 
-/** A dialog that can be dragged by its title bar, to see the picture under it (as in Photoshop). */
+/**
+ * A live-preview dialog as in Photoshop: the picture around it is not dimmed (the colours of the
+ * preview are judged there) and the window can be dragged by its title bar to see what is under it.
+ */
 function movable(modal) {
+  modal.parentElement.style.background = 'transparent';
   const head = modal.querySelector('header');
-  if (!head) return;
+  if (!head || document.body.classList.contains('mobile')) return;
   head.style.cursor = 'move';
   head.style.touchAction = 'none';
   let at = [0, 0];
