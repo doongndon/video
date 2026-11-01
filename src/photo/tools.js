@@ -1390,6 +1390,8 @@ export const TOOLS = [
         if (dup) doc.history.undoStack.pop();
       }
       this.d = { a: p, before, float, dup, moving: doc.selectedLayers.filter((x) => x.kind !== 'adjust' || x.mask), last: { dx: 0, dy: 0 }, sel: doc.selection };
+      // an unlinked mask with its thumbnail picked moves on its own (Photoshop)
+      if (!float && !dup && E.editMask && l.mask && l.mask.linked === false) this.d.maskOnly = l;
       E.float = float;
       E.redraw();
     },
@@ -1410,6 +1412,11 @@ export const TOOLS = [
       if (d.float) {
         E.float = { ...d.float, x: d.float.x + dx, y: d.float.y + dy };
         d.offset = { dx, dy };
+      } else if (d.maskOnly) {
+        const m = d.maskOnly.mask;
+        d.maskOnly.mask = { ...m, x: m.x + dx - d.last.dx, y: m.y + dy - d.last.dy };
+        d.last = { dx, dy };
+        E.doc.touch(d.maskOnly);
       } else {
         const sx = E.snapMove ? E.snapMove(d.moving, dx, dy, e) : { dx, dy };
         E.doc.translateLayers(d.moving, sx.dx - d.last.dx, sx.dy - d.last.dy);

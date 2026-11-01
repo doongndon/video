@@ -463,7 +463,10 @@ export class Transformer {
     this.layer = l;
     this.before = doc.capture();
     this.warp = null;
-    this.kind = target === 'selection' ? 'selection' : E.editMask && l?.mask ? 'mask' : l?.kind === 'smart' ? 'smart' : l?.kind === 'shape' ? 'shape' : l?.kind === 'text' ? 'text' : l?.kind === 'group' ? 'group' : 'pixels';
+    // with the mask thumbnail picked, Photoshop still transforms the layer and its linked masks together;
+    // only an unlinked mask (or one on a layer with nothing else to move, or selected mask pixels) goes alone
+    const maskOnly = E.editMask && l?.mask && (l.mask.linked === false || !!doc.selection || !['raster', 'smart', 'shape', 'text', 'group'].includes(l.kind) || (l.kind === 'raster' && (!l.canvas || !doc.opaqueBounds(l))));
+    this.kind = target === 'selection' ? 'selection' : maskOnly ? 'mask' : l?.kind === 'smart' ? 'smart' : l?.kind === 'shape' ? 'shape' : l?.kind === 'text' ? 'text' : l?.kind === 'group' ? 'group' : 'pixels';
     if (this.kind !== 'selection' && (!l || l.kind === 'adjust' || l.kind === 'fill')) throw new Error('변형할 레이어를 선택하세요 (칠·조정 레이어는 마스크를 고른 뒤 변형합니다)');
     if (this.kind !== 'selection' && (l.locked || l.lockPos)) throw new Error('위치가 잠긴 레이어입니다');
     let box;
@@ -656,11 +659,13 @@ export class Transformer {
         if (!b) throw new Error('레이어가 비어 있습니다');
         const c = makeCanvas(b.w, b.h);
         c.getContext('2d').drawImage(l.canvas, -b.x, -b.y);
+        // where it was (clearing below grows the layer to the page and moves its origin)
+        const at = { canvas: c, x: l.x + b.x, y: l.y + b.y };
         if (!this.copy) {
           const g = doc.editPixels(l);
           g.clearRect(0, 0, g.canvas.width, g.canvas.height);
         }
-        return { canvas: c, x: l.x + b.x, y: l.y + b.y };
+        return at;
       }
       fg.drawImage(l.canvas, l.x, l.y);
       if (doc.selection) {
