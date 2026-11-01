@@ -3,7 +3,7 @@
 // A step: t (what), d (how), why, path (menu path, shown and pointed at), key (shortcut),
 // show (what '보여 주기' points at when it is not the menu path: { tool } · { panel, sel, text } ·
 // { clip: (s) => clip, edge } · { time }), done(s) (true when the project shows the step is done;
-// none: '다음' only). `s` (see pr-learn.js ctx): seq, clips, base, tool, sel, playhead, playing,
+// none: '다음' only). `s` (see pr-learn.js ctx): seq, clips, base, tool, usedTool(id), sel, playhead, playing,
 // source, project, media(key), of(key, 'video' | 'audio'), onTrack('V1'), vIndex(clip), did(re),
 // fx(clip, type), panel(id), modal(re), toast(re), dur(), seqCount().
 
@@ -35,7 +35,7 @@ const masksOf = (fx) => fx?.masks || [];
 
 // ---------------------------------------------------------------- shared steps
 
-const toolStep = (tool, t, d, key, why) => ({ t, d, why, key, show: { tool }, done: (s) => s.tool === tool });
+const toolStep = (tool, t, d, key, why) => ({ t, d, why, key, show: { tool }, done: (s) => s.usedTool(tool) });
 const panelStep = (id, name, path, key, d, why) => ({
   t: `${name} 패널 열기`, d: d || `창 ▸ ${name}${key ? ` (${key})` : ''}를 누르세요.`, why, path, key, show: { panel: id }, done: (s) => s.panel(id),
 });

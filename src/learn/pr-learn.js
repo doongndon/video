@@ -92,9 +92,13 @@ export function createLearnPanel() {
     return !!b && visible(b);
   };
   const toasts = [];
+  // tools picked since the step began (a click with the type tool switches back to the selection tool at once)
+  const toolsSeen = new Set();
+  store.on('tool', () => toolsSeen.add(store.ui.tool));
   const snapshot = () => {
     shownPanels.clear();
     toasts.length = 0;
+    toolsSeen.clear();
     const s = seq();
     return {
       seqId: s?.id, seqs: Object.keys(store.project.sequences).length, clips: clips().length, labels: labels(),
@@ -109,7 +113,7 @@ export function createLearnPanel() {
     const ls = labels();
     const mediaOf = (key) => practiceMediaId(key);
     return {
-      seq: s, clips: all, base, tool: store.ui.tool, sel: store.selectedClips(), playhead: store.ui.playhead,
+      seq: s, clips: all, base, tool: store.ui.tool, usedTool: (id) => store.ui.tool === id || toolsSeen.has(id), sel: store.selectedClips(), playhead: store.ui.playhead,
       playing: !!playback.playing || [...document.querySelectorAll('.panel-body[data-panel="source"] video')].some((v) => !v.paused), project: store.project, source: store.ui.sourceMediaId, selectedMedia: [...store.ui.selectedMedia],
       media: mediaOf,
       of: (key, kind = null) => {
