@@ -188,7 +188,8 @@ export const LESSONS = [
       },
       {
         t: '자막 길이 맞추기', d: '선택 도구로 텍스트 클립의 오른쪽 끝을 끌어 장면이 바뀌는 8초에 맞추세요. 스냅(S)이 켜져 있으면 편집점에 착 붙습니다.',
-        show: { clip: (s) => textClips(s)[0], edge: 'out' }, done: (s) => textClips(s).some((c) => Math.abs(c.duration - 5) > 0.2),
+        show: { clip: (s) => textClips(s).sort((a, b) => a.start - b.start)[0], edge: 'out', note: '이 끝을 8초까지 끄세요' },
+        done: (s) => textClips(s).some((c) => c.start < 1 && Math.abs(end(c) - 8) < 0.3),
       },
       {
         t: '자동 캡션 (말소리가 있는 영상)', d: '말소리가 있는 영상은 그래픽 및 타이틀 ▸ 자동 캡션 만들기(음성 인식)로 자막을 한 번에 만들 수 있습니다. 처음 한 번 음성 인식 모델을 내려받습니다. 이 단계는 읽고 \'다음\'을 누르세요.',
@@ -274,7 +275,7 @@ export const LESSONS = [
       {
         t: '소스 오디오 패치 끄기', d: '타임라인 왼쪽 트랙 머리글에서 A1 옆의 파란 소스 패치 단추를 눌러 끄세요. 그러면 B롤의 소리는 들어가지 않고 인터뷰 소리가 남습니다.',
         why: '소스 패치는 소스의 영상·소리가 어느 트랙에 들어갈지 정합니다.', show: { sel: '.track-header button.src-patch.on' },
-        done: (s) => !s.seq.tracks.some((t) => t.kind === 'audio' && t.patched),
+        done: (s) => !!s.seq.patchOff?.audio,
       },
       {
         t: '덮어쓰기', d: '. 키를 누르거나 소스 모니터 아래 덮어쓰기 단추를 누르세요. 3초부터 B롤 화면이 인터뷰 화면을 덮습니다.',
