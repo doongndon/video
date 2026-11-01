@@ -179,6 +179,8 @@ function typePanel(P, cls, build) {
     } finally {
       own = false;
     }
+    // toggles and selects show the new state (a live colour drag keeps its input)
+    if (!opts.live) render();
   };
   for (const ev of ['layers', 'doc', 'opts', 'typesel', 'history', 'textstyles']) P.on(ev, render);
   render();
@@ -224,7 +226,7 @@ export function buildCharacterPanel(P) {
     const color = h('input', { type: 'color', value: /^#[0-9a-f]{6}$/i.test(c.color || '') ? c.color : '#000000', title: '색상', 'aria-label': '글자 색상' });
     color.addEventListener('input', () => apply({ color: color.value }, '글자 색상', { live: true }));
     color.addEventListener('change', () => apply({ color: color.value }, '글자 색상', { refocus: true }));
-    const tog = (key, label, title, on, patch, style = {}) => h(`button.small.tp-tog${on ? '.on' : ''}`, { title, 'aria-label': title, 'aria-pressed': String(!!on), style, onclick: () => apply(patch, title, { refocus: true }) }, label);
+    const tog = (key, label, title, on, patch, style = {}) => h(`button.small.tp-tog${on ? '.on' : ''}`, { title, 'aria-label': title, 'aria-pressed': String(!!on), style, onclick: () => apply(patch, title.replace(/ \(.*\)$/, ''), { refocus: true }) }, label);
     const aa = h('select', { title: '앤티 앨리어스', 'aria-label': '앤티 앨리어스' }, AA_MODES.map(([v, n]) => h('option', { value: v }, n)));
     aa.value = st.aa || 'sharp';
     aa.addEventListener('change', () => apply({ aa: aa.value }, '앤티 앨리어스', { refocus: true }));

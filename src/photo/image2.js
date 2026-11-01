@@ -329,7 +329,8 @@ export function installImage2(P) {
           // rotate the placement matrix around the old centre, then move to the new canvas
           const nm = [c * m[0] - s * m[1], s * m[0] + c * m[1], c * m[2] - s * m[3], s * m[2] + c * m[3]];
           const [tx, ty] = map([m[4], m[5]]);
-          l.smart = { ...l.smart, m: [...nm, tx, ty], corners: l.smart.corners?.map(map) };
+          const w = l.smart.warp;
+          l.smart = { ...l.smart, m: [...nm, tx, ty], corners: l.smart.corners?.map(map), warp: w?.ctrl ? { ...w, ctrl: w.ctrl.map(map) } : w };
         }
         if (l.mask) l.mask = { ...l.mask, canvas: rot(l.mask.canvas, l.mask.x, l.mask.y), x: 0, y: 0 };
         l._styled = null;

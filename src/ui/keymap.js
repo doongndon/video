@@ -8,12 +8,15 @@ import { h, isMac, modKey } from '../util.js';
 import { openModal, menusOpen, modalOpen, toggleMaximize, loadPref, savePref, toast, panelIds } from './common.js';
 import { icon } from './icons.js';
 import { menubarApi } from './menubar.js';
+import { appMode } from '../mode.js';
 
 /** Premiere's Shift+number panel keys. */
 export const PANEL_KEYS = { project: '1', source: '2', timeline: '3', program: '4', effectControls: '5', mixer: '6', effects: '7', clipMixer: '9' };
 
 // menu commands whose keys only this module handles (shortcuts.js does not know them)
-const MENU_ONLY_KEYS = ['Ctrl+Alt+K', 'Ctrl+Alt+N', 'Ctrl+Shift+S', 'Ctrl+Alt+R', 'Ctrl+Alt+E', 'Ctrl+Shift+/'];
+// (Ctrl+; / Ctrl+Shift+; are 보기 ▸ 안내선 표시 / 프로그램 모니터에서 스냅 wherever the focus is;
+// shortcuts.js would read them as ; 들어 올리기)
+const MENU_ONLY_KEYS = ['Ctrl+Alt+K', 'Ctrl+Alt+N', 'Ctrl+Shift+S', 'Ctrl+Alt+R', 'Ctrl+Alt+E', 'Ctrl+Shift+/', 'Ctrl+;', 'Ctrl+Shift+;'];
 // the browser keeps these for itself
 const RESERVED = ['Ctrl+N', 'Ctrl+T', 'Ctrl+W', 'Ctrl+Q', 'Ctrl+Shift+N', 'Ctrl+Shift+T', 'Ctrl+Shift+W', 'Ctrl+Tab', 'Ctrl+Shift+Tab', 'F11', 'F12', 'Ctrl+Shift+I', 'Ctrl+Shift+J', 'Ctrl+Shift+Q'];
 
@@ -137,6 +140,9 @@ function runItem(it) {
 
 // ---------------------------------------------------------------- key handling
 
+/** The photo editor's 도움말 ▸ 바로 가기 키 item (found by name: modules may add Help items). */
+export const photoShortcutsItem = () => (appMode.P?.menus?.['도움말']?.() || []).find((x) => x && x !== '-' && /단축키/.test(x.label || '')) || null;
+
 const isTyping = (t) => !!t && (t.isContentEditable || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT'
   || (t.tagName === 'INPUT' && !['checkbox', 'radio', 'range', 'button', 'color'].includes(t.type)));
 
@@ -147,9 +153,25 @@ export function installKeymap() {
   if (installed) return;
   installed = true;
   window.addEventListener('keydown', (e) => {
-    if (document.body.classList.contains('photo-mode') || menusOpen() || modalOpen() || isTyping(e.target)) return;
+    // a panel's own key handler (e.g. the Program monitor's) already took this key
+    if (e.defaultPrevented || menusOpen() || modalOpen() || isTyping(e.target)) return;
     const combo = comboOf(e);
     if (!combo) return;
+    // F10 / Alt+letter (Windows): open a menu-bar menu, in both editors
+    const mn = combo === 'F10' ? '' : /^Alt\+[A-Z]$/.test(combo) && !comboMap().has(combo) ? combo.slice(-1) : null;
+    if (mn != null && !e.repeat && menubarApi.openMenu?.(mn || null)) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      return;
+    }
+    if (document.body.classList.contains('photo-mode')) {
+      // F1 lists the photo editor's shortcuts too (its 도움말 ▸ 바로 가기 키)
+      if (combo === 'F1' && !e.repeat && runItem(photoShortcutsItem())) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+      }
+      return;
+    }
     let done = false;
     // shortcuts the person assigned in the dialog come first
     const id = comboMap().get(combo);
@@ -171,7 +193,8 @@ export function installKeymap() {
     }
     if (done) {
       e.preventDefault();
-      e.stopPropagation();
+      // also keep other window capture listeners (panels' own keys) from answering the same key
+      e.stopImmediatePropagation();
     }
   }, true);
   // Help ▸ 키보드 단축키, F1 and ? open this list
@@ -205,7 +228,10 @@ function otherShortcuts(TOOLS) {
       ['모든 트랙 높이 늘리기 / 줄이기', 'Shift+= / Shift+-'], ['비디오 트랙 높이 늘리기 / 줄이기', `${M('Ctrl+=')} / ${M('Ctrl+-')}`], ['오디오 트랙 높이 늘리기 / 줄이기', 'Alt+= / Alt+-'],
       ['선택 해제', 'Esc'], ['멀티 카메라 앵글 바꾸기', '1 ~ 9'],
     ]],
-    ['그 밖에', [['다시 실행 (다른 키)', M('Ctrl+Y')], ['지우기 (다른 키)', 'Backspace'], ['키보드 단축키 목록', 'F1 / ?']]],
+    ['그 밖에', [
+      ['다시 실행 (다른 키)', M('Ctrl+Y')], ['지우기 (다른 키)', 'Backspace'], ['키보드 단축키 목록', 'F1 / ?'],
+      ...(isMac ? [] : [['메뉴 열기 (첫 메뉴 / 파일·편집·클립…)', 'F10 / Alt+F, E, C, S, M, G, V, W, A, H']]),
+    ]],
     ['마우스', [
       ['복제하며 끌기', 'Alt+끌기'], ['삽입하며 끌기', `${M('Ctrl+')}끌기`], ['연결된 짝은 두고 한쪽만 선택', 'Alt+클릭'], ['선택에 더하기 / 빼기', 'Shift+클릭'],
       ['볼륨 선에 키프레임 추가', `${M('Ctrl+')}클릭`], ['타임라인: 시간 이동 / 트랙 이동 / 확대', `휠 / Shift+휠 / Alt 또는 ${M('Ctrl+')}휠`],
@@ -213,6 +239,13 @@ function otherShortcuts(TOOLS) {
     ]],
   ];
 }
+
+/** The single keys of a list entry ("J / K / L", "1 ~ 9", "Shift+← / Shift+→"), canonical. */
+const splitKeys = (key) => {
+  const range = String(key).match(/^(\d)\s*~\s*(\d)$/);
+  if (range) return Array.from({ length: Math.max(0, range[2] - range[1] + 1) }, (_, i) => String(Number(range[1]) + i));
+  return String(key).split(/\s+\/\s+|\s*~\s*/).map(normCombo).filter(Boolean);
+};
 
 /** 편집 ▸ 키보드 단축키: every shortcut by menu; any menu command can get a shortcut of its own. */
 export async function openKeyboardShortcuts() {
@@ -299,6 +332,11 @@ export async function openKeyboardShortcuts() {
     const qKey = normCombo(search.value.trim());
     const hit = (label, key) => !q || label.toLowerCase().includes(q) || String(key).toLowerCase().includes(q) || (qKey && normCombo(key) === qKey);
     const rows = [];
+    const flag = (text, title) => h('span.kb-clash', { title }, icon('alert', 13), ` ${text}`);
+    // the keys of the 패널·도구·재생 list, for clashes with shortcuts a person assigned
+    const groups = otherShortcuts(TOOLS);
+    const otherKeys = new Map();
+    for (const [, r] of groups) for (const [label, k] of r) for (const p of splitKeys(k)) if (!otherKeys.has(p)) otherKeys.set(p, label);
     if (tab === 'menus') {
       const cmds = menuCommands();
       const used = new Map();
@@ -315,35 +353,46 @@ export async function openKeyboardShortcuts() {
           rows.push(h('div.kb-head', cmd.menu));
           lastMenu = cmd.menu;
         }
-        const clash = (used.get(normCombo(custom[cmd.id] || cmd.key)) || []).filter((x) => x !== cmd && x.item.action !== cmd.item.action);
+        // the same command listed in two menus (e.g. 문자 도구) is not a clash
+        const clash = (used.get(normCombo(custom[cmd.id] || cmd.key)) || []).filter((x) => x !== cmd && x.item.action !== cmd.item.action && normLabel(x.label) !== normLabel(cmd.label));
+        const replaced = custom[cmd.id] && otherKeys.get(custom[cmd.id]);
         const change = h('button.small.kb-change', { title: '이 명령에 새 단축키 정하기' }, '바꾸기');
         change.addEventListener('click', () => startCapture(cmd, change));
         const reset = custom[cmd.id] ? h('button.small', { title: '원래 단축키로', onclick: () => { delete custom[cmd.id]; saveCustom(); menubarApi.rebuild?.(); render(); } }, '기본값') : null;
         rows.push(h('div.kb-row', { role: 'listitem' },
           h('span.kb-label', cmd.path.length > 1 ? h('span.kb-path', `${cmd.path.slice(0, -1).join(' ▸ ')} ▸ `) : null, cmd.path[cmd.path.length - 1],
-            clash.length ? h('span.kb-clash', { title: clash.map((x) => x.path.join(' ▸ ')).join(', ') }, icon('alert', 13), ` ${clash[0].path[clash[0].path.length - 1]}에도 쓰임`) : null),
+            clash.length ? flag(`${clash[0].path[clash[0].path.length - 1]}에도 쓰임`, clash.map((x) => x.path.join(' ▸ ')).join(', ')) : null,
+            replaced && !clash.length ? flag(`원래 키의 "${replaced}" 대신 실행됨`, '패널·도구·재생 탭의 단축키와 같은 키입니다') : null),
           keyCell(cmd), h('span.kb-btns', change, reset)));
       }
     } else {
-      const groups = otherShortcuts(TOOLS);
-      // shortcuts listed elsewhere (src/ui/dialogs.js) that no menu or list here covers
-      const parts = (key) => String(key).split(/\s+\/\s+|\s*~\s*/).map(normCombo);
-      const known = new Set(menuCommands().map((x) => normCombo(x.key)).filter(Boolean));
-      for (const [, r] of groups) for (const [, k] of r) for (const p of parts(k)) known.add(p);
+      // shortcuts listed elsewhere (src/ui/dialogs.js) that no menu or list here covers; a row with
+      // the mouse is kept (Ctrl+클릭 means something else in each panel)
+      const cmds = menuCommands();
+      const known = new Set([...cmds.map((x) => normCombo(x.key)).filter(Boolean), ...otherKeys.keys()]);
+      const listed = new Set(groups.flatMap(([, r]) => r.map(([, k]) => k)));
       const more = [];
       for (const [, rs] of SHORTCUTS || []) {
         for (const [label, key] of rs) {
-          if (parts(key).every((k) => known.has(k))) continue;
-          for (const p of parts(key)) known.add(p);
+          if (listed.has(key) || (!/클릭|끌기|휠/.test(key) && splitKeys(key).every((k) => known.has(k)))) continue;
+          listed.add(key);
+          for (const p of splitKeys(key)) known.add(p);
           more.push([label, key]);
         }
       }
       if (more.length) groups.push(['그 밖의 단축키', more]);
+      const customBy = comboMap();
       for (const [group, rs] of groups) {
         const shown = rs.filter(([label, key]) => hit(label, key));
         if (!shown.length) continue;
         rows.push(h('div.kb-head', group));
-        for (const [label, key] of shown) rows.push(h('div.kb-row', { role: 'listitem' }, h('span.kb-label', label), h('span.kb-keys', h('kbd', key)), h('span.kb-btns')));
+        for (const [label, key] of shown) {
+          // a key a person gave to a menu command now runs that command instead
+          const over = splitKeys(key).map((k) => customBy.get(k)).filter(Boolean).map((id) => cmds.find((x) => x.id === id)).filter(Boolean);
+          rows.push(h('div.kb-row', { role: 'listitem' },
+            h('span.kb-label', label, over.length ? flag(`대신 "${over[0].label}" 실행 (바꾼 단축키)`, over.map((x) => x.path.join(' ▸ ')).join(', ')) : null),
+            h('span.kb-keys', h('kbd', key)), h('span.kb-btns')));
+        }
       }
     }
     list.replaceChildren(...(rows.length ? rows : [h('div.empty-hint', '찾는 단축키가 없습니다')]));

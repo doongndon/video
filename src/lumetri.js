@@ -116,10 +116,17 @@ export function wheelOffset(w, k) {
 export function whiteBalanceFrom(rgb) {
   let [r, g, b] = rgb;
   if (r > 1 || g > 1 || b > 1) [r, g, b] = [r / 255, g / 255, b / 255];
-  const eps = 1e-3;
-  // the shader multiplies by (1 + .3·temp + .12·tint, 1 − .3·tint, 1 − .3·temp + .12·tint)
-  const temp = clamp(((b - r) / Math.max(eps, (r + b) / 2)) / 0.6, -1, 1);
-  const tint = clamp(((g - (r + b) / 2) / Math.max(eps, g)) / 0.3, -1, 1);
+  [r, g, b] = [r, g, b].map((x) => Math.max(1e-3, x));
+  // the shader multiplies by (1 + .3·temp + .12·tint, 1 − .3·tint, 1 − .3·temp + .12·tint); solve
+  // r·gainR = g·gainG = b·gainB (linear in temp / tint) so the picked colour comes out grey
+  const a1 = 0.3 * r;
+  const b1 = 0.12 * r + 0.3 * g;
+  const a2 = -0.3 * b;
+  const b2 = 0.12 * b + 0.3 * g;
+  const det = a1 * b2 - a2 * b1;
+  if (Math.abs(det) < 1e-9) return { temperature: 0, tint: 0 };
+  const temp = clamp(((g - r) * b2 - (g - b) * b1) / det, -1, 1);
+  const tint = clamp((a1 * (g - b) - a2 * (g - r)) / det, -1, 1);
   return { temperature: Math.round(temp * 100), tint: Math.round(tint * 100) };
 }
 

@@ -26,7 +26,9 @@ import { h, clamp, formatTimecode, parseTimecode, deepClone, uid, isMac } from '
 import { scrubNumber, showMenu, showPanel, fitCanvasToBox, confirmDialog, promptDialog, toast, loadPref, savePref } from './common.js';
 import { icon, iconButton } from './icons.js';
 import { extendMenu } from './menubar.js';
-import { curveTable } from '../compositor.js';
+import { curveTable, Compositor } from '../compositor.js';
+import { playback } from '../playback.js';
+import { autoTone, whiteBalanceFrom } from '../lumetri.js';
 import { analyzeMotion, mediaStatus } from '../media.js';
 import { openSavePresetDialog, getPreset, applyPreset } from './presets.js';
 import { openFontPicker } from './font-picker.js';
@@ -41,6 +43,10 @@ const analyses = new Map();
 const trackJobs = new Map();
 /** Curve channel shown per effect id. */
 const curveChannel = new Map();
+/** Offscreen compositor for eyedroppers and Lumetri 자동 (created on first use). */
+let probeCompositor = null;
+/** Cancels the eyedropper waiting for a Program Monitor click, if any. */
+let pickCancel = null;
 
 const MASK_TYPES = new Set(['mask', 'censor']);
 const mod = isMac ? '⌘' : 'Ctrl+';
@@ -69,8 +75,12 @@ function resolveParam(clip, fxId, key) {
  * `active` while it is newer than the timeline's clip clipboard, so Edit ▸ 붙여넣기 pastes it.
  */
 const ecClip = { kind: null, items: null, active: false };
-/** Edit commands the panel handles (set when it is built); each returns true when it handled it. */
-const ecApi = { copy: null, cut: null, paste: null, clear: null };
+/**
+ * Edit commands each panel instance handles (Effect Controls and the Lumetri 색상 panel register
+ * when built); each returns true when it handled the command.
+ */
+const ecApis = [];
+const ecRun = (cmd) => ecApis.some((a) => a[cmd]());
 
 // 편집 ▸ 잘라내기 / 복사 / 붙여넣기 / 지우기 act on the selected keyframes or effects while the
 // Effect Controls panel has focus, like Premiere; anywhere else they keep working on clips.
@@ -78,21 +88,21 @@ const ecApi = { copy: null, cut: null, paste: null, clear: null };
   const orig = { copy: commands.copy, cut: commands.cut, paste: commands.paste, clear: commands.clear };
   Object.assign(commands, {
     copy: () => {
-      if (ecApi.copy?.()) return;
+      if (ecRun('copy')) return;
       ecClip.active = false;
       orig.copy?.();
     },
     cut: () => {
-      if (ecApi.cut?.()) return;
+      if (ecRun('cut')) return;
       ecClip.active = false;
       orig.cut?.();
     },
     paste: () => {
-      if (ecClip.active && ecApi.paste?.()) return;
+      if (ecClip.active && ecRun('paste')) return;
       orig.paste?.();
     },
     clear: () => {
-      if (ecApi.clear?.()) return;
+      if (ecRun('clear')) return;
       orig.clear?.();
     },
   });
@@ -104,6 +114,8 @@ const ecApi = { copy: null, cut: null, paste: null, clear: null };
 
 /** Params whose row only shows for some settings of their effect: type → keys. */
 const CONDITIONAL = {
+  motion: new Set(['scaleW']),
+  transform: new Set(['scaleW']),
   mask: new Set(['points', 'cx', 'cy', 'w', 'h', 'rotation']),
   text: new Set(['bgColor', 'bgOpacity', 'bgPadding', 'bgRadius', 'color2', 'gradAngle', 'shadowColor', 'shadowOpacity', 'shadowAngle', 'shadowDistance', 'shadowSize', 'shadowBlur', 'maskInvert']),
   shape: new Set(['fill2', 'gradAngle', 'gradient', 'fill', 'radius']),
@@ -111,6 +123,8 @@ const CONDITIONAL = {
 
 /** Parameters that only make sense for some settings of their effect. */
 function paramVisible(type, key, v) {
+  // 비율 폭 only applies with 균일 비율 off (Premiere greys it out)
+  if ((type === 'motion' || type === 'transform') && key === 'scaleW') return v.uniform === false;
   if (type === 'mask') {
     if (key === 'points') return v.shape === 'polygon';
     if (['cx', 'cy', 'w', 'h', 'rotation'].includes(key)) return v.shape !== 'polygon';
@@ -840,7 +854,8 @@ export function createEffectControls({ only = null } = {}) {
   function buildParam(c, fx, pdef) {
     const key = pdef.key;
     const param = fx.params[key];
-    if (!param) return [];
+    // action rows are buttons: they need no stored value (older effects may lack the key)
+    if (!param && pdef.type !== 'action') return [];
     const label = h('span.label', { title: pdef.hint ? `${pdef.label} — ${pdef.hint}` : pdef.label }, pdef.label);
     switch (pdef.type) {
       case 'number':
@@ -925,8 +940,10 @@ export function createEffectControls({ only = null } = {}) {
         updaters.push(() => { row.hidden = !paramVisible(fx.type, key, currentValues(c.id, fx.id)); });
         return [row];
       }
-      case 'action':
-        return [fullRow(h('div.ec-wide', label, buildAction(c, fx, pdef)))];
+      case 'action': {
+        const el = buildActionRow(pdef.action || (fx.type === 'stabilize' ? 'stabilize' : 'button'), c, fx, pdef);
+        return el ? [fullRow(h('div.ec-wide', label, el))] : [];
+      }
       default:
         return [];
     }
@@ -1006,6 +1023,13 @@ export function createEffectControls({ only = null } = {}) {
       if (animated) tools = h('span.ec-ptools', ...kfNav(c, fx, key), reset);
     }
     if (!tools) tools = h('span.ec-ptools', h('span.kf-spacer'), reset);
+    // 비율 reads 비율 높이 while 균일 비율 is off (비율 폭 is then the width)
+    if ((fx.type === 'motion' && key === 'scale') || (fx.type === 'transform' && key === 'scaleH')) {
+      updaters.push(() => {
+        const name = findFx(c.id, fx.id)?.params.uniform?.value === false ? '비율 높이' : '비율';
+        if (label.textContent !== name) label.textContent = name;
+      });
+    }
     const left = h('div.ec-l.ecp', twirl, stopwatch, label, h('span.ec-val', scr), tools);
     const cell = h('div.ec-t');
     const row = h(`div.ec-row.ec-prow${animated ? '.has-kf' : ''}`, left, cell);
@@ -1546,7 +1570,9 @@ export function createEffectControls({ only = null } = {}) {
   }
 
   const ecFocused = () => store.ui.focusPanel === (only ? 'lumetri' : 'effectControls') && body.classList.contains('active') && body.isConnected;
-  if (!only) ecApi.copy = () => {
+  const api = {};
+  ecApis.push(api);
+  api.copy = () => {
     if (!ecFocused()) return false;
     const c = currentClip();
     if (!c) return false;
@@ -1554,7 +1580,7 @@ export function createEffectControls({ only = null } = {}) {
     if (selFx.size) return copyEffects(c.id);
     return false;
   };
-  if (!only) ecApi.cut = () => {
+  api.cut = () => {
     if (!ecFocused()) return false;
     const c = currentClip();
     if (!c) return false;
@@ -1562,7 +1588,9 @@ export function createEffectControls({ only = null } = {}) {
     if (selFx.size && selectedEffects(c.id).some((f) => !EFFECT_FIXED_TYPES.has(f.type))) return copyEffects(c.id) && deleteEffects(c.id);
     return false;
   };
-  if (!only) ecApi.paste = () => {
+  api.paste = () => {
+    // the Lumetri 색상 panel pastes only while it has focus; Effect Controls also from elsewhere
+    if (only && !ecFocused()) return false;
     if (ecClip.kind === 'keys') {
       const c = currentClip();
       return c ? pasteKeys(c.id) : false;
@@ -1573,7 +1601,7 @@ export function createEffectControls({ only = null } = {}) {
     }
     return false;
   };
-  if (!only) ecApi.clear = () => {
+  api.clear = () => {
     if (!ecFocused()) return false;
     const c = currentClip();
     if (!c) return false;
@@ -1955,18 +1983,43 @@ export function createEffectControls({ only = null } = {}) {
     return btn;
   }
 
-  /** Pick a colour from the screen (the Program Monitor) for colours with `eyedropper`. */
+  /**
+   * Eyedropper for colours with `eyedropper`: click it, then click the Program Monitor. The colour
+   * is read from the clip with this effect off (so a key colour or a colour cast is the source's).
+   * Lumetri's 흰색 균형 선택기 sets 온도 / 색조 from it, as in Premiere.
+   */
   function eyedropperButton(c, fx, pdef) {
-    return iconButton('eyedropper', '스포이드: 프로그램 모니터에서 색 고르기', async () => {
-      if (!window.EyeDropper) {
-        toast('이 브라우저는 화면 스포이드를 지원하지 않습니다. 색상 칸을 눌러 고르세요');
+    const btn = iconButton('eyedropper', '스포이드: 프로그램 모니터에서 색 고르기', async () => {
+      const spot = pickOnProgram();
+      if (!spot) {
+        if (!window.EyeDropper) {
+          toast('프로그램 모니터를 열고 다시 누르세요');
+          return;
+        }
+        try {
+          const { sRGBHex } = await new window.EyeDropper().open();
+          if (sRGBHex) mutate(`${pdef.label} 변경`, c, fx, (f) => { f.params[pdef.key].value = sRGBHex.slice(0, 7); });
+        } catch { /* cancelled */ }
         return;
       }
-      try {
-        const { sRGBHex } = await new window.EyeDropper().open();
-        if (sRGBHex) mutate(`${pdef.label} 변경`, c, fx, (f) => { f.params[pdef.key].value = sRGBHex.slice(0, 7); });
-      } catch { /* cancelled */ }
+      btn.classList.add('on');
+      const at = await spot;
+      btn.classList.remove('on');
+      if (!at) return;
+      const frame = renderClipFrame(c.id, fx.id, 960);
+      const rgb = frame && sampleCanvas(frame, at.u, at.v);
+      if (!rgb) {
+        toast('그 자리에는 이 클립의 화면이 없습니다');
+        return;
+      }
+      if (fx.type === 'lumetri' && pdef.key === 'wbColor') {
+        setValues(c, fx, { ...whiteBalanceFrom(rgb), wbColor: '#ffffff' }, '흰색 균형');
+        return;
+      }
+      const hex = `#${rgb.map((x) => x.toString(16).padStart(2, '0')).join('')}`;
+      mutate(`${pdef.label} 변경`, c, fx, (f) => { f.params[pdef.key].value = hex; });
     });
+    return btn;
   }
 
   // ---- colour curves
@@ -2374,8 +2427,157 @@ export function createEffectControls({ only = null } = {}) {
     return h('div.ec-action', add, del, edit2, info);
   }
 
+  // ---- action params (type 'action'): pdef.action picks the builder; 'button' runs pdef.run
+
+  /**
+   * The content of an action row, by pdef.action. 'button' is the generic one: a button labelled
+   * pdef.button (or pdef.label) calling pdef.run({ clipId, fxId, values, set }), where
+   * set(values, label) writes params as one undo step.
+   */
+  function buildActionRow(action, c, fx, pdef) {
+    if (action === 'stabilize') return buildStabilize(c, fx, pdef);
+    if (action === 'lumetriTone') return buildLumetriTone(c, fx, pdef);
+    if (action !== 'button') return null;
+    const b = h('button', pdef.button || pdef.label);
+    b.addEventListener('click', () => pdef.run?.({
+      clipId: c.id,
+      fxId: fx.id,
+      values: currentValues(c.id, fx.id),
+      set: (vals, label = pdef.label) => setValues(c, fx, vals, label),
+    }));
+    return h('div.ec-action', b, pdef.hint ? h('span.note', pdef.hint) : null);
+  }
+
+  /** Write several numeric / plain values of one effect as one undo step (animated ones get a key). */
+  function setValues(c, fx, vals, label) {
+    mutate(label, c, fx, (f, clip) => {
+      const t = clamp(store.ui.playhead - clip.start, 0, clip.duration);
+      for (const [k, v] of Object.entries(vals)) {
+        const p = f.params[k];
+        if (!p) continue;
+        if (isAnimated(p) && typeof v === 'number') setParamValue(p, v, t, fd());
+        else p.value = v;
+      }
+    });
+  }
+
+  /** Lumetri 기본 교정 ▸ 톤: 재설정 and 자동 (analyses the frame at the playhead, like Premiere). */
+  function buildLumetriTone(c, fx) {
+    const TONE = ['exposure', 'contrast', 'highlights', 'shadows', 'whites', 'blacks'];
+    const reset = h('button', { title: '노출·대비·밝은 영역·어두운 영역·흰색 계열·검정 계열을 0으로' }, '재설정');
+    reset.addEventListener('click', () => setValues(c, fx, Object.fromEntries(TONE.map((k) => [k, 0])), '톤 재설정'));
+    const auto = h('button.primary', { title: '재생헤드 위치의 프레임을 분석해 톤을 자동으로 맞춥니다' }, '자동');
+    auto.addEventListener('click', () => {
+      const frame = renderClipFrame(c.id, fx.id);
+      const vals = frame ? autoTone(frame) : {};
+      if (!Object.keys(vals).length) {
+        toast('분석할 화면이 없습니다. 재생헤드를 클립 위에 두세요');
+        return;
+      }
+      setValues(c, fx, vals, '자동 톤');
+    });
+    return h('div.ec-action', reset, auto);
+  }
+
+  /**
+   * The clip alone at the playhead (or its nearest frame; an adjustment layer with what is under
+   * it), with effect `skipFxId` switched off, as a canvas of about `width` px: what eyedroppers and
+   * 자동 analyse, like Premiere does with the source.
+   */
+  function renderClipFrame(clipId, skipFxId, width = 480) {
+    const clip = store.seq.clips[clipId];
+    if (!clip || clip.kind === 'audio') return null;
+    const seq = store.seq;
+    const copy = {
+      ...clip,
+      transIn: null,
+      transOut: null,
+      effects: clip.effects.map((e) => (e.id === skipFxId ? { ...e, enabled: false } : e)),
+    };
+    const t = clamp(store.ui.playhead, clip.start, clipEnd(clip) - 1 / seq.fps / 2);
+    const scale = Math.min(1, width / seq.width);
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(2, Math.round(seq.width * scale));
+    canvas.height = Math.max(2, Math.round(seq.height * scale));
+    probeCompositor ||= new Compositor();
+    try {
+      // an adjustment layer has no picture of its own: it works on everything under it
+      const clips = clip.kind === 'adjustment' ? { ...seq.clips, [clipId]: copy } : { [clipId]: copy };
+      probeCompositor.render(canvas.getContext('2d'), { ...seq, clips }, t, playback.provider, { scale, background: null });
+    } catch (err) {
+      console.warn('frame probe failed', err);
+      return null;
+    }
+    return canvas;
+  }
+
+  /**
+   * Wait for a click on the Program Monitor's picture; resolves to its spot as fractions of the
+   * frame ({ u, v }), or null when cancelled (Esc, a click elsewhere).
+   */
+  function pickOnProgram() {
+    const frame = document.querySelector('.pm-refbar')?.parentElement?.querySelector('canvas.frame:not(.pm-ref)');
+    const r0 = frame?.getBoundingClientRect();
+    if (!r0 || r0.width < 4 || r0.height < 4) return null;
+    pickCancel?.();
+    const view = frame.parentElement;
+    return new Promise((resolve) => {
+      const done = (val) => {
+        window.removeEventListener('pointerdown', down, true);
+        window.removeEventListener('keydown', key, true);
+        view.classList.remove('ec-picking');
+        pickCancel = null;
+        resolve(val);
+      };
+      const down = (e) => {
+        const r = frame.getBoundingClientRect();
+        const vr = view.getBoundingClientRect();
+        const inside = (x, y, b) => x >= b.left && x < b.right && y >= b.top && y < b.bottom;
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+        // swallow the click that follows so it does not select anything underneath
+        window.addEventListener('click', (ev) => { ev.stopPropagation(); ev.preventDefault(); }, { capture: true, once: true });
+        if (!inside(e.clientX, e.clientY, r) || !inside(e.clientX, e.clientY, vr)) return done(null);
+        done({ u: (e.clientX - r.left) / r.width, v: (e.clientY - r.top) / r.height });
+      };
+      const key = (e) => {
+        if (e.key !== 'Escape') return;
+        e.preventDefault();
+        e.stopPropagation();
+        done(null);
+      };
+      pickCancel = () => done(null);
+      window.addEventListener('pointerdown', down, true);
+      window.addEventListener('keydown', key, true);
+      view.classList.add('ec-picking');
+      toast('프로그램 모니터에서 색을 클릭하세요 (Esc: 취소)');
+    });
+  }
+
+  /** Average colour (0..255) of a small square around a spot of a canvas. */
+  function sampleCanvas(canvas, u, v, radius = 2) {
+    const x = clamp(Math.round(u * canvas.width), 0, canvas.width - 1);
+    const y = clamp(Math.round(v * canvas.height), 0, canvas.height - 1);
+    const x0 = Math.max(0, x - radius);
+    const y0 = Math.max(0, y - radius);
+    const w = Math.min(canvas.width, x + radius + 1) - x0;
+    const hh = Math.min(canvas.height, y + radius + 1) - y0;
+    const d = canvas.getContext('2d', { willReadFrequently: true }).getImageData(x0, y0, w, hh).data;
+    const sum = [0, 0, 0];
+    let n = 0;
+    for (let i = 0; i < d.length; i += 4) {
+      if (d[i + 3] < 16) continue;
+      sum[0] += d[i];
+      sum[1] += d[i + 1];
+      sum[2] += d[i + 2];
+      n++;
+    }
+    return n ? sum.map((s) => Math.round(s / n)) : null;
+  }
+
   // ---- stabilization analysis
-  function buildAction(c, fx, pdef) {
+  function buildStabilize(c, fx, pdef) {
     const status = h('span.note');
     const prog = h('div.progress', h('div'));
     const run = h('button.primary', '분석 시작');

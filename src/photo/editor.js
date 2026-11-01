@@ -1139,7 +1139,8 @@ export function createPhotoEditor(root) {
       l.x = x0;
       l.y = y0;
     } else if (l.kind === 'smart') {
-      l.smart = { ...l.smart, m: composeM(M, l.smart.m), corners: l.smart.corners?.map((q) => applyM(M, q)) || null };
+      const w = l.smart.warp;
+      l.smart = { ...l.smart, m: composeM(M, l.smart.m), corners: l.smart.corners?.map((q) => applyM(M, q)) || null, warp: w?.ctrl ? { ...w, ctrl: w.ctrl.map((q) => applyM(M, q)) } : w };
     } else if (l.kind === 'shape') {
       P.setShapePathDoc(l, PT.mapPath(P.shapePathDoc(l), (q) => applyM(M, q)));
     } else if (l.kind === 'text') {
@@ -1486,7 +1487,7 @@ export function createPhotoEditor(root) {
       KeyU: () => (mod ? (sh ? D.adjustDialog(P, 'desaturate') : D.adjustDialog(P, 'hueSat')) : tool('U')),
       KeyB: () => (mod ? (sh && alt ? D.adjustDialog(P, 'bw') : sh ? C.autoColor() : D.adjustDialog(P, 'colorBalance')) : tool('B')),
       KeyG: () => (mod ? (alt ? C.toggleClip() : sh ? C.ungroup() : C.groupLayers()) : tool('G')),
-      KeyF: () => (mod ? (sh ? C.fade() : D.repeatFilter(P)) : null),
+      KeyF: () => (mod ? (sh ? C.fade() : alt ? D.lastFilterDialog(P) : D.repeatFilter(P)) : null),
       KeyW: () => (mod ? (alt && sh ? (C.exportAs ? C.exportAs() : D.exportDialog(P)) : alt ? C.closeAll() : null) : tool('W')),
       KeyQ: () => (mod ? null : C.quickMask()),
       KeyH: () => (mod ? null : tool('H')),
@@ -2152,6 +2153,12 @@ function installCommands(P) {
           l.canvas = c;
         } else if (l.kind === 'text') l.text = { ...l.text, size: Math.max(1, Math.round(l.text.size * ky * 10) / 10) };
         else if (l.kind === 'shape') l.shape = { ...l.shape, w: Math.max(1, Math.round(l.shape.w * kx)), h: Math.max(1, Math.round(l.shape.h * ky)), strokeWidth: (l.shape.strokeWidth || 0) * Math.min(kx, ky) };
+        else if (l.kind === 'smart' && l.smart) {
+          // a smart object is placed by a matrix (and maybe corners or a warp) in document space
+          const { m, corners, warp } = l.smart;
+          const sc = ([x, y]) => [x * kx, y * ky];
+          l.smart = { ...l.smart, m: [m[0] * kx, m[1] * ky, m[2] * kx, m[3] * ky, m[4] * kx, m[5] * ky], corners: corners?.map(sc) || corners, warp: warp?.ctrl ? { ...warp, ctrl: warp.ctrl.map(sc) } : warp };
+        }
         l.x = Math.round(l.x * kx);
         l.y = Math.round(l.y * ky);
         if (l.mask) {
@@ -2207,6 +2214,11 @@ function installCommands(P) {
           l.x = Math.round(cx - b.w / 2);
           l.y = Math.round(cy - b.h / 2);
           if (rot || kind === '180') l.rotation = ((l.rotation || 0) + (kind === 'cw' ? 90 : kind === 'ccw' ? -90 : 180)) % 360;
+        } else if (l.kind === 'smart' && l.smart) {
+          // smart objects turn with the canvas through their placement matrix
+          const M = { cw: [0, 1, -1, 0, H, 0], ccw: [0, -1, 1, 0, 0, W], 180: [-1, 0, 0, -1, W, H], flipH: [-1, 0, 0, 1, W, 0], flipV: [1, 0, 0, -1, 0, H] }[kind];
+          const s = l.smart;
+          if (M) l.smart = { ...s, m: composeM(M, s.m), corners: s.corners?.map((q) => applyM(M, q)) || s.corners, warp: s.warp?.ctrl ? { ...s.warp, ctrl: s.warp.ctrl.map((q) => applyM(M, q)) } : s.warp };
         }
         if (l.mask) l.mask = { ...l.mask, canvas: tf(l.mask.canvas, l.mask.x, l.mask.y), x: 0, y: 0 };
         l._styled = null;

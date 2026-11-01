@@ -166,7 +166,7 @@ export function openSequenceSettings() {
       formRow('화면 크기', preset),
       formRow('', w, '×', hh),
       formRow('초당 프레임', fps),
-      note('화면 크기를 바꾸면 클립 위치가 비율에 맞게 옮겨집니다. 클립은 기본적으로 화면에 맞춰집니다 (비율 100% = 화면 맞춤). 세로 영상용 복사본이 필요하면 시퀀스 ▸ 자동 리프레임을 쓰세요.'),
+      note('화면 크기를 바꾸면 클립 위치가 비율에 맞게 옮겨집니다. 클립은 기본적으로 화면에 맞춰집니다 (비율 100% = 화면 맞춤). 세로 영상용 복사본이 필요하면 시퀀스 ▸ 자동 리프레임 시퀀스를 쓰세요.'),
     ],
     buttons: [
       { label: '취소' },
@@ -621,7 +621,7 @@ export function openAutoCaptionDialog() {
   const prog = progressBar();
   const status = note('');
   const whisperNote = note('Whisper 음성 인식 모델을 이 브라우저 안에서 실행합니다. 소리는 외부 서버로 보내지 않지만, 처음 한 번은 인터넷에서 라이브러리와 모델(40~250MB)을 내려받아야 합니다. 짧은 외침이나 음악이 섞인 말은 엉뚱하게 받아 적기 쉽습니다.');
-  const geminiNote = note('섞인 소리를 Google Gemini로 보내 받아 적습니다(3분씩 나눠 보냄). AI 편집 패널 ▸ 설정에 API 키가 있어야 하고, 사용량에 따라 요금이나 무료 한도가 적용됩니다. 시간 위치가 조금 어긋날 수 있습니다.');
+  const geminiNote = note('섞인 소리를 Google Gemini로 보내 받아 적습니다(3분씩 나눠 보냄). AI ▸ Gemini API 키 설정에서 키를 넣어야 하고, 사용량에 따라 요금이나 무료 한도가 적용됩니다. 시간 위치가 조금 어긋날 수 있습니다.');
   const syncEngine = () => {
     const g = engine.value === 'gemini';
     modelRow.hidden = g;
@@ -647,7 +647,7 @@ export function openAutoCaptionDialog() {
       status,
       whisperNote,
       geminiNote,
-      h('div.note.warn', 'claude.ai 보기 화면처럼 외부 연결이 막힌 곳에서는 두 엔진 모두 작동하지 않습니다. 결과가 이상하면 다른 엔진을 쓰거나 SRT 자막 가져오기를 쓰세요. 틀린 글자는 AI 편집 ▸ 대본에서 고칠 수 있습니다.'),
+      h('div.note.warn', 'claude.ai 보기 화면처럼 외부 연결이 막힌 곳에서는 두 엔진 모두 작동하지 않습니다. 결과가 이상하면 다른 엔진을 쓰거나 SRT 자막 가져오기를 쓰세요. 틀린 글자는 AI ▸ 대본으로 편집에서 고칠 수 있습니다.'),
     ],
     buttons: [
       { label: '닫기' },
@@ -663,7 +663,7 @@ export function openAutoCaptionDialog() {
           try {
             let cues;
             if (engine.value === 'gemini') {
-              if (!geminiSettings.key) throw new Error('Gemini API 키가 없습니다. AI 편집 패널 ▸ 설정에서 넣으세요.');
+              if (!geminiSettings.key) throw new Error('Gemini API 키가 없습니다. AI ▸ Gemini API 키 설정에서 넣으세요.');
               token.controller = new AbortController();
               cues = await transcribeWithGemini({ seq: store.seq, start: r.start, end: r.end, language: language.value, onStatus, signal: token.controller.signal });
             } else {
@@ -677,7 +677,7 @@ export function openAutoCaptionDialog() {
             if (!final.length) status.textContent = `알아들은 말이 없습니다.${tagNote}`;
             else {
               createCaptionTrack(final, '자동 자막');
-              status.textContent = `자막 ${final.length}개를 새 비디오 트랙에 넣었습니다.${tagNote} 틀린 글자는 AI 편집 ▸ 대본에서 고치세요.`;
+              status.textContent = `자막 ${final.length}개를 새 비디오 트랙에 넣었습니다.${tagNote} 틀린 글자는 AI ▸ 대본으로 편집에서 고치세요.`;
             }
           } catch (err) {
             if (err?.name !== 'AbortError') {
@@ -828,7 +828,7 @@ export function openMulticamDialog() {
       formRow('이름', name),
       formRow('', place.el),
       status,
-      note('만든 뒤 창 ▸ 멀티캠 패널에서 앵글 화면을 누르거나 숫자 키 1~9로 앵글을 바꿉니다. 재생 중에 누르면 그 위치에서 잘라 바뀌고, 멈춘 상태에서는 현재 구간의 앵글이 바뀝니다. 소리는 앵글 1의 소리를 씁니다.'),
+      note('만든 뒤 창 ▸ 멀티 카메라 패널에서 앵글 화면을 누르거나 숫자 키 1~9로 앵글을 바꿉니다. 재생 중에 누르면 그 위치에서 잘라 바뀌고, 멈춘 상태에서는 현재 구간의 앵글이 바뀝니다. 소리는 앵글 1의 소리를 씁니다.'),
     ],
     buttons: [
       { label: '취소' },
@@ -1217,38 +1217,30 @@ export const SHORTCUTS = [
   ]],
   ['모니터', [
     ['하위 클립 만들기 (소스 모니터 · 프로젝트)', 'Ctrl+U'], ['포스터 프레임 설정 (소스 모니터)', 'Shift+P'],
-    ['눈금자 표시 (프로그램 모니터)', 'Ctrl+R'], ['안내선 표시 / 프로그램 모니터에서 스냅', 'Ctrl+; / Ctrl+Shift+;'],
+    ['안내선 표시 / 프로그램 모니터에서 스냅', 'Ctrl+; / Ctrl+Shift+;'],
     ['프로그램 모니터 확대 / 화면 이동', 'Ctrl+휠 / 휠 · 손 도구(H) 끌기 · 가운데 버튼 끌기'], ['프로그램 모니터에서 프레임 이동', '휠 (맞추기 보기에서)'],
     ['마스크 점 추가 / 곡선·모서리 바꾸기 / 점 지우기', 'Ctrl+클릭 / Alt+클릭 / Delete'],
   ]],
 ];
 
+/** The keyboard shortcuts list (편집 ▸ 키보드 단축키); SHORTCUTS above fills its 그 밖의 단축키. */
 export function openShortcutsDialog() {
-  const table = h('div.kbd-table');
-  for (const [group, rows] of SHORTCUTS) {
-    table.append(h('h4', group));
-    for (const [label, key] of rows) table.append(h('span', label), h('span.k', key));
-  }
-  openModal({
-    title: '단축키 (macOS는 Ctrl 대신 ⌘)',
-    body: [table, note('한글 입력 상태에서도 단축키가 작동합니다 (키 위치 기준).')],
-    width: '660px',
-  });
+  return import('./keymap.js').then((m) => m.openKeyboardShortcuts());
 }
 
 // ---------------------------------------------------------------- guide & about
 
 const GUIDE = [
   ['1. 영상 가져오기', '파일을 프로그램 창 아무 곳에나 끌어다 놓거나, 파일 ▸ 가져오기(Ctrl+I)를 누르세요. 영상·소리·사진·LUT(.cube) 파일을 넣을 수 있습니다.'],
-  ['2. 타임라인에 놓기', '프로젝트 패널의 항목을 아래 타임라인으로 끌어다 놓습니다. 또는 항목을 두 번 눌러 소스 모니터에서 열고, 시작(I)·끝(O)을 표시한 뒤 쉼표(,) 키로 삽입합니다.'],
-  ['3. 자르고 다듬기', '재생헤드를 원하는 곳에 두고 Ctrl+K로 자릅니다. 필요 없는 조각은 선택하고 Shift+Delete로 지우면 빈자리가 당겨집니다. 클립 끝을 끌면 길이가 바뀝니다.'],
-  ['4. 효과와 전환', '효과 패널에서 효과를 클립 위로 끌어다 놓고, 효과 컨트롤 패널에서 값을 바꿉니다. 초시계 아이콘을 누르면 키프레임 애니메이션이 됩니다. 클립 사이에는 Ctrl+D로 디졸브를 넣습니다.'],
-  ['5. 자막과 그래픽', '그래픽 ▸ 텍스트(또는 T 도구로 화면 클릭)로 글자를 넣고, 그래픽 ▸ 타이틀 템플릿에서 하단 자막바 같은 완성된 디자인을 고를 수 있습니다. 그래픽 ▸ 자동 자막은 말소리를 글자로 바꿉니다(인터넷 필요).'],
-  ['6. 색과 소리', '효과 ▸ 고급 색상 보정(커브·색상 휠)과 LUT 적용(.cube)으로 색을 맞춥니다. 창 ▸ 작업 영역 ▸ 오디오를 고르면 믹서와 볼륨 조절이 앞으로 나옵니다. 클립 ▸ 자동 더킹은 말할 때 배경음악을 자동으로 줄입니다.'],
-  ['7. 내보내기', '파일 ▸ 내보내기(Ctrl+M)에서 유튜브·쇼츠·움짤 같은 프리셋을 고르고 내보내기를 누르면 파일이 저장됩니다.'],
-  ['사진 편집', '위 막대의 "사진 편집"(휴대폰은 "사진")을 누르면 포토샵처럼 레이어·선택·브러시·보정·필터·글자로 사진을 고칠 수 있습니다. 프로젝트 패널에서 이미지를 오른쪽 클릭 ▸ 사진 편집에서 열기로 가져가고, 다 고친 뒤 파일 ▸ 영상 편집으로 보내기로 돌려보냅니다.'],
-  ['저장에 대해', '작업은 이 브라우저에 자동 저장됩니다. 다른 컴퓨터로 옮기거나 백업하려면 파일 ▸ 프로젝트 파일로 저장(Ctrl+S)을 쓰세요. 미디어 파일 자체는 프로젝트 파일에 들어가지 않습니다.'],
-  ['화면이 작거나 글씨가 작다면', '창 ▸ 화면 크기에서 크게/아주 크게를 고르세요. 창 ▸ 작업 영역에서 용도에 맞는 패널 배치를 고를 수 있습니다.'],
+  ['2. 타임라인에 놓기', '프로젝트 패널의 항목을 아래 타임라인으로 끌어다 놓습니다. 또는 항목을 두 번 눌러 소스 모니터에서 열고, 시작(I)·종료(O)를 표시한 뒤 쉼표(,) 키로 삽입합니다.'],
+  ['3. 자르고 다듬기', '재생헤드를 원하는 곳에 두고 시퀀스 ▸ 편집 추가(Ctrl+K)로 자릅니다. 필요 없는 조각은 선택하고 Shift+Delete(잔물결 삭제)로 지우면 빈자리가 당겨집니다. 클립 끝을 끌면 길이가 바뀝니다.'],
+  ['4. 효과와 전환', '효과 패널에서 효과를 클립 위로 끌어다 놓고, 효과 컨트롤 패널에서 값을 바꿉니다. 초시계 아이콘을 누르면 키프레임 애니메이션이 됩니다. 클립 사이에는 시퀀스 ▸ 비디오 전환 적용(Ctrl+D)으로 디졸브를 넣습니다.'],
+  ['5. 자막과 그래픽', '문자 도구(T)로 프로그램 모니터를 클릭하거나 그래픽 및 타이틀 ▸ 새 레이어 ▸ 텍스트로 글자를 넣습니다. 그래픽 및 타이틀 ▸ 타이틀 템플릿에서 하단 자막·오프닝·엔딩 크레딧 같은 완성된 디자인을 고르고, 그래픽 및 타이틀 ▸ 자동 캡션 만들기는 말소리를 글자로 바꿉니다(인터넷 필요).'],
+  ['6. 색과 소리', '창 ▸ 작업 영역 ▸ 색상을 고르면 Lumetri 색상과 Lumetri 범위 패널이 나옵니다(LUT는 Lumetri 색상의 입력 LUT). 창 ▸ 작업 영역 ▸ 오디오를 고르면 믹서와 기본 사운드 패널이 나오고, 기본 사운드의 더킹은 말할 때 배경음악을 자동으로 줄입니다.'],
+  ['7. 내보내기', '파일 ▸ 내보내기 ▸ 미디어(Ctrl+M)에서 유튜브·쇼츠·움짤 같은 프리셋을 고르고 내보내기를 누르면 파일이 저장됩니다.'],
+  ['사진 편집', '위 막대의 "사진 편집"(휴대폰은 "사진")을 누르면 포토샵처럼 레이어·선택·브러시·보정·필터·글자로 사진을 고칠 수 있습니다. 프로젝트 패널에서 이미지를 오른쪽 클릭 ▸ 사진 편집에서 열기로 가져가고, 다 고친 뒤 사진 편집의 파일 ▸ 영상 편집으로 보내기로 돌려보냅니다.'],
+  ['저장에 대해', '작업은 이 브라우저에 자동 저장됩니다. 다른 컴퓨터로 옮기거나 백업하려면 파일 ▸ 저장(Ctrl+S)으로 프로젝트 파일을 받아 두세요. 미디어 파일 자체는 프로젝트 파일에 들어가지 않습니다.'],
+  ['화면이 작거나 글씨가 작다면', '창 ▸ 화면 크기에서 크게/아주 크게를 고르세요. 창 ▸ 작업 영역에서 용도에 맞는 패널 배치를 고를 수 있습니다. 모든 단축키는 도움말 ▸ 키보드 단축키(F1)에서 봅니다.'],
 ];
 
 export function openGuideDialog() {
@@ -1257,7 +1249,7 @@ export function openGuideDialog() {
     width: '620px',
     body: h('div.guide', GUIDE.map(([t, d]) => h('section', h('h4', t), h('p', d)))),
     buttons: [
-      { label: '단축키 보기', action: () => { setTimeout(openShortcutsDialog, 0); } },
+      { label: '키보드 단축키', action: () => { setTimeout(openShortcutsDialog, 0); } },
       { label: '닫기', primary: true },
     ],
   });

@@ -112,6 +112,9 @@ function applyPreset(P, toolId, pr) {
   o.tip = hasTip(pr.tip) ? pr.tip : 'round';
   o.hardness = pr.hardness ?? (isDrawnTip(o.tip) ? o.hardness : 100);
   o.flow = pr.flow ?? 100;
+  // presets saved with their tool settings (imported from Photoshop) also set these
+  if (pr.opacity != null) o.opacity = pr.opacity;
+  if (pr.blend) o.blend = pr.blend;
   o._preset = pr.id;
   // one setOpt saves everything and tells the bars and panels
   P.setOpt(toolId, 'size', clamp(Math.round(pr.size || o.size), 1, 5000));
@@ -461,8 +464,17 @@ export function installBrushPanels(P) {
         else s.textureOn = false;
         delete s.texPatternRef;
       }
+      if (s.dualTipRef) {
+        const dt = s.dualTipRef === 'round' ? 'round' : tipIds.get(s.dualTipRef);
+        if (dt) s.dualTip = dt;
+        else s.dualOn = false;
+        delete s.dualTipRef;
+      }
       for (const [k, v] of Object.entries(s)) if (!(k in DYN) || typeof v !== typeof DYN[k]) delete s[k];
-      added.push({ id: uid('u'), group: base, name: p.name || `${base} ${i + 1}`, tip, size: clamp(Math.round(p.size), 1, 5000), hardness: p.hardness, s });
+      const pr = { id: uid('u'), group: base, name: p.name || `${base} ${i + 1}`, tip, size: clamp(Math.round(p.size), 1, 5000), hardness: p.hardness, s };
+      // presets saved with their tool settings
+      for (const k of ['flow', 'opacity', 'blend']) if (p[k] != null) pr[k] = p[k];
+      added.push(pr);
     });
     // tips take their preset's name
     for (const pr of added) {

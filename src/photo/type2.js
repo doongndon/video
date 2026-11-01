@@ -108,6 +108,24 @@ export function installType2(P) {
   };
   const hitCtx = () => (hitCtx.g ||= makeCanvas(1, 1).getContext('2d'));
 
+  // Point text stays on the point it was clicked at: it grows to the right, both ways or to the left by
+  // its alignment, and a size change keeps the first baseline (Photoshop's anchor point).
+  const ALIGN_K = { center: 0.5, justifyCenter: 0.5, right: 1, justifyRight: 1 };
+  const anchorPt = (l) => {
+    const t = l?.text;
+    if (!t || t.box || t.path || t.area || t.vertical) return null;
+    const L = geom(l);
+    return TY.toDoc(l, L.w, L.h, L.w * (ALIGN_K[TY.paraStyle(t, 0).align] || 0), L.lines?.[0]?.base ?? 0);
+  };
+  const keepAnchor = (l, a0) => {
+    const a1 = a0 && anchorPt(l);
+    if (!a1) return;
+    l.x = Math.round((l.x + a0[0] - a1[0]) * 100) / 100;
+    l.y = Math.round((l.y + a0[1] - a1[1]) * 100) / 100;
+  };
+  P.textAnchor = anchorPt;
+  P.keepTextAnchor = keepAnchor;
+
   // ---------------------------------------------------------------- older type on a path
 
   /** Type on a path from before the box existed: give it one (the path relative to the box). */
@@ -161,9 +179,18 @@ export function installType2(P) {
     }
     const t2 = TY.syncEdit(l.text, s.prev, next, ins);
     s.prev = next;
-    if (t2 !== l.text) {
-      l.text = t2;
-      const r = P.doc.movedArea?.(l);
+    // the anchor of the text as it was before this input (taken before the edit box changed the layer)
+    const a0 = s.a0;
+    s.a0 = null;
+    const x0 = l.x;
+    const y0 = l.y;
+    const synced = t2 !== l.text;
+    const r0 = synced || a0 ? P.doc.movedArea?.(l) : null;
+    l.text = t2;
+    keepAnchor(l, a0);
+    if (synced || l.x !== x0 || l.y !== y0) {
+      const r1 = P.doc.movedArea?.(l);
+      const r = r0 && r1 && r0.w > 0 && r1.w > 0 ? { x: Math.min(r0.x, r1.x), y: Math.min(r0.y, r1.y), w: Math.max(r0.x + r0.w, r1.x + r1.w) - Math.min(r0.x, r1.x), h: Math.max(r0.y + r0.h, r1.y + r1.h) - Math.min(r0.y, r1.y) } : r1;
       P.doc.touch(l, r && r.w > 0 ? r : null);
     }
     P.redraw();
@@ -194,7 +221,11 @@ export function installType2(P) {
       session = null;
       return;
     }
-    session = { layer: l, el, prev: String(l.text.content ?? ''), insert: null };
+    session = { layer: l, el, prev: String(l.text.content ?? ''), insert: null, a0: null };
+    // capture runs before the edit box's own listener puts the new content in the layer
+    el.parentElement?.addEventListener('input', () => {
+      if (session?.el === el) session.a0 = anchorPt(l);
+    }, true);
     el.addEventListener('input', onInput);
     el.addEventListener('keydown', onKey);
     for (const ev of ['keyup', 'mouseup', 'select', 'focus']) el.addEventListener(ev, onCaret);
@@ -381,7 +412,9 @@ export function installType2(P) {
       } else t2 = applyWhole(t, patch);
       if (t2 !== t) {
         const r0 = d.movedArea?.(l);
+        const a0 = anchorPt(l);
         l.text = t2;
+        keepAnchor(l, a0);
         if (!ed && 'font' in patch && l.name) { /* names follow the content, not the font */ }
         const r1 = d.movedArea?.(l);
         const area = r0 && r1 && r0.w > 0 && r1.w > 0 ? { x: Math.min(r0.x, r1.x), y: Math.min(r0.y, r1.y), w: Math.max(r0.x + r0.w, r1.x + r1.w) - Math.min(r0.x, r1.x), h: Math.max(r0.y + r0.h, r1.y + r1.h) - Math.min(r0.y, r1.y) } : null;
@@ -425,8 +458,10 @@ export function installType2(P) {
     const t = l.text;
     const n = String(t.content ?? '').length;
     const sel = ed ? curSel() : null;
+    const a0 = anchorPt(l);
     if (!sel || !n || (sel.a === 0 && sel.b >= n)) {
       l.text = { ...TY.clearRunKeys(t, ['font']), font };
+      keepAnchor(l, a0);
       P.doc.touch(l);
       return;
     }
@@ -436,6 +471,7 @@ export function installType2(P) {
     if (sel.a !== sel.b) for (let i = sel.a; i < sel.b; i++) out[i] = { ...(out[i] || {}), font };
     else session.insert = { at: sel.a, patch: { ...(session.insert?.patch || {}), font } };
     l.text = { ...t, runs: TY.compressRuns(out) };
+    keepAnchor(l, a0);
     P.doc.touch(l);
   };
   /** The options bar shows the settings of the selected text (like Photoshop). */

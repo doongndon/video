@@ -14,7 +14,7 @@ import { WORKSPACES } from './workspaces.js';
 import { appMode, setMode } from '../mode.js';
 import { icon } from './icons.js';
 import { duplicateClips } from '../features.js';
-import { installKeymap, openKeyboardShortcuts, customKeyForPath, hasCustomKeys, PANEL_KEYS } from './keymap.js';
+import { installKeymap, openKeyboardShortcuts, customKeyForPath, hasCustomKeys, PANEL_KEYS, photoShortcutsItem } from './keymap.js';
 
 /** Open the manual (loaded the first time), at a page that fits the editor on screen. */
 export const openManual = (id = appMode.isPhoto() ? 'p-start' : null) => import('../docs/viewer.js').then((m) => m.openDocs(id));
@@ -25,6 +25,13 @@ const mod = isMac ? '⌘' : 'Ctrl+';
 export const menubarApi = { menus: null, videoMenus: null, extenders: [], rebuild: null };
 
 // Premiere's menu order; menus other modules create go before AI
+// Alt+letter opens a menu-bar menu (Windows; Premiere's and Photoshop's 파일(F), 편집(E) …)
+const MNEMONICS = {
+  '파일': 'F', '편집': 'E', '클립': 'C', '시퀀스': 'S', '마커': 'M', '그래픽 및 타이틀': 'G', '보기': 'V', '창': 'W', '도움말': 'H', 'AI': 'A',
+  '이미지': 'I', '레이어': 'L', '문자': 'Y', '선택': 'S', '필터': 'T', '3D': 'D', '플러그인': 'P',
+};
+export const mnemonicOf = (name) => (isMac ? null : MNEMONICS[name] || null);
+
 const ORDER = ['파일', '편집', '클립', '시퀀스', '마커', '그래픽 및 타이틀', '보기', '창', 'AI', '도움말'];
 // names other modules may use for the same menu
 const ALIASES = { '그래픽': '그래픽 및 타이틀', '타이틀': '그래픽 및 타이틀', '그래픽 및 제목': '그래픽 및 타이틀', '도움': '도움말', '윈도우': '창' };
@@ -103,6 +110,25 @@ const PLACE = {
   ],
   '창': [[/.*/, { at: 'panels' }]],
 };
+
+// 창's panel list follows Premiere's order: its English panel names, alphabetically
+const PANEL_EN = {
+  '오디오 클립 믹서': 'Audio Clip Mixer', '오디오 미터': 'Audio Meters', '오디오 트랙 믹서': 'Audio Track Mixer', '캡션': 'Captions',
+  '효과 컨트롤': 'Effect Controls', '효과': 'Effects', '기본 그래픽': 'Essential Graphics', '기본 사운드': 'Essential Sound', '작업 내역': 'History',
+  '정보': 'Info', '라이브러리': 'Libraries', 'Lumetri 색상': 'Lumetri Color', 'Lumetri 범위': 'Lumetri Scopes', '마커': 'Markers',
+  '미디어 브라우저': 'Media Browser', '메타데이터': 'Metadata', '멀티 카메라': 'Multi-Camera', '프로그램 모니터': 'Program Monitor',
+  '프로젝트': 'Project', '참조 모니터': 'Reference Monitor', '소스 모니터': 'Source Monitor', '텍스트': 'Text', '타임라인': 'Timelines', '도구': 'Tools',
+};
+const panelOrder = (it) => PANEL_EN[String(it.label).replace(/\s*\(.*\)$/, '')] || it.label;
+
+function sortPanels(out) {
+  const slot = out.findIndex((b) => b?.slot === 'panels');
+  if (slot < 0) return;
+  let start = slot;
+  while (start > 0 && out[start - 1] !== '-') start -= 1;
+  const block = out.slice(start, slot).sort((a, b) => panelOrder(a).localeCompare(panelOrder(b), 'en'));
+  out.splice(start, block.length, ...block);
+}
 
 function matches(it, label) {
   const a = norm(it?.label);
@@ -189,6 +215,7 @@ function arrange(name, list) {
     }
     unplaced.push(it);
   }
+  if (name === '창') sortPanels(out);
   // the rest go before the closing section (a {slot: 'tail'} marker), or at the end
   const tail = out.findIndex((b) => b?.slot === 'tail');
   if (unplaced.length) {
@@ -561,7 +588,9 @@ export function createMenubar(el) {
     buttons.length = 0;
     menuWrap.replaceChildren();
     for (const name of Object.keys(menubarApi.menus)) {
-      const b = h('button.menu-btn', { 'aria-haspopup': 'menu' }, name);
+      const mn = mnemonicOf(name);
+      const b = h('button.menu-btn', { 'aria-haspopup': 'menu', 'aria-keyshortcuts': mn ? `Alt+${mn}` : null, title: mn ? `${name} (Alt+${mn})` : null }, name);
+      b.dataset.menu = name;
       const open = (select = false) => {
         const r = b.getBoundingClientRect();
         // look the menu up when it opens: modules may extend it after the bar was built
@@ -590,6 +619,13 @@ export function createMenubar(el) {
     if (i < 0 || !buttons.length) return;
     buttons[(i + dir + buttons.length) % buttons.length].open(true);
   };
+  // F10 / Alt+letter: open a menu with its first item highlighted (true when one opened)
+  menubarApi.openMenu = (letter = null) => {
+    const b = letter ? buttons.find((x) => mnemonicOf(x.dataset.menu) === letter) : buttons[0];
+    if (!b || !b.isConnected || !b.offsetParent) return false;
+    b.open(true);
+    return true;
+  };
   menubarApi.rebuild = () => {
     menus = orderedMenus(raw);
     if (!appMode.isPhoto()) {
@@ -606,9 +642,8 @@ export function createMenubar(el) {
   renderMenus();
   const name = h('span.project-name');
   const saved = h('span.saved');
-  // in the photo editor the same button lists its shortcuts (found by name: modules may add Help items)
-  const photoKeys = () => (appMode.P?.menus['도움말']?.() || []).find((x) => x && x !== '-' && /단축키/.test(x.label || ''));
-  const guideBtn = h('button.guide-btn', { onclick: () => (appMode.isPhoto() ? photoKeys()?.action?.() : c.guide()), title: '처음 쓰는 분을 위한 안내' }, '시작 가이드');
+  // in the photo editor the same button lists its shortcuts
+  const guideBtn = h('button.guide-btn', { onclick: () => (appMode.isPhoto() ? photoShortcutsItem()?.action?.() : c.guide()), title: '처음 쓰는 분을 위한 안내' }, '시작 가이드');
   const exportBtn = h('button.primary.export-btn', { onclick: () => (appMode.isPhoto() ? appMode.P.exportDialog() : c.exportMedia()) }, '내보내기');
   const docsBtn = h('button.docs-open-btn', { onclick: () => openManual(), title: '모든 기능 설명서', 'aria-label': '설명서' }, icon('book', 16), h('span', '설명서'));
   el.append(h('span.spacer'), name, saved, docsBtn, guideBtn, exportBtn);

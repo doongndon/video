@@ -15,6 +15,7 @@ import { h, clamp, uid, formatTimecode, parseTimecode, downloadBlob, modKey } fr
 import { fitCanvasToBox, loadPref, savePref, toast, dnd, inlineEdit, showMenu, openModal, formRow, menusOpen } from './common.js';
 import { icon, iconButton } from './icons.js';
 import { exportFrame, exportFrameCanvas } from '../export.js';
+import { openExportFrameDialog } from './export-dialog.js';
 import { motionPath, rawSetPathKey, setAutoKey } from '../motionkeys.js';
 import { extendMenu } from './menubar.js';
 import { injectStyle } from './style-inject.js';
@@ -113,7 +114,7 @@ export function createProgramMonitor() {
     h('span.sep'),
     iconButton('lift', '들어내기: 시작~끝 구간을 지우고 빈자리 남김 (;)', () => edit.liftExtract(false)),
     iconButton('extract', '추출: 시작~끝 구간을 지우고 당기기 (\')', () => edit.liftExtract(true)),
-    iconButton('camera', '프레임 내보내기 (PNG)', () => saveFrame()),
+    iconButton('camera', '프레임 내보내기 (Ctrl+Shift+E)', () => openExportFrameDialog()),
     loopBtn, safeBtn, compareBtn, settingsBtn,
     h('span.grow'),
     durEl);
@@ -277,7 +278,7 @@ export function createProgramMonitor() {
       { label: '삼등분선', checked: opts.thirds, action: () => setOpt('thirds', !opts.thirds) },
       { label: '가운데 십자', checked: opts.cross, action: () => setOpt('cross', !opts.cross) },
       '-',
-      { label: '눈금자 표시', key: 'Ctrl+R', checked: opts.rulers, action: () => setOpt('rulers', !opts.rulers) },
+      { label: '눈금자 표시', checked: opts.rulers, action: () => setOpt('rulers', !opts.rulers) },
       { label: '안내선 표시', key: 'Ctrl+;', checked: opts.guides, action: () => setOpt('guides', !opts.guides) },
       { label: '안내선 잠금', checked: opts.lockGuides, action: () => setOpt('lockGuides', !opts.lockGuides) },
       { label: '프로그램 모니터에서 스냅', key: 'Ctrl+Shift+;', checked: opts.snap, action: () => setOpt('snap', !opts.snap) },
@@ -291,7 +292,7 @@ export function createProgramMonitor() {
       ...(viewMenu ? [] : [
         '-',
         { label: '반복 재생', checked: playback.loop, action: () => { playback.loop = !playback.loop; playback.emit('state'); } },
-        { label: '프레임 내보내기 (PNG)', key: 'Ctrl+Shift+E', action: saveFrame },
+        { label: '프레임 내보내기…', key: 'Ctrl+Shift+E', action: () => openExportFrameDialog() },
       ]),
     ];
   }
@@ -2270,10 +2271,8 @@ export function createProgramMonitor() {
         playback.requestRender();
       };
     }
-    if (run) {
-      // handled below
-    } else if (modKey(e) && !e.altKey && e.code === 'KeyR' && !e.shiftKey) run = () => setOpt('rulers', !opts.rulers);
-    else if (modKey(e) && e.code === 'Semicolon') run = e.shiftKey ? () => { setOpt('snap', !opts.snap); toast(`프로그램 모니터에서 스냅 ${opts.snap ? '켬' : '끔'}`); } : () => setOpt('guides', !opts.guides);
+    // 눈금자 표시 has no shortcut (Ctrl+R is 클립 ▸ 속도/지속 시간, as in Premiere)
+    if (!run && modKey(e) && e.code === 'Semicolon') run = e.shiftKey ? () => { setOpt('snap', !opts.snap); toast(`프로그램 모니터에서 스냅 ${opts.snap ? '켬' : '끔'}`); } : () => setOpt('guides', !opts.guides);
     if (!run) return;
     e.preventDefault();
     e.stopPropagation();

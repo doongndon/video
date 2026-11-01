@@ -152,8 +152,10 @@ TRANSITION_PLANS.checkerWipe = (p, dir, W, H) => {
 
 TRANSITION_PLANS.inset = (p, dir, W, H) => {
   const e = smooth(p);
-  const fromRight = dir === 'left' || dir === 'up';
-  const fromBottom = dir === 'up';
+  // one corner per direction, growing the way it points: 오른쪽으로 from the top-left corner,
+  // 아래로 from the top-right, 왼쪽으로 from the bottom-right, 위로 from the bottom-left
+  const fromRight = dir === 'left' || dir === 'down';
+  const fromBottom = dir === 'left' || dir === 'up';
   return {
     a: {},
     b: { clipPath: (c) => c.rect(fromRight ? W * (1 - e) : 0, fromBottom ? H * (1 - e) : 0, W * e, H * e) },

@@ -415,24 +415,30 @@ export function applyRollCrawl(clipIds, opts, measure) {
       const D = c.duration;
       const roll = dir === 'roll';
       const key = roll ? 'posY' : 'posX';
+      // one roll / crawl per clip: one on the other axis goes back to rest first
+      const prevKey = c.roll && (c.roll.dir === 'roll' ? 'posY' : 'posX');
+      if (prevKey && prevKey !== key) {
+        const q = motion.params[prevKey];
+        q.kf = null;
+        q.value = q.restValue ?? q.value;
+        delete q.restValue;
+      }
       const p = motion.params[key];
       // the resting position (without an earlier roll / crawl on the same axis)
       const rest = p.kf?.length ? (p.restValue ?? p.value) : p.value;
       const lo = roll ? box.y0 : box.x0;
       const hi = roll ? box.y1 : box.x1;
       const span = roll ? s.height : s.width;
-      // start / end so the box is just outside the frame (or where it rests)
+      // start just outside the frame (or where it rests); end just outside, or (like Premiere) once
+      // the last line / letter is in view: content longer than the frame stops at its far edge
       let from;
       let to;
-      if (roll) {
-        from = startOff ? rest + (span - lo) : rest;
-        to = endOff ? rest - hi : startOff ? rest : rest - (hi - lo);
-      } else if (dir === 'crawlLeft') {
-        from = startOff ? rest + (span - lo) : rest;
-        to = endOff ? rest - hi : startOff ? rest : rest - (hi - lo);
-      } else {
+      if (dir === 'crawlRight') {
         from = startOff ? rest - hi : rest;
-        to = endOff ? rest + (span - lo) : startOff ? rest : rest + (hi - lo);
+        to = endOff ? rest + (span - lo) : rest + Math.max(0, -lo);
+      } else {
+        from = startOff ? rest + (span - lo) : rest;
+        to = endOff ? rest - hi : rest - Math.max(0, hi - span);
       }
       const t0 = clamp(opts.preRoll || 0, 0, Math.max(0, D - fd));
       const t1 = clamp(D - (opts.postRoll || 0), t0 + fd, D);

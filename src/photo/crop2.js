@@ -124,10 +124,8 @@ function cropDoc(doc, M, W, H, { deletePixels, contentAware, turned }) {
     } else if (l.kind === 'smart' && l.smart) {
       const s = l.smart;
       l.smart = { ...s, m: composeM(M, s.m), corners: s.corners ? s.corners.map(pt) : s.corners, warp: s.warp?.ctrl ? { ...s.warp, ctrl: s.warp.ctrl.map(pt) } : s.warp };
-    } else if (l.kind === 'text' && l.text?.path?.subpath) {
-      // text on a path: the path is in document coordinates
-      l.text = { ...l.text, path: { ...l.text.path, subpath: mapPath([l.text.path.subpath], pt)[0] } };
     } else if (l.kind === 'text' || l.kind === 'shape') {
+      // (text on a path or in an area keeps its path relative to the layer: it moves and turns with it)
       if (!turned) {
         l.x += M[4];
         l.y += M[5];
@@ -143,6 +141,7 @@ function cropDoc(doc, M, W, H, { deletePixels, contentAware, turned }) {
       l.y = (l.y || 0) + M[5];
     }
     if (l.mask?.canvas) l.mask = { ...l.mask, canvas: mapAlpha(l.mask, M, W, H), x: 0, y: 0 };
+    if (l.filterMask?.canvas) l.filterMask = { ...l.filterMask, canvas: mapAlpha(l.filterMask, M, W, H), x: 0, y: 0 };
     if (l.vmask?.subpaths) {
       const vx = l.vmask.dx || 0;
       const vy = l.vmask.dy || 0;
@@ -223,7 +222,7 @@ function fixCropTo(P) {
   if (typeof orig !== 'function' || orig.fixed) return;
   const wrapped = (r, ...rest) => {
     const doc = P.doc;
-    const before = doc ? new Map(doc.layers.map((l) => [l.id, { m: l.smart?.m ? [...l.smart.m] : null, v: l.vmask ? [l.vmask.dx || 0, l.vmask.dy || 0] : null }])) : null;
+    const before = doc ? new Map(doc.layers.map((l) => [l.id, { m: l.smart?.m ? [...l.smart.m] : null, v: l.vmask ? [l.vmask.dx || 0, l.vmask.dy || 0] : null, f: l.filterMask ? [l.filterMask.x || 0, l.filterMask.y || 0] : null }])) : null;
     const out = orig(r, ...rest);
     if (!doc || !r || (!r.x && !r.y) || doc.width !== r.w || doc.height !== r.h) return out;
     let fixed = false;
@@ -238,6 +237,11 @@ function fixCropTo(P) {
       }
       if (l.vmask && b.v && (l.vmask.dx || 0) === b.v[0] && (l.vmask.dy || 0) === b.v[1]) {
         l.vmask = { ...l.vmask, dx: b.v[0] - r.x, dy: b.v[1] - r.y };
+        moved = true;
+      }
+      // the Smart Filters mask is placed in document coordinates as well
+      if (l.filterMask && b.f && (l.filterMask.x || 0) === b.f[0] && (l.filterMask.y || 0) === b.f[1]) {
+        l.filterMask = { ...l.filterMask, x: b.f[0] - r.x, y: b.f[1] - r.y };
         moved = true;
       }
       if (moved) {

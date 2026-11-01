@@ -291,7 +291,11 @@ const quickSel = {
     const doc = E.doc;
     const o = E.opts('quickSel');
     doc.selection = d.base;
-    const stroke = d.qs.canvas(o.enhance);
+    let stroke = d.qs.canvas(o.enhance);
+    if (d.mode === 'sub' && stroke) {
+      // take the object's anti-aliased rim along too, so no faint outline is left behind
+      stroke = SX.alphaCanvas(SX.expandAlpha(SX.alphaOf(stroke), stroke.width, stroke.height, 1), stroke.width, stroke.height);
+    }
     doc.selection = SEL.combine(doc, stroke, d.mode === 'sub' ? 'sub' : d.mode === 'add' ? 'add' : 'new');
     E.commit('빠른 선택', d.before);
     // like Photoshop: after the first stroke the brush adds
@@ -562,6 +566,9 @@ export function installSelectionTools(P) {
     }
     const l = doc.active;
     if (P.editMask && l?.mask) return { kind: 'layer', canvas: l.mask.canvas, x: l.mask.x, y: l.mask.y, invert: false, edit: () => doc.editMask(l) };
+    // a smart object's Smart Filters mask picked in the layers panel (layercmds.js)
+    const fmt = P.filterMaskTarget?.();
+    if (fmt) return fmt;
     return null;
   };
 
@@ -785,7 +792,8 @@ export function installSelectionTools(P) {
     if (!Number.isFinite(n) || n <= 0) return undefined;
     const doc = P.doc;
     const pad = Math.ceil(n) + 2;
-    setAlpha(label, modifyAlpha(docAlpha(), doc.width, doc.height, bounds && !!atBounds, pad, (a, w, hh) => fn(a, w, hh, n)));
+    // Border has no canvas-bounds option in Photoshop: Select All > Border makes a frame along the edges
+    setAlpha(label, modifyAlpha(docAlpha(), doc.width, doc.height, name === 'border' || (bounds && !!atBounds), pad, (a, w, hh) => fn(a, w, hh, n)));
     if (!doc.selection) toast('선택된 픽셀이 없습니다');
     return undefined;
   };
@@ -949,12 +957,12 @@ export function installSelectionTools(P) {
   C.luminosityChannels = () => {
     const doc = P.doc;
     if (!doc) return;
-    const set = [['lights', 1], ['lights', 2], ['lights', 3], ['lights', 4], ['mids', 1], ['mids', 2], ['darks', 1], ['darks', 2], ['darks', 3], ['darks', 4]];
+    const set = [['lights', 1], ['lights', 2], ['lights', 3], ['lights', 4], ['mids', 1], ['mids', 2], ['mids', 3], ['darks', 1], ['darks', 2], ['darks', 3], ['darks', 4]];
     P.run('광도 마스크 채널 만들기', () => {
       doc.channels = [...doc.channels, ...set.map(([kind, k]) => ({ id: newId(), name: `${LUMA_NAMES[kind]} ${k}`, canvas: lumaMask(kind, k) }))];
     });
     P.emit('channels');
-    toast('광도 마스크 10개를 채널로 만들었습니다. 채널을 Ctrl+클릭하면 선택 영역이 됩니다.');
+    toast(`광도 마스크 ${set.length}개를 채널로 만들었습니다. 채널을 Ctrl+클릭하면 선택 영역이 됩니다.`);
   };
   C.renameChannel = async (id = P.chState().active) => {
     const doc = P.doc;

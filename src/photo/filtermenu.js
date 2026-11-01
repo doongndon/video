@@ -1,10 +1,8 @@
 // The Filter menu and Image ▸ Adjustments laid out like Photoshop's (Korean names, order, separators,
-// shortcuts), the filter shortcuts (Shift+Ctrl+A Camera Raw, Shift+Ctrl+R Lens Correction,
-// Alt+Ctrl+F last filter's window, Alt+Shift+Ctrl+B Black & White, Alt+Ctrl+I Image Size,
-// Alt+Ctrl+C Canvas Size), Image Size's resampling methods, and the editor API for the dialogs.
-// installFilters(P) runs from editor.js before the menus are built.
+// shortcut labels; the keys themselves are in editor.js's key map), Image Size's resampling methods,
+// and the editor API for the dialogs. installFilters(P) runs from editor.js before the menus are built.
 
-import { menusOpen, toast } from '../ui/common.js';
+import { toast } from '../ui/common.js';
 import { FILTERS, ADJUSTMENTS, visibleParams } from './adjust.js';
 import * as D from './pdialogs.js';
 import { resampleCanvas } from './resample.js';
@@ -156,27 +154,4 @@ export function installFilters(P) {
     });
   }];
 
-  // shortcuts the editor's key map does not have (or maps to something else)
-  window.addEventListener('keydown', (e) => {
-    if (!document.body.classList.contains('photo-mode') || menusOpen() || !P.doc) return;
-    if (!(e.ctrlKey || e.metaKey)) return;
-    const t = e.target;
-    const tag = t?.tagName;
-    if (tag === 'TEXTAREA' || tag === 'SELECT' || t?.isContentEditable || (tag === 'INPUT' && !['checkbox', 'radio', 'range', 'button', 'color'].includes(t.type))) return;
-    if (document.querySelector('.modal-backdrop')) return;
-    const k = e.code;
-    const sh = e.shiftKey;
-    const alt = e.altKey;
-    let fn = null;
-    if (k === 'KeyA' && sh && !alt) fn = () => D.filterDialog(P, 'cameraRaw');
-    else if (k === 'KeyR' && sh && !alt) fn = () => D.filterDialog(P, 'lensCorrection');
-    else if (k === 'KeyB' && sh && alt) fn = () => D.adjustDialog(P, 'bw');
-    else if (k === 'KeyF' && alt && !sh) fn = () => D.lastFilterDialog(P);
-    else if (k === 'KeyI' && alt && !sh) fn = () => D.imageSizeDialog(P);
-    else if (k === 'KeyC' && alt && !sh) fn = () => D.canvasSizeDialog(P);
-    if (!fn) return;
-    e.preventDefault();
-    e.stopPropagation();
-    fn();
-  }, true);
 }

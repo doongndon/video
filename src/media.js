@@ -110,6 +110,11 @@ export function setInterpretation(ids, fps) {
           if (c.mediaId !== id) continue;
           c.inPoint *= k;
           if (c.holdTime != null) c.holdTime *= k; // the frozen frame of a frame hold (edit.js)
+          // a clip placed from a subclip keeps its range in master media time (subclips.js)
+          if (c.subclip) {
+            if (c.subclip.in != null) c.subclip.in *= k;
+            if (c.subclip.out != null) c.subclip.out *= k;
+          }
           // a plain clip shown at its old length must not run past the media
           const ramp = c.effects?.some((e) => e.type === 'timeRemap' && e.enabled && (e.params.speed.kf?.length || e.params.speed.value !== 100));
           if (!ramp && !c.hold) {

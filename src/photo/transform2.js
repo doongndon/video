@@ -95,6 +95,27 @@ export function installTransform2(P) {
   if (tl) {
     C.transformLayer = (kind) => {
       const T = P.transform;
+      const doc = P.doc;
+      const l = doc?.active;
+      if (!T && ['smart', 'shape', 'group'].includes(l?.kind)) {
+        // smart objects, shapes and groups turn and flip as a whole, about their middle
+        if (l.locked || l.lockPos) return toast('위치가 잠긴 레이어입니다');
+        const b = doc.bounds(l);
+        if (!b) return undefined;
+        const cx = b.x + b.w / 2;
+        const cy = b.y + b.h / 2;
+        const a = { cw: 90, ccw: -90, 180: 180 }[kind];
+        let M;
+        if (kind === 'flipH') M = [-1, 0, 0, 1, 2 * cx, 0];
+        else if (kind === 'flipV') M = [1, 0, 0, -1, 0, 2 * cy];
+        else if (a != null) {
+          const c = Math.round(Math.cos((a * Math.PI) / 180));
+          const sn = Math.round(Math.sin((a * Math.PI) / 180));
+          M = [c, sn, -sn, c, cx - c * cx + sn * cy, cy - sn * cx - c * cy];
+        } else return tl(kind);
+        P.run(kind.startsWith('flip') ? '뒤집기' : '회전', () => P.transformLayerBy(l, M));
+        return undefined;
+      }
       if (!T?.flip) return tl(kind);
       if (kind === 'flipH' || kind === 'flipV') T.flip(kind === 'flipH' ? 'h' : 'v');
       else T.rotateBy(kind === 'cw' ? 90 : kind === 'ccw' ? -90 : 180);
@@ -357,9 +378,10 @@ export function installTransform2(P) {
   P.transformBar = (render) => {
     const T = P.transform;
     if (!T) return [];
-    if (T.kind === 'perspwarp') return perspBar(T, render);
-    if (T.mode === 'warp') return warpBar(T, render);
-    return freeBar(T, render);
+    const out = T.kind === 'perspwarp' ? perspBar(T, render) : T.mode === 'warp' ? warpBar(T, render) : freeBar(T, render);
+    // phones have no Enter / Esc and the bar scrolls: cancel and apply come first there
+    if (document.body.classList.contains('mobile')) out.splice(1, 0, ...out.splice(-2));
+    return out;
   };
 
   // ---------------------------------------------------------------- keys and menus (after every module)

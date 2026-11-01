@@ -1425,8 +1425,10 @@ export class Transformer {
     g.strokeStyle = 'rgba(0,0,0,.6)';
     g.lineWidth = 3;
     const label = this.splitMode ? '뒤틀기 분할: 나눌 곳을 누르세요 · Esc 취소' : `${TRANSFORM_MODES.find((m) => m[0] === this.mode)?.[1]} · 폭 ${n.w}% 높이 ${n.h}% · ${n.angle}° · Enter 적용 · Esc 취소`;
-    const lx = Math.min(...q.map((p) => p[0]));
-    const ly = Math.min(...q.map((p) => p[1])) - 10;
+    // kept on screen (a narrow phone screen cut it off at the right)
+    const vw = g.canvas.clientWidth || g.canvas.width;
+    const lx = Math.max(4, Math.min(Math.min(...q.map((p) => p[0])), vw - g.measureText(label).width - 4));
+    const ly = Math.max(16, Math.min(...q.map((p) => p[1])) - 10);
     g.strokeText(label, lx, ly);
     g.fillText(label, lx, ly);
     g.restore();

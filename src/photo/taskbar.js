@@ -15,6 +15,7 @@ import { icon } from '../ui/icons.js';
 import { TOOL_BY_ID } from './tools.js';
 import { fontLabel } from '../fonts.js';
 import { openFontPicker } from '../ui/font-picker.js';
+import { clearRunKeys } from './type.js';
 
 export function installTaskbar(P) {
   const C = P.cmd;
@@ -188,7 +189,7 @@ export function installTaskbar(P) {
       const orig = l.text;
       // the whole layer takes the font (characters with their own font too, like Photoshop when
       // the layer, not some letters, is selected)
-      const withFont = (f) => ({ ...orig, font: f, runs: orig.runs?.map(({ font, ...r }) => r) });
+      const withFont = (f) => ({ ...clearRunKeys(orig, ['font']), font: f });
       openFontPicker(fontB, {
         current: orig.font, sample: t.content,
         onPreview: (f) => { l.text = f ? withFont(f) : orig; doc.touch(l); P.redraw(); },
@@ -200,10 +201,11 @@ export function installTaskbar(P) {
     size.addEventListener('keydown', (e) => e.stopPropagation());
     size.addEventListener('change', () => {
       const v = Math.max(1, Math.min(4000, +size.value || t.size));
-      live('글자 크기', () => { l.text = { ...l.text, size: v }; });
+      // the whole layer takes the size (letters with their own size too, like Photoshop)
+      live('글자 크기', () => { l.text = { ...clearRunKeys(l.text, ['sizeK']), size: v }; });
     });
     const color = h('input.ph-ctb-color', { type: 'color', value: /^#[0-9a-f]{6}$/i.test(t.color || '') ? t.color : '#000000', title: '글자 색', 'aria-label': '글자 색' });
-    color.addEventListener('change', () => live('글자 색', () => { l.text = { ...l.text, color: color.value, runs: l.text.runs?.map(({ color: _c, ...r }) => r) }; }));
+    color.addEventListener('change', () => live('글자 색', () => { l.text = { ...clearRunKeys(l.text, ['color']), color: color.value }; }));
     return [fontB, size, h('small.ph-ctb-unit', 'px'), color,
       btn('type', '뒤틀기', () => P.warpText?.(), { title: '텍스트 뒤틀기' }),
       btn('move', '', () => C.freeTransform(), { title: '변형 (Ctrl+T)' })];
@@ -212,9 +214,9 @@ export function installTaskbar(P) {
     const doc = P.doc;
     const s = l.shape;
     const fill = h('input.ph-ctb-color', { type: 'color', value: /^#[0-9a-f]{6}$/i.test(s.fill || '') ? s.fill : '#000000', title: '칠 색', 'aria-label': '칠 색' });
-    fill.addEventListener('change', () => P.run('모양 칠', () => { l.shape = { ...l.shape, fill: fill.value }; doc.touch(l); }));
+    fill.addEventListener('change', () => P.run('모양 칠', () => { l.shape = { ...l.shape, fill: fill.value, fillType: 'color' }; doc.touch(l); }));
     const stroke = h('input.ph-ctb-color', { type: 'color', value: /^#[0-9a-f]{6}$/i.test(s.stroke || '') ? s.stroke : '#000000', title: '획 색', 'aria-label': '획 색' });
-    stroke.addEventListener('change', () => P.run('모양 획', () => { l.shape = { ...l.shape, stroke: stroke.value, strokeWidth: l.shape.strokeWidth || Math.max(2, Math.round(Math.min(l.shape.w, l.shape.h) / 40)) }; doc.touch(l); }));
+    stroke.addEventListener('change', () => P.run('모양 획', () => { l.shape = { ...l.shape, stroke: stroke.value, strokeType: 'color', strokeWidth: l.shape.strokeWidth || Math.max(2, Math.round(Math.min(l.shape.w, l.shape.h) / 40)) }; doc.touch(l); }));
     return [h('label.ph-ctb-lab', h('span', '칠'), fill), h('label.ph-ctb-lab', h('span', '획'), stroke),
       btn('move', '변형', () => C.freeTransform(), { title: '변형 (Ctrl+T)' }),
       btn('sliders', '속성', () => P.showPanel('props'), { title: '속성 패널' })];

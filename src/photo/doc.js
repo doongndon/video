@@ -301,7 +301,9 @@ export class PhotoDoc {
         const before = { rev: l.rev, x: l.x, y: l.y };
         if (l.kind === 'smart') {
           const m = l.smart.m;
-          l.smart = { ...l.smart, m: [m[0], m[1], m[2], m[3], m[4] + dx, m[5] + dy], corners: l.smart.corners?.map(([x, y]) => [x + dx, y + dy]) };
+          const w = l.smart.warp;
+          // a custom warp's control points are in document space too
+          l.smart = { ...l.smart, m: [m[0], m[1], m[2], m[3], m[4] + dx, m[5] + dy], corners: l.smart.corners?.map(([x, y]) => [x + dx, y + dy]), warp: w?.ctrl ? { ...w, ctrl: w.ctrl.map(([x, y]) => [x + dx, y + dy]) } : w };
         } else if (l.kind !== 'fill' && l.kind !== 'adjust') {
           l.x += dx;
           l.y += dy;

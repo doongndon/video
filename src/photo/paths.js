@@ -217,6 +217,8 @@ export function fitFreehand(pts, tolerance = 2, closed = false) {
     else idx = [...rdp(0, far).slice(0, -1), ...rdp(far, pts.length - 1)];
   } else idx = rdp(0, pts.length - 1);
   const keep = idx.map((i) => pts[i]);
+  // a closed loop that ends where it began: no doubled anchor at the seam
+  if (closed && keep.length > 3 && Math.hypot(keep[0][0] - keep.at(-1)[0], keep[0][1] - keep.at(-1)[1]) <= Math.max(6, tolerance * 3)) keep.pop();
   const n = keep.length;
   const knots = keep.map((p, i) => {
     const prev = keep[closed ? (i - 1 + n) % n : Math.max(0, i - 1)];

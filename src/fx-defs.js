@@ -482,6 +482,8 @@ export const LUMETRI_PARAMS = [
   num('shadows', '어두운 영역', 0, { min: -100, max: 100, group: '기본 교정' }),
   num('whites', '흰색 계열', 0, { min: -100, max: 100, group: '기본 교정' }),
   num('blacks', '검정 계열', 0, { min: -100, max: 100, group: '기본 교정' }),
+  // 재설정 / 자동 buttons (src/ui/effect-controls.js, action 'lumetriTone')
+  { key: 'toneAuto', label: '톤', type: 'action', action: 'lumetriTone', default: null, animatable: false, group: '기본 교정' },
   num('saturation', '채도', 100, { min: 0, max: 200, unit: '%', group: '기본 교정' }),
   // 크리에이티브
   select('look', 'Look', '', 'looks', { group: '크리에이티브' }),

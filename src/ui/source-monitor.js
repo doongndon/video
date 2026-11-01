@@ -3,7 +3,7 @@
 // A subclip opens on its master's file, limited to the subclip's range.
 
 import { store } from '../store.js';
-import { mediaUrl, runtime, mediaEvents, mediaStatus } from '../media.js';
+import { mediaUrl, runtime, mediaEvents, mediaStatus, interpretRatio } from '../media.js';
 import * as edit from '../edit.js';
 import { h, clamp, formatTimecode, parseTimecode, snapFrame, modKey } from '../util.js';
 import { fitRect, fitCanvasToBox, dnd, inlineEdit, showMenu, toast, menusOpen } from './common.js';
@@ -63,7 +63,12 @@ export function createSourceMonitor() {
     return itemRange(m);
   };
   const duration = () => range()[1];
-  const current = () => (media()?.kind === 'image' ? 0 : video.currentTime || 0);
+  // 푸티지 해석: marks and times are interpreted media seconds; the element plays the file
+  const ratio = () => (mediaId ? interpretRatio(store.project.media[fileIdOf(mediaId)]) : 1);
+  const toFile = (t) => t / ratio();
+  const current = () => (media()?.kind === 'image' ? 0 : (video.currentTime || 0) * ratio());
+  /** Element speed for a media-time rate (an interpreted item plays its file slower or faster). */
+  const elRate = (r) => clamp(r / ratio(), 0.0625, 16);
   const inOf = (m) => m?.inPoint ?? range()[0];
   const outOf = (m) => m?.outPoint ?? range()[1];
 
@@ -95,7 +100,7 @@ export function createSourceMonitor() {
       const [lo, hi] = range();
       const seekTo = clamp(store.ui.sourceSeek ?? m.inPoint ?? lo, lo, hi);
       video.addEventListener('loadedmetadata', () => {
-        video.currentTime = clamp(seekTo, lo, duration());
+        video.currentTime = toFile(clamp(seekTo, lo, duration()));
       }, { once: true });
     }
     dragVideo.style.display = m.kind === 'audio' ? 'none' : '';
@@ -195,10 +200,10 @@ export function createSourceMonitor() {
     if (video.paused) {
       const m = media();
       const [lo, hi] = range();
-      if (video.currentTime >= hi - 0.05) video.currentTime = m.inPoint ?? lo;
+      if (current() >= hi - 0.05) video.currentTime = toFile(m.inPoint ?? lo);
       // started at (or after) the Out point: play on past it, like Premiere
-      stopAtOut = m.outPoint == null || video.currentTime < m.outPoint - 0.5 / fps();
-      video.playbackRate = 1;
+      stopAtOut = m.outPoint == null || current() < m.outPoint - 0.5 / fps();
+      video.playbackRate = elRate(1);
       video.play().catch(() => {});
     } else stop();
   }
@@ -221,14 +226,15 @@ export function createSourceMonitor() {
       clearInterval(shuttleTimer);
       shuttleTimer = null;
       stopAtOut = false;
-      video.playbackRate = shuttleRate;
+      video.playbackRate = elRate(shuttleRate);
       video.play().catch(() => {});
     } else {
       video.pause();
       clearInterval(shuttleTimer);
       shuttleTimer = setInterval(() => {
-        video.currentTime = Math.max(lo, video.currentTime + shuttleRate / 15);
-        if (video.currentTime <= lo) stop();
+        const t = Math.max(lo, current() + shuttleRate / 15);
+        video.currentTime = toFile(t);
+        if (t <= lo) stop();
       }, 1000 / 15);
     }
   }
@@ -236,7 +242,7 @@ export function createSourceMonitor() {
   function seek(t) {
     if (!media() || media().kind === 'image') return;
     const [lo, hi] = range();
-    video.currentTime = clamp(t, lo, hi);
+    video.currentTime = toFile(clamp(t, lo, hi));
     draw();
   }
 
@@ -388,13 +394,14 @@ export function createSourceMonitor() {
       draw();
       const m = media();
       const hi = range()[1];
+      const t = current();
       // stop at the Out point (or at the end of a subclip)
-      if (stopAtOut && m?.outPoint != null && video.currentTime >= m.outPoint && video.currentTime - m.outPoint < 0.25 && shuttleRate <= 1) {
+      if (stopAtOut && m?.outPoint != null && t >= m.outPoint && t - m.outPoint < 0.25 && shuttleRate <= 1) {
         video.pause();
-        video.currentTime = m.outPoint;
-      } else if (isSubclip(m) && video.currentTime >= hi) {
+        video.currentTime = toFile(m.outPoint);
+      } else if (isSubclip(m) && t >= hi) {
         video.pause();
-        video.currentTime = hi;
+        video.currentTime = toFile(hi);
       }
       requestAnimationFrame(loop);
     } else rafOn = false;
@@ -424,8 +431,10 @@ export function createSourceMonitor() {
 
   store.on('source', () => load(store.ui.sourceMediaId));
   store.on('change', () => {
-    if (mediaId && !store.project.media[mediaId]) load(null);
-    else draw();
+    if (mediaId && !store.project.media[mediaId]) return load(null);
+    // a new 푸티지 해석 while playing forward changes the element's speed at once
+    if (!video.paused && shuttleRate >= 0) video.playbackRate = elRate(shuttleRate || 1);
+    draw();
   });
   mediaEvents.on('updated', (id) => {
     if (!mediaId || (id !== mediaId && id !== fileIdOf(mediaId))) return;

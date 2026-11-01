@@ -1318,8 +1318,11 @@ export const TOOLS = [
       let dx = p.x - d.a.x;
       let dy = p.y - d.a.y;
       if (e.shiftKey) {
-        if (Math.abs(dx) > Math.abs(dy)) dy = 0;
-        else dx = 0;
+        // Shift: straight across, up and down or at 45°
+        const a = Math.round(Math.atan2(dy, dx) / (Math.PI / 4)) * (Math.PI / 4);
+        const len = dx * Math.cos(a) + dy * Math.sin(a);
+        dx = len * Math.cos(a);
+        dy = len * Math.sin(a);
       }
       dx = Math.round(dx);
       dy = Math.round(dy);
@@ -1368,6 +1371,30 @@ export const TOOLS = [
       E.doc.restore(this.d.before);
       this.d = null;
       E.afterHistory();
+    },
+    /** Arrow keys with a selection move the selected pixels and the selection (Alt: a copy of them). */
+    onKey(E, e) {
+      if (!e.key.startsWith('Arrow') || e.ctrlKey || e.metaKey || this.d) return false;
+      const doc = E.doc;
+      const l = doc.active;
+      if (!doc.selection || l?.kind !== 'raster' || !l.canvas || doc.selectedLayers.length > 1) return false;
+      if (l.locked || l.lockPos || l.lockPixels) {
+        E.toast('잠긴 레이어입니다 (레이어 패널에서 잠금 해제)');
+        return true;
+      }
+      const s = e.shiftKey ? 10 : 1;
+      const dx = e.key === 'ArrowLeft' ? -s : e.key === 'ArrowRight' ? s : 0;
+      const dy = e.key === 'ArrowUp' ? -s : e.key === 'ArrowDown' ? s : 0;
+      const before = doc.capture();
+      const f = liftSelection(E, { copy: e.altKey });
+      if (!f) return false;
+      dropFloat(E, { ...f, x: f.x + dx, y: f.y + dy });
+      const c = makeCanvas(doc.width, doc.height);
+      c.getContext('2d').drawImage(doc.selection.canvas, dx, dy);
+      doc.selection = { canvas: c };
+      doc.touch(l);
+      E.commit('이동', before, { touched: true });
+      return true;
     },
     /** Options bar: align and distribute the selected layers (Photoshop's move tool buttons). */
     optionButtons(E) {

@@ -7,7 +7,7 @@ import {
   setParamValue, isAnimated, evalParam, mediaTimeAt, contentTime, sourceOut, remapSpeedAt, createClip, createTrack, clipEnd, clipsOnTrack, linkedClips, getTrack, videoTracks, audioTracks,
   sequenceDuration, prevAdjacent, nextAdjacent, shiftClipKeyframes, scaleClipKeyframes, renameTracks,
   clampTransitionDuration, trackKindForClip, DEFAULT_STILL_DURATION, createEffect, isTimed,
-  addSequenceToProject, createSequence, sequenceContains, sequenceMediaId, newKey, scaleParamValues,
+  addSequenceToProject, createSequence, sequenceContains, sequenceMediaId, newKey, scaleParamValues, remapIntegral,
 } from './model.js';
 import { DEFAULT_AUDIO_TRANSITION, DEFAULT_VIDEO_TRANSITION, TRANSITIONS, EFFECTS, effectFitsClip, fixedEffectsFor } from './effects.js';
 
@@ -1012,6 +1012,84 @@ export function rawSyncLinkedRemap(clipId) {
     if (!dst) continue;
     dst.enabled = src.enabled;
     dst.params.speed = deepClone(src.params.speed);
+  }
+}
+
+/**
+ * Start state of a speed-band drag (시간 다시 매핑 ▸ 속도 on the timeline) for rawRetimeRemap: the speed
+ * keys, the clip, its linked partners of the same span and the clips after them on their tracks.
+ */
+export function remapRetimeState(clipId) {
+  const s = seq();
+  const c = s.clips[clipId];
+  const fx = c?.effects.find((e) => e.type === 'timeRemap');
+  if (!fx) return null;
+  const p = fx.params.speed;
+  const end = clipEnd(c);
+  const mates = linkedClips(s, c).filter((o) => o.id === c.id || (Math.abs(o.start - c.start) < 1e-4 && Math.abs(o.duration - c.duration) < 1e-4));
+  const ids = new Set(mates.map((o) => o.id));
+  const tracks = new Set(mates.map((o) => o.trackId).filter((tid) => !getTrack(s, tid)?.locked));
+  const after = Object.values(s.clips).filter((o) => tracks.has(o.trackId) && !ids.has(o.id) && o.start >= end - 1e-6).map((o) => ({ id: o.id, start: o.start }));
+  return { clipId, fxId: fx.id, mates: [...ids], dur: c.duration, kf: p.kf ? deepClone(p.kf) : null, value: p.value, after };
+}
+
+/**
+ * Raw: after the speed values of a time-remapped clip changed, keep its content and change its length,
+ * as Premiere does: each stretch between speed keys plays the same source frames at the new speed, so
+ * the keys move, the clip gets shorter (faster) or longer (slower) and later clips on its tracks ripple.
+ */
+export function rawRetimeRemap(st) {
+  const s = seq();
+  const c = st && s.clips[st.clipId];
+  const fx = c?.effects.find((e) => e.id === st.fxId);
+  if (!fx) return;
+  const p = fx.params.speed;
+  const MIN = 1e-9;
+  let dur;
+  if (!st.kf) {
+    if (p.kf?.length) return;
+    dur = p.value > 0.01 ? (st.dur * st.value) / p.value : st.dur;
+  } else {
+    if (!p.kf || p.kf.length !== st.kf.length) return;
+    // the new values at the old times: content per stretch at the old length
+    const mid = { kf: st.kf.map((k, j) => ({ ...k, v: p.kf[j].v })) };
+    const old = { kf: st.kf };
+    const pts = [...new Set([0, st.dur, ...st.kf.map((k) => k.t)])].sort((a, b) => a - b);
+    const ratio = [];
+    for (let i = 0; i < pts.length - 1; i++) {
+      const a = pts[i];
+      const b = pts[i + 1];
+      const cOld = remapIntegral(old, b) - remapIntegral(old, a);
+      const cNew = remapIntegral(mid, b) - remapIntegral(mid, a);
+      ratio.push(cOld > MIN && cNew > MIN ? cOld / cNew : 1);
+    }
+    // new positions: clip start stays at 0, stretches before it extend backwards, after it forwards
+    const pos = new Array(pts.length);
+    const z = pts.indexOf(0);
+    pos[z] = 0;
+    for (let i = z + 1; i < pts.length; i++) pos[i] = pos[i - 1] + (pts[i] - pts[i - 1]) * ratio[i - 1];
+    for (let i = z - 1; i >= 0; i--) pos[i] = pos[i + 1] - (pts[i + 1] - pts[i]) * ratio[i];
+    const at = (t) => pts.indexOf(t);
+    p.kf.forEach((k, j) => {
+      const o = st.kf[j];
+      const i = at(o.t);
+      k.t = pos[i];
+      // bezier handle speeds are per second: a stretch made shorter gets steeper
+      if (o.inSpeed != null) k.inSpeed = o.inSpeed / (i > 0 ? ratio[i - 1] : 1);
+      if (o.outSpeed != null) k.outSpeed = o.outSpeed / (i < ratio.length ? ratio[i] : 1);
+    });
+    dur = pos[at(st.dur)];
+  }
+  dur = Math.max(fd(), q(dur));
+  const delta = dur - st.dur;
+  for (const id of st.mates) {
+    const o = s.clips[id];
+    if (o) o.duration = dur;
+  }
+  rawSyncLinkedRemap(c.id);
+  for (const a of st.after) {
+    const o = s.clips[a.id];
+    if (o) o.start = a.start + delta;
   }
 }
 

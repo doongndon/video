@@ -368,7 +368,10 @@ export function borderAlpha(a, w, h, width) {
 /** Smooth: majority vote in a radius (rounds corners, drops specks and fills pinholes). */
 export function smoothAlpha(a, w, h, radius) {
   const b = blurArray(a, w, h, radius);
-  const k = 2.5;
+  // threshold the blur at 0.5 with about a pixel of anti-aliasing: the slope follows the blur's
+  // spread (three box passes of half-width rad), so straight edges stay exactly where they were
+  const rad = Math.max(1, Math.round(radius * 0.9));
+  const k = 2.5 * Math.sqrt(rad * (rad + 1));
   const out = new Float32Array(a.length);
   for (let i = 0; i < a.length; i++) out[i] = clamp01((b[i] - 0.5) * k + 0.5);
   return out;

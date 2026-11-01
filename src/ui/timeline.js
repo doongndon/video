@@ -1546,13 +1546,16 @@ export function createTimeline() {
       let i = p.kf.findIndex((k) => k.t > tl);
       if (i < 0) pair = [p.kf.length - 1];
       else if (i === 0) pair = [0];
-      else pair = [i - 1, i];
+      // a stretch after a hold key (speed keys) has that key's value alone
+      else pair = kfInterp(p.kf[i - 1]) === 'hold' ? [i - 1] : [i - 1, i];
     }
     store.begin(isAnimated(p) ? '키프레임 이동' : `${hit.band.def.label} 바꾸기`);
     drag = {
       type: 'band', clipId: hit.clip.id, fxId: hit.band.fx.id, key: hit.band.key, y0: y, x0: x, tl, pair,
       base: pair ? pair.map((i) => p.kf[i].v) : [p.value], v0: evalParam(p, tl),
       band: { db: hit.band.db, lo: hit.band.lo, hi: hit.band.hi, def: hit.band.def }, bodyY: hit.geo.bodyY, bodyH: hit.geo.bodyH, tipX: x, tipY: y,
+      // a speed band (시간 다시 매핑) keeps the content and changes the clip's length, as in Premiere
+      remap: hit.band.fx.type === 'timeRemap' ? edit.remapRetimeState(hit.clip.id) : null,
     };
   }
 
@@ -1568,10 +1571,21 @@ export function createTimeline() {
       const value = v ?? evalParam(p, tl);
       if (!p.kf) p.kf = [];
       const near = p.kf.find((k) => Math.abs(k.t - tl) < 0.5 / fps());
+      // speed keys split the band into stretches of their own speed (Premiere's 시간 다시 매핑):
+      // hold keys, and a first key at the clip start so the stretch before the new key stays separate
+      const speedBand = r.fx.type === 'timeRemap';
+      const add = (at) => {
+        const k = newKey(at, value);
+        if (speedBand) Object.assign(k, { ease: 'linear', interp: 'hold' });
+        p.kf.push(k);
+      };
+      if (speedBand && !p.kf.length && tl > 0.5 / fps()) add(0);
       if (near) near.v = value;
-      else p.kf.push(newKey(tl, value));
+      else add(tl);
       p.kf.sort((a, b) => a.t - b.t);
       p.value = value;
+      // linked audio follows the speed keys
+      if (speedBand) edit.rawSyncLinkedRemap(clipId);
       selKey = { clipId, fxId, key, t: near ? near.t : tl };
     });
   }
@@ -1820,7 +1834,8 @@ export function createTimeline() {
         const hi = drag.band.db ? 15 : drag.band.def.max ?? Infinity;
         if (drag.pair && p.kf) drag.pair.forEach((i, j) => { if (p.kf[i]) p.kf[i].v = clamp(drag.base[j] + d, lo, hi); });
         else p.value = clamp(drag.base[0] + d, lo, hi);
-        drag.tooltip = fmtBandValue(drag.band, clamp(drag.v0 + d, lo, hi));
+        if (drag.remap) edit.rawRetimeRemap(drag.remap);
+        drag.tooltip = fmtBandValue(drag.band, clamp(drag.v0 + d, lo, hi)) + (drag.remap ? ` · 길이 ${formatTimecode(r.c.duration, fps())}` : '');
         drag.tipX = x;
         drag.tipY = y;
         store.changed();
@@ -2148,7 +2163,8 @@ export function createTimeline() {
         { label: '역재생', checked: !!c.reverse, disabled: !isTimed(c), action: () => edit.toggleReverse(ids) },
         { label: '속도 램프 (시간 다시 매핑) 편집', disabled: !c.effects.some((fx) => fx.type === 'timeRemap'), action: () => store.emit('reveal-effect-controls') },
         '-',
-        { label: '기본 전환 넣기', key: 'Shift+D', action: () => edit.applyDefaultTransitions() },
+        // same path as the menus and Shift+D, so the transition picked with '기본 전환으로 설정' is used
+        { label: '기본 전환 넣기', key: 'Shift+D', action: () => import('../commands.js').then(({ commands }) => commands.applyDefaultTransitions()) },
         { label: '중첩 (하나로 묶기)…', action: async () => { const n = await promptDialog('중첩 시퀀스 이름', '이름', `중첩 시퀀스 ${Object.keys(store.project.sequences).length}`); if (n != null) edit.nestSelection(n); } },
         c.kind === 'nest' ? { label: '중첩 시퀀스 열기', action: () => store.openSequence(store.project.media[c.mediaId]?.sequenceId) } : null,
         isMc && mcInner ? { label: '멀티캠 앵글', submenu: videoTracks(mcInner).map((tr, i) => ({ label: `앵글 ${i + 1} (${tr.name})`, key: String(i + 1), checked: c.multicam.angle === i + 1, action: () => {

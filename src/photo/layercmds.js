@@ -988,11 +988,44 @@ export function installLayerCommands(P) {
         if (what === 'select') g.drawImage(d.selection.canvas, 0, 0);
         else g.fillRect(0, 0, c.width, c.height);
         l.filterMask = { canvas: c, x: 0, y: 0, enabled: true, invert: false };
+        // like Photoshop, the new mask is the one the brush paints on
+        P.editFilterMask = l.id;
+        P.editMask = false;
       } else if (what === 'invert' && l.filterMask) l.filterMask = { ...l.filterMask, invert: !l.filterMask.invert };
       else if (what === 'toggle' && l.filterMask) l.filterMask = { ...l.filterMask, enabled: l.filterMask.enabled === false };
       else if (what === 'delete') l.filterMask = null;
       d.touch(l);
     });
+  };
+
+  /**
+   * Painting on the Smart Filters mask: after a click on its thumbnail (P.editFilterMask holds the
+   * layer id) the painting tools paint on it, black hiding the filters. Used by P.maskTarget.
+   */
+  P.filterMaskTarget = () => {
+    const d = doc();
+    const l = d?.active;
+    if (!l || P.editMask || P.editFilterMask !== l.id || l.kind !== 'smart' || !l.filterMask?.canvas) return null;
+    const fm = l.filterMask;
+    return {
+      kind: 'filter', canvas: fm.canvas, x: fm.x, y: fm.y, invert: !!fm.invert,
+      edit() {
+        l.filterMask = { ...l.filterMask, canvas: cloneCanvas(l.filterMask.canvas) };
+        d.touch(l);
+        return l.filterMask.canvas.getContext('2d');
+      },
+    };
+  };
+  /** Layers panel: a click on the Smart Filters mask thumbnail (one is made first when missing). */
+  C.pickFilterMask = (l) => {
+    if (l?.kind !== 'smart') return;
+    if (P.doc.activeId !== l.id) P.selectLayer(l.id);
+    if (!l.filterMask) return void C.smartFilterMask(l, 'reveal');
+    P.editMask = false;
+    P.editFilterMask = l.id;
+    if (P.showMaskOnly) P.showMaskOnly = null;
+    P.emit('layers');
+    P.redraw();
   };
 
   // closing the document of a smart object's contents asks whether to update the smart object

@@ -23,6 +23,8 @@ export { PIXEL_FX, TRANSITION_PLANS, curveTable };
 
 const FILTER_FX = new Set(['brightnessContrast', 'basicColor', 'hueShift', 'gaussianBlur', 'blackWhite', 'sepia', 'invert', 'sharpen', 'findEdges', 'posterize']);
 const TRANSFORM_FX = new Set(['dropShadow', 'hFlip', 'vFlip', 'cameraShake', 'stabilize', 'trackMatte', 'blurFill']);
+/** Effects that spread pixels outwards: on text and shapes (frame-sized layers in Premiere) they need room. */
+const SPREAD_FX = new Set(['gaussianBlur', 'directionalBlur', 'channelBlur', 'cameraBlur', 'glow', 'rgbSplit', 'glitch', 'echo']);
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
 let svgRoot = null;
@@ -731,8 +733,9 @@ export class Compositor {
     }
     const opMasks = opacityFx ? activeMasks(opacityFx) : null;
     // text and shapes are only as big as their content: effects that work in frame space (변형,
-    // 기본 3D, generators, wipes…) get the source padded out to the sequence frame around it
-    if (!src.fit && stageFx.some((f) => EFFECTS[f.type]?.frameSpace)) src = padSource(src, W, H);
+    // 기본 3D, generators, wipes…) or spread outwards (blurs, glow) get the source padded out to
+    // the sequence frame around it
+    if (!src.fit && stageFx.some((f) => EFFECTS[f.type]?.frameSpace || SPREAD_FX.has(f.type))) src = padSource(src, W, H);
 
     let img = src.img;
     if (stageFx.length || opts.dip || opMasks) {

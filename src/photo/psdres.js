@@ -304,8 +304,11 @@ function readPattern(r) {
   const W = vm.w > 0 ? vm.w : w;
   const H = vm.h > 0 ? vm.h : h;
   if (!sane(W, H)) throw new Error('패턴 크기가 이상합니다');
-  const written = vm.chans.slice(0, vm.nch).filter(Boolean);
-  const alpha = vm.chans[vm.nch] || vm.chans[vm.nch + 1] || null;
+  // the colour channels come first; a written channel after them (in the next slot or in the
+  // mask slots at the end) is the transparency
+  const written = vm.chans.filter(Boolean);
+  const colours = mode === 3 || mode === 9 ? 3 : mode === 4 ? 4 : 1;
+  const alpha = written.length > colours ? written[colours] : null;
   const rgba = new Uint8ClampedArray(W * H * 4);
   const at = (c, i) => (c && c.w === W && c.h === H ? c.data[i] : 255);
   for (let i = 0; i < W * H; i++) {
@@ -468,11 +471,16 @@ function abrSamples(r, end, sub) {
   return tips;
 }
 
-const CTRL = ['off', 'fade', 'pressure', 'tilt', 'off', 'off', 'initial', 'direction'];
+// Photoshop's bVTy codes: off, fade, pen pressure, pen tilt, stylus wheel, initial direction,
+// direction, initial rotation, rotation (the wheel and rotation need a pen this app can't read)
+const CTRL = ['off', 'fade', 'pressure', 'tilt', 'off', 'initial', 'direction', 'off', 'off'];
 /** A Photoshop brush variation ('brVr'): control, fade steps, jitter, minimum. */
-function variation(v) {
+function variation(v, angle = false) {
   if (!v || typeof v !== 'object') return null;
-  return { ctrl: CTRL[num(v.bVTy)] || 'off', fade: num(v.fStp, 25), jitter: num(v.jitter), min: num(v['Mnm ']) };
+  let ctrl = CTRL[num(v.bVTy)] || 'off';
+  // only the angle can follow the stroke direction
+  if (!angle && (ctrl === 'initial' || ctrl === 'direction')) ctrl = 'off';
+  return { ctrl, fade: num(v.fStp, 25), jitter: num(v.jitter), min: num(v['Mnm ']) };
 }
 
 /** Brush settings from a v6+ preset descriptor, in this app's names (see brushengine.js DYN). */
@@ -492,7 +500,7 @@ function presetSettings(p, b) {
     const sz = variation(p.szVr);
     if (sz) Object.assign(s, { sizeJitter: sz.jitter, sizeCtrl: sz.ctrl, sizeFade: sz.fade });
     set('minDiameter', p.minimumDiameter != null ? num(p.minimumDiameter) : undefined);
-    const an = variation(p.angleDynamics);
+    const an = variation(p.angleDynamics, true);
     if (an) Object.assign(s, { angleJitter: an.jitter, angleCtrl: an.ctrl, angleFade: an.fade });
     const rn = variation(p.roundnessDynamics);
     if (rn) Object.assign(s, { roundJitter: rn.jitter, roundCtrl: rn.ctrl, roundFade: rn.fade });
@@ -547,12 +555,37 @@ function presetSettings(p, b) {
     const dd = variation(p.textureDepthDynamics);
     if (dd) Object.assign(s, { texDepthJitter: dd.jitter, texDepthCtrl: dd.ctrl, texDepthFade: dd.fade });
   }
+  // dual brush: a second tip that cuts into the first
+  const db = p.dualBrush;
+  if (db && typeof db === 'object' && db.useDualBrush) {
+    const tip = db.Brsh && typeof db.Brsh === 'object' ? db.Brsh : {};
+    s.dualOn = true;
+    s.dualTipRef = tip.sampledData ? `#${tip.sampledData}` : 'round';
+    set('dualSize', tip.Dmtr != null ? Math.max(1, Math.round(num(tip.Dmtr))) : undefined);
+    set('dualSpacing', db.Spcn != null ? num(db.Spcn) : tip.Spcn != null ? num(tip.Spcn) : undefined);
+    if (db.Flip != null) s.dualFlip = !!db.Flip;
+    const dm = { Mltp: 'multiply', Drkn: 'darken', Ovrl: 'overlay', CDdg: 'colorDodge', CBrn: 'colorBurn', linearBurn: 'linearBurn', hardMix: 'hardMix', linearHeight: 'linearHeight' }[db.BlnM?.value];
+    if (dm) s.dualMode = dm;
+    if (db.useScatter) {
+      const sc = variation(db.scatterDynamics);
+      if (sc) s.dualScatter = sc.jitter;
+      if (db.bothAxes != null) s.dualBothAxes = !!db.bothAxes;
+    }
+    set('dualCount', db['Cnt '] != null ? Math.max(1, Math.round(num(db['Cnt ']))) : undefined);
+  }
   if (p.Wtdg) s.wetEdges = true;
   if (p.Nose) s.noise = true;
   if (p['Rpt ']) s.airbrush = true;
   if (p.protectTexture) s.protectTexture = true;
   return s;
 }
+
+/** Photoshop painting modes (BlnM) as this app's canvas operations; others paint normally. */
+const BLEND = {
+  Nrml: 'source-over', Bhnd: 'destination-over', Clar: 'destination-out', Drkn: 'darken', Mltp: 'multiply', CBrn: 'color-burn',
+  Lghn: 'lighten', Scrn: 'screen', CDdg: 'color-dodge', linearDodge: 'lighter', Ovrl: 'overlay', SftL: 'soft-light', HrdL: 'hard-light',
+  Dfrn: 'difference', Xclu: 'exclusion', 'H   ': 'hue', Strt: 'saturation', 'Clr ': 'color', Lmns: 'luminosity',
+};
 
 /** All brush presets in a v6+ 'desc' section. */
 function descPresets(desc) {
@@ -569,6 +602,16 @@ function descPresets(desc) {
       s: presetSettings(p, b),
     };
     if (!sampled && b.Hrdn != null) preset.hardness = Math.round(num(b.Hrdn));
+    // presets saved with their tool settings: flow, opacity, painting mode, smoothing
+    const to = p.toolOptions;
+    if (to && typeof to === 'object') {
+      if (to.flow != null) preset.flow = Math.max(1, Math.min(100, Math.round(num(to.flow))));
+      if (to.Opct != null) preset.opacity = Math.max(1, Math.min(100, Math.round(num(to.Opct))));
+      const md = BLEND[to['Md  ']?.value];
+      if (md) preset.blend = md;
+      if (to.smoothingValue != null) preset.s.smoothing = Math.max(0, Math.min(100, Math.round(num(to.smoothingValue))));
+      if (to.smoothing != null) preset.s.smoothingOn = !!to.smoothing;
+    }
     out.push(preset);
   }
   return out;
@@ -584,7 +627,8 @@ function abrV6(r) {
     if (sig !== '8BIM' && sig !== '8B64') break;
     const key = r.ascii(4);
     const len = r.u32();
-    const end = Math.min(r.b.length, r.p + len);
+    const start = r.p;
+    const end = Math.min(r.b.length, start + len);
     try {
       if (key === 'samp') tips = abrSamples(r, end, sub);
       else if (key === 'patt') patterns = readPatternBlock(r, end);
@@ -595,15 +639,25 @@ function abrV6(r) {
     } catch {
       // a section we cannot read is left out
     }
-    r.p = end;
+    // sections are padded to 4 bytes (some writers don't pad: then the next one starts right away)
+    const padded = start + len + ((4 - (len % 4)) % 4);
+    const sigAt = (p) => p + 4 <= r.b.length && /^8B(IM|64)$/.test(String.fromCharCode(...r.b.subarray(p, p + 4)));
+    r.p = padded !== end && !sigAt(end) && sigAt(padded) ? padded : end;
   }
   const presets = desc ? descPresets(desc) : [];
-  // tips no preset uses still become brushes of their own
-  const used = new Set(presets.map((p) => p.tip));
+  // tips no preset uses (as its tip or its dual brush tip) still become brushes of their own
+  const used = new Set(presets.flatMap((p) => [p.tip, p.s.dualTipRef]));
   for (const t of tips) if (!used.has(`#${t.key}`)) presets.push({ name: '', tip: `#${t.key}`, size: Math.max(t.w, t.h), s: { spacing: 25 } });
   // presets name tips by their key ('#' + key)
   for (const t of tips) t.key = `#${t.key}`;
-  return { tips, presets: presets.filter((p) => p.tip === 'round' || tips.some((t) => t.key === p.tip)), patterns };
+  const known = (k) => k === 'round' || tips.some((t) => t.key === k);
+  for (const p of presets) {
+    if (p.s.dualOn && !known(p.s.dualTipRef)) {
+      p.s.dualOn = false;
+      delete p.s.dualTipRef;
+    }
+  }
+  return { tips, presets: presets.filter((p) => known(p.tip)), patterns };
 }
 
 /**
@@ -614,13 +668,13 @@ export function parseAbr(buf) {
   const r = new Reader(buf);
   const version = r.u16();
   if (version === 1 || version === 2) return abrV12(r, version);
-  if (version === 6 || version === 7 || version === 10) return abrV6(r);
+  if (version >= 6 && version <= 10) return abrV6(r);
   throw new Error(`지원하지 않는 브러시 파일 버전입니다 (${version})`);
 }
 
 // ---------------------------------------------------------------- gradients
 
-const hex2 = (v) => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, '0');
+const hex2 = (v) => Math.max(0, Math.min(255, Math.round(v) || 0)).toString(16).padStart(2, '0');
 const toHex = (r, g, b) => `#${hex2(r)}${hex2(g)}${hex2(b)}`;
 
 function hsbHex(hh, s, b) {
@@ -692,7 +746,8 @@ function grdV3(r) {
       case 0: return toHex(c[0] / 257, c[1] / 257, c[2] / 257);
       case 1: return hsbHex((c[0] / 65535) * 360, c[1] / 65535, c[2] / 65535);
       case 2: return toHex(255 * (c[0] / 65535) * (c[3] / 65535), 255 * (c[1] / 65535) * (c[3] / 65535), 255 * (c[2] / 65535) * (c[3] / 65535));
-      case 7: return toHex(...labRgb(c[0] / 100, c[1] / 100 - 128, c[2] / 100 - 128));
+      // Lab: lightness 0..10000, chrominance signed -12800..12700
+      case 7: return toHex(...labRgb(c[0] / 100, ((c[1] << 16) >> 16) / 100, ((c[2] << 16) >> 16) / 100));
       case 8: {
         const v = 255 - c[0] / 39.0625;
         return toHex(v, v, v);

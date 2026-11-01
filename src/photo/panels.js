@@ -534,6 +534,12 @@ export function buildLayersPanel(P) {
       lastTap = { key: null, t: 0, x: 0, y: 0 };
       return;
     }
+    // A click with a modifier (Ctrl+click thumbnail = load selection, Alt / Shift on masks) is never
+    // half of a double-click, so two quick modifier clicks keep doing their own job.
+    if (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) {
+      lastTap = { key: null, t: 0, x: 0, y: 0 };
+      return;
+    }
     const key = el.dataset.dbl;
     const now = performance.now();
     if (lastTap.key === key && now - lastTap.t < 450 && Math.hypot(e.clientX - lastTap.x, e.clientY - lastTap.y) < 8) {
@@ -567,6 +573,7 @@ export function buildLayersPanel(P) {
         return;
       }
       P.editMask = false;
+      P.editFilterMask = null;
       // back from looking at a mask alone (Alt+click on a mask)
       if (P.showMaskOnly) {
         P.showMaskOnly = null;
@@ -669,7 +676,7 @@ export function buildLayersPanel(P) {
       inp.select();
     });
     const row = h(`div.ph-layer${sel.has(l.id) ? '.on' : ''}${l.id === doc.activeId ? '.active' : ''}${doc.shown(l) ? '' : '.hidden'}${l.clip ? '.clipped' : ''}`, {
-      role: 'treeitem', 'aria-selected': String(sel.has(l.id)), 'aria-level': String(depth + 1), draggable: 'true',
+      role: 'treeitem', 'aria-selected': String(sel.has(l.id)), 'aria-level': String(depth + 1), draggable: 'true', 'data-layer-id': l.id,
       style: { paddingLeft: `${6 + depth * 16 + (l.clip ? 12 : 0)}px` },
     }, eye, twist, t, mt, vt, name, h('span.ph-badges', badges));
     row.title = 'Alt+클릭(레이어 사이 선): 클리핑 마스크 · Alt+끌기: 복제 · 빈 곳 두 번 클릭: 레이어 스타일';
@@ -783,9 +790,22 @@ export function buildLayersPanel(P) {
           { label: '필터 마스크 삭제', disabled: !fm, action: () => C.smartFilterMask(l, 'delete') },
         ], e.clientX, e.clientY);
       };
-      let fmThumb = null;
-      if (fm?.canvas) {
-        fmThumb = h('canvas.ph-thumb.mask', { width: 20, height: 20, title: '고급 필터 마스크 (누르면 메뉴)', style: { width: '20px', height: '20px', opacity: fm.enabled === false ? 0.4 : 1 } });
+      // the filter mask thumbnail: a click picks it for painting (black hides the filters); without a
+      // mask yet it shows white and a click makes one, as Photoshop adds it with the first filter
+      const fmThumb = h('canvas.ph-thumb.mask', {
+        width: 20, height: 20, title: '고급 필터 마스크: 누르고 브러시로 칠하기 (검정: 필터 숨김) · 오른쪽 클릭: 메뉴',
+        style: { width: '20px', height: '20px', opacity: fm && fm.enabled === false ? 0.4 : 1 },
+      });
+      fmThumb.classList.toggle('editing', P.editFilterMask === l.id && l.id === doc.activeId && !P.editMask);
+      fmThumb.addEventListener('click', (e) => {
+        e.stopPropagation();
+        P.cmd.pickFilterMask(l);
+      });
+      if (!fm?.canvas) {
+        const g = fmThumb.getContext('2d');
+        g.fillStyle = '#fff';
+        g.fillRect(0, 0, 20, 20);
+      } else {
         const g = fmThumb.getContext('2d');
         g.fillStyle = fm.invert ? '#fff' : '#000';
         g.fillRect(0, 0, 20, 20);
@@ -799,7 +819,6 @@ export function buildLayersPanel(P) {
         tg.fillStyle = fm.invert ? '#000' : '#fff';
         tg.fillRect(0, 0, 20, 20);
         g.drawImage(t2, 0, 0);
-        fmThumb.addEventListener('click', fmMenu);
       }
       rows.push(h('div.ph-subrow', { style: { paddingLeft: `${46 + depth * 16}px` }, title: '오른쪽 클릭: 필터 마스크 메뉴', oncontextmenu: fmMenu }, fmThumb, h('span', '고급 필터'),
         h('button.ph-badge', { title: '필터 마스크 메뉴', 'aria-label': '필터 마스크 메뉴', onclick: fmMenu }, icon('mask', 12))));

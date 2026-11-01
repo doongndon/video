@@ -40,14 +40,16 @@ export function baseChar(t) {
     font: t.font || 'Noto Sans KR', bold: !!t.bold, italic: !!t.italic, sizeK: 1, color: t.color || '#000000',
     tracking: null, kerning: t.kerning ?? 'metrics', kern: 0, hScale: t.hScale ?? 100, vScale: t.vScale ?? 100,
     baseline: t.baseline || 0, fauxBold: !!t.fauxBold, fauxItalic: !!t.fauxItalic, caps: t.caps || 'none',
-    script: t.script || 'none', underline: !!t.underline, strike: !!t.strike,
+    script: t.script || 'none', underline: !!t.underline, strike: !!t.strike, cs: t.cs,
   };
 }
 
 /** Tracking of the layer's own characters in 1/1000 em (stored as px in letterSpacing). */
 export const baseTracking = (t) => ((t.letterSpacing || 0) / Math.max(0.01, t.size || 1)) * 1000;
 
-const okey = (o) => (o ? CHAR_KEYS.map((k) => (o[k] === undefined ? '' : JSON.stringify(o[k]))).join('|') : '');
+// runs also differ by the character style they use
+const RUN_KEYS = [...CHAR_KEYS, 'cs'];
+const okey = (o) => (o ? RUN_KEYS.map((k) => (o[k] === undefined ? '' : JSON.stringify(o[k]))).join('|') : '');
 
 /** Per-character override objects (null: the layer's settings) for content of length n (UTF-16). */
 export function expandRuns(t, n = String(t.content ?? '').length) {

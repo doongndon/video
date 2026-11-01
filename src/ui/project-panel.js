@@ -860,22 +860,45 @@ export function createProjectPanel() {
   return body;
 }
 
-// 파일 ▸ 새로 만들기 (Premiere's File ▸ New)
+// 파일 ▸ 새로 만들기 (Premiere's File ▸ New), in Premiere's order
+const NEW_ORDER = ['프로젝트', '시퀀스', '클립에서', '저장소', '검색 저장소', '오프라인 파일', '조정 레이어', '바 및 톤', '블랙 비디오', '캡션', '색상 매트', '범용 카운트다운 리더', '투명 비디오'];
+const newKey = (label) => String(label || '').replace(/\s+|…|\.\.\.|\(.*?\)/g, '');
+const newRank = (it) => {
+  const k = newKey(it?.label);
+  const i = NEW_ORDER.findIndex((w) => k === newKey(w) || (w === '클립에서' && k.includes('클립에서')));
+  return i < 0 ? NEW_ORDER.length : i;
+};
+const fileNewItems = () => [
+  { label: '시퀀스…', action: openNewSequenceDialog },
+  { label: '저장소', action: () => projectApi.newBin?.() },
+  { label: '조정 레이어', action: () => projectApi.reveal?.(createSyntheticMedia('adjustment', { name: '조정 레이어' })) },
+  { label: '바 및 톤…', action: openBarsToneDialog },
+  { label: '블랙 비디오', action: () => projectApi.reveal?.(createSyntheticMedia('color', { name: '블랙 비디오', color: '#000000' })) },
+  { label: '색상 매트…', action: openColorMatteDialog },
+  { label: '범용 카운트다운 리더…', action: openCountingLeaderDialog },
+  { label: '투명 비디오', action: () => projectApi.reveal?.(createTransparentVideo()) },
+];
+
 extendMenu('파일', (items) => {
-  const sub = {
-    label: '새로 만들기',
-    submenu: () => [
-      { label: '시퀀스…', action: openNewSequenceDialog },
-      { label: '저장소', action: () => projectApi.newBin?.() },
-      '-',
-      { label: '조정 레이어', action: () => projectApi.reveal?.(createSyntheticMedia('adjustment', { name: '조정 레이어' })) },
-      { label: '바 및 톤…', action: openBarsToneDialog },
-      { label: '블랙 비디오', action: () => projectApi.reveal?.(createSyntheticMedia('color', { name: '블랙 비디오', color: '#000000' })) },
-      { label: '색상 매트…', action: openColorMatteDialog },
-      { label: '범용 카운트다운 리더…', action: openCountingLeaderDialog },
-      { label: '투명 비디오', action: () => projectApi.reveal?.(createTransparentVideo()) },
-    ],
+  const host = items.find((it) => it && it.submenu && it.label === '새로 만들기');
+  if (!host) return [{ label: '새로 만들기', submenu: fileNewItems }, ...items];
+  const base = host.submenu;
+  host.submenu = () => {
+    // ours replace the menu bar's items of the same name; the rest keep their place in the order
+    const list = [...((typeof base === 'function' ? base() : base) || [])].filter((it) => it && it !== '-');
+    for (const it of fileNewItems()) {
+      const i = list.findIndex((x) => newKey(x.label) === newKey(it.label));
+      if (i >= 0) list[i] = it;
+      else list.push(it);
+    }
+    const sorted = list.map((it, i) => [newRank(it), i, it]).sort((a, b) => a[0] - b[0] || a[1] - b[1]).map((x) => x[2]);
+    // separators like Premiere's: project / sequence / bin items, then the synthetic media
+    const out = [];
+    for (const it of sorted) {
+      if (out.length && newRank(it) >= 6 && newRank(out[out.length - 1]) < 6) out.push('-');
+      out.push(it);
+    }
+    return out;
   };
-  const at = items.findIndex((it) => it && it.label === '새 프로젝트');
-  return at < 0 ? [sub, ...items] : [...items.slice(0, at + 1), sub, ...items.slice(at + 1)];
+  return items;
 });

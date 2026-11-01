@@ -77,6 +77,7 @@ export function applyAudioGain(clipIds, mode, value, peaks = new Map()) {
       const d = value - max;
       for (const c of clips) {
         c.gain = clampGain((c.gain || 0) + d);
+        if (!c.gain) delete c.gain;
         n++;
       }
       return;

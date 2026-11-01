@@ -4,13 +4,14 @@
 // way to build a mask from a duplicated colour channel. The adjustment and filter dialogs hand
 // these over through P.channelEdit (a one-line check in pdialogs.js).
 
-import { h, clamp } from '../util.js';
+import { h } from '../util.js';
 import { toast, openModal } from '../ui/common.js';
 import { makeCanvas } from './doc.js';
-import { ADJUSTMENTS, FILTERS, defaultParams, applyAdjustment, applyFilter } from './adjust.js';
+import { ADJUSTMENTS, FILTERS, defaultParams, defaultFilterParams, visibleParams, applyAdjustment, applyFilter } from './adjust.js';
+import { paramEditors } from './pdialogs.js';
 
-// Levels' sliders live in its own panel in the layer dialog; here they are plain sliders
-const LEVELS = [['inBlack', '입력 검정', 0, 253, 0], ['gamma', '중간 톤 (감마)', 0.1, 9.99, 1, 0.01], ['inWhite', '입력 흰색', 2, 255, 255], ['outBlack', '출력 검정', 0, 255, 0], ['outWhite', '출력 흰색', 0, 255, 255]];
+// the adjustments that work on a grey channel
+const GREY_ADJ = new Set(['levels', 'curves', 'brightness', 'exposure', 'invert', 'posterize', 'threshold', 'equalize', 'shadowsHighlights']);
 
 /** The channel being edited: {name, canvas, set(canvas)} or null. */
 function target(P) {
@@ -94,24 +95,14 @@ export function channelEdit(P, kind, id) {
     }
     return toAlpha(applyFilter(grey, id, p, { fg: P.fg, bg: P.bg }));
   };
+  // colour adjustments mean nothing on a grey channel (Photoshop greys them out there)
+  if (kind === 'adjust' && !GREY_ADJ.has(id)) return unsupported(def.name);
   const label = `${def.name} (${t.name})`;
   const sel = doc.selection?.canvas || null;
-  // which settings a plain dialog can show
-  const rows = [];
-  const params = kind === 'adjust' ? defaultParams(id) : {};
-  const defs = id === 'levels' && kind === 'adjust' ? LEVELS : def.params || [];
-  for (const d of defs) {
-    const [key, name, min, max, dv, type] = d;
-    if (kind === 'filter') params[key] = structuredClone(dv);
-    if (type === 'hidden') continue;
-    if (type === 'bool') rows.push({ key, name, type: 'bool' });
-    else if (Array.isArray(type)) rows.push({ key, name, type: 'select', list: type });
-    else if (typeof min === 'number' && typeof max === 'number' && (type === undefined || typeof type === 'number')) rows.push({ key, name, type: 'num', min, max, step: typeof type === 'number' ? type : Number.isInteger(dv) && Number.isInteger(min) ? 1 : 0.01 });
-    else return unsupported(def.name);
-  }
+  const params = kind === 'adjust' ? defaultParams(id) : defaultFilterParams(id);
   const before = doc.capture();
   const orig = t.canvas;
-  if (!rows.length) {
+  if (!visibleParams(def.params).length) {
     // instant ones (Invert …)
     P.run(label, () => t.set(limitTo(sel, orig, run(orig, params))));
     P.emit('channels');
@@ -138,30 +129,19 @@ export function channelEdit(P, kind, id) {
       P.redraw();
     });
   };
-  const controls = rows.map((r) => {
-    if (r.type === 'bool') {
-      const c = h('input', { type: 'checkbox', checked: !!params[r.key] });
-      c.addEventListener('change', () => { params[r.key] = c.checked; preview(); });
-      return h('div.form-row', h('label', r.name), c);
+  // the same controls as on a layer (Levels and Curves with the channel's histogram, sliders …)
+  let grey = null;
+  const controls = paramEditors(def.params, params, () => preview(), P, { source: () => (grey ||= toGrey(orig)) });
+  // the editors' channel pickers (RGB / 빨강 / 녹색 / 파랑) offer only this channel, as in Photoshop
+  for (const c of controls) {
+    for (const s of c.querySelectorAll?.('select') || []) {
+      const v = [...s.options].map((o) => o.value);
+      if (v.length === 4 && v[1] === 'r' && v[2] === 'g' && v[3] === 'b') {
+        s.options[0].textContent = t.name;
+        while (s.options.length > 1) s.remove(1);
+      }
     }
-    if (r.type === 'select') {
-      const s = h('select', ...r.list.map(([v, txt]) => h('option', { value: v }, txt)));
-      s.value = params[r.key];
-      s.addEventListener('change', () => { params[r.key] = s.value; preview(); });
-      return h('div.form-row', h('label', r.name), s);
-    }
-    const range = h('input', { type: 'range', min: r.min, max: r.max, step: r.step, value: params[r.key], 'aria-label': r.name });
-    const num = h('input.ph-num', { type: 'number', min: r.min, max: r.max, step: r.step, value: params[r.key], 'aria-label': r.name, style: { width: '72px' } });
-    const set = (v) => {
-      params[r.key] = clamp(+v || 0, r.min, r.max);
-      range.value = params[r.key];
-      num.value = params[r.key];
-      preview();
-    };
-    range.addEventListener('input', () => set(range.value));
-    num.addEventListener('change', () => set(num.value));
-    return h('div.form-row', h('label', r.name), h('div.inline', range, num));
-  });
+  }
   let done = false;
   openModal({
     title: `${def.name} — ${t.name}`,
@@ -189,7 +169,7 @@ export function channelEdit(P, kind, id) {
 }
 
 function unsupported(name) {
-  toast(`${name}은(는) 알파 채널에 쓸 수 없습니다. 레벨(Ctrl+L)이나 명도/대비, 한계값을 쓰거나, 채널 패널에서 RGB를 눌러 레이어로 돌아가세요.`);
+  toast(`${name}은(는) 알파 채널에 쓸 수 없습니다. 레벨(Ctrl+L)이나 곡선(Ctrl+M), 한계값을 쓰거나, 채널 패널에서 RGB를 눌러 레이어로 돌아가세요.`);
   return true;
 }
 

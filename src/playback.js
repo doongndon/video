@@ -400,7 +400,10 @@ class Playback extends Emitter {
     }
     for (const [key, v] of this.voices) {
       if (!voiceKeys.has(key) || !this.playing) this.stopVoice(v);
-      if (!voiceKeys.has(key) && v.status !== 'loading') this.voices.delete(key);
+      if (!voiceKeys.has(key) && v.status !== 'loading') {
+        this.dropVoice(v);
+        this.voices.delete(key);
+      }
     }
   }
 
@@ -613,13 +616,15 @@ class Playback extends Emitter {
     const a = this.ensureAudio();
     const lo = clip.inPoint;
     const hi = sourceOut(clip);
-    const srcKey = `${clip.mediaId}:${lo.toFixed(3)}:${hi.toFixed(3)}`;
+    // 푸티지 해석: the file runs at its own rate (media time / ir = file time)
+    const ir = interpretRatio(store.project.media[clip.mediaId]);
+    const srcKey = `${clip.mediaId}:${lo.toFixed(3)}:${hi.toFixed(3)}:${ir}`;
     let v = this.voices.get(key);
     if (!v || v.srcKey !== srcKey) {
-      if (v) this.stopVoice(v);
+      if (v) this.dropVoice(v);
       v = { srcKey, status: 'loading', buffer: null, node: null };
       this.voices.set(key, v);
-      decodeAudioRange(clip.mediaId, lo, hi).then((buf) => {
+      decodeAudioRange(clip.mediaId, lo / ir, hi / ir).then((buf) => {
         if (!buf) {
           v.status = 'empty';
           return;
@@ -634,24 +639,19 @@ class Playback extends Emitter {
       return;
     }
     const mt = clamp(mediaTimeAt(clip, t), lo, hi);
-    const offset = hi - mt; // seconds into the reversed buffer
-    const rate = clamp(clip.speed * remapSpeedAt(clip, t - clip.start) * ctx.speed * this.rate, 0.0625, 16);
+    const offset = (hi - mt) / ir; // seconds into the reversed buffer
+    const rate = clamp((clip.speed * remapSpeedAt(clip, t - clip.start) * ctx.speed * this.rate) / ir, 0.0625, 16);
     const expected = v.node ? v.offset0 + (a.ctx.currentTime - v.t0) * v.rate : null;
     if (!v.node || Math.abs(expected - offset) > 0.15 || Math.abs(v.rate - rate) > 1e-3) {
       this.stopVoice(v);
       const src = a.ctx.createBufferSource();
       src.buffer = v.buffer;
       src.playbackRate.value = rate;
-      const gain = a.ctx.createGain();
-      const pan = a.ctx.createStereoPanner();
-      src.connect(gain).connect(pan).connect(ctx.busNode || this.trackBus(ctx.busTrackId || track.id).gain);
+      src.connect(this.voiceRoute(v, clip, t, ctx, track).pre);
       src.start(0, clamp(offset, 0, v.buffer.duration));
-      Object.assign(v, { node: src, gain, pan, t0: a.ctx.currentTime, offset0: offset, rate });
+      Object.assign(v, { node: src, t0: a.ctx.currentTime, offset0: offset, rate });
     }
-    const nestedTrack = ctx.busTrackId ? (!track.muted && (!anySolo || track.solo) ? dbToGain(track.volume || 0) : 0) : 1;
-    const g = ctx.audible && clip.enabled !== false ? clipGain(seq, clip, t) * dbToGain(clip.gain || 0) * ctx.gain * nestedTrack : 0;
-    v.gain.gain.setTargetAtTime(g, a.ctx.currentTime, 0.01);
-    v.pan.pan.value = clamp(clipPan(clip, t), -1, 1);
+    this.voiceLevels(v, seq, clip, track, t, anySolo, ctx);
   }
 
   /**
@@ -681,7 +681,7 @@ class Playback extends Emitter {
     };
     let v = this.voices.get(key);
     if (!v || v.kind !== 'backward' || v.mediaId !== clip.mediaId) {
-      if (v) this.stopVoice(v);
+      if (v) this.dropVoice(v);
       v = { kind: 'backward', mediaId: clip.mediaId, status: 'ready', win: load(ft + 0.2), next: null, node: null };
       this.voices.set(key, v);
     }
@@ -705,24 +705,67 @@ class Playback extends Emitter {
       const src = a.ctx.createBufferSource();
       src.buffer = win.buffer;
       src.playbackRate.value = rate;
-      const gain = a.ctx.createGain();
-      const pan = a.ctx.createStereoPanner();
-      src.connect(gain).connect(pan).connect(ctx.busNode || this.trackBus(ctx.busTrackId || track.id).gain);
+      src.connect(this.voiceRoute(v, clip, t, ctx, track).pre);
       src.start(0, clamp(offset, 0, win.buffer.duration));
-      Object.assign(v, { node: src, gain, pan, buf: win.buffer, t0: a.ctx.currentTime, offset0: offset, rate });
+      Object.assign(v, { node: src, buf: win.buffer, t0: a.ctx.currentTime, offset0: offset, rate });
     }
+    this.voiceLevels(v, seq, clip, track, t, anySolo, ctx);
+  }
+
+  /**
+   * Lasting nodes of a buffer voice (reversed clip, J playback): audio gain → the clip's effect chain →
+   * volume → pan → bus, as for clips played by media elements. Buffer sources come and go in front.
+   */
+  voiceRoute(v, clip, t, ctx, track) {
+    const actx = this.audio.ctx;
+    if (!v.route) {
+      const r = { pre: actx.createGain(), gain: actx.createGain(), pan: actx.createStereoPanner(), chain: null, chainSig: null, bus: null };
+      r.gain.gain.value = 0;
+      r.gain.connect(r.pan);
+      v.route = r;
+    }
+    const r = v.route;
+    this.wireChain(r, clip, t);
+    const bus = ctx.busNode || this.trackBus(ctx.busTrackId || track.id).gain;
+    if (r.bus !== bus) {
+      try { r.pan.disconnect(); } catch { /* not connected */ }
+      r.pan.connect(bus);
+      r.bus = bus;
+    }
+    return r;
+  }
+
+  /** Audio gain, effects, volume and pan of a buffer voice at time t. */
+  voiceLevels(v, seq, clip, track, t, anySolo, ctx) {
+    const r = v.route;
+    if (!r) return;
+    const now = this.audio.ctx.currentTime;
+    this.wireChain(r, clip, t);
     const nestedTrack = ctx.busTrackId ? (!track.muted && (!anySolo || track.solo) ? dbToGain(track.volume || 0) : 0) : 1;
-    const g = ctx.audible && clip.enabled !== false ? clipGain(seq, clip, t) * dbToGain(clip.gain || 0) * ctx.gain * nestedTrack : 0;
-    v.gain.gain.setTargetAtTime(g, a.ctx.currentTime, 0.01);
-    v.pan.pan.value = clamp(clipPan(clip, t), -1, 1);
+    const g = ctx.audible && clip.enabled !== false ? clipGain(seq, clip, t) * ctx.gain * nestedTrack : 0;
+    r.pre.gain.setTargetAtTime(dbToGain(clip.gain || 0), now, 0.01);
+    r.gain.gain.setTargetAtTime(g, now, 0.01);
+    r.pan.pan.value = clamp(clipPan(clip, t), -1, 1);
   }
 
   stopVoice(v) {
     if (v?.node) {
       try { v.node.stop(); } catch { /* already stopped */ }
-      try { v.node.disconnect(); v.gain.disconnect(); v.pan.disconnect(); } catch { /* ignore */ }
+      try { v.node.disconnect(); } catch { /* ignore */ }
       v.node = null;
     }
+  }
+
+  /** Stop a voice for good: also unhook its effect chain (worklets, oscillators). */
+  dropVoice(v) {
+    this.stopVoice(v);
+    const r = v?.route;
+    if (!r) return;
+    r.chain?.disconnect();
+    for (const n of [r.pre, r.gain, r.pan]) {
+      try { n.disconnect(); } catch { /* not connected */ }
+    }
+    v.route = null;
   }
 
   /** Play a short snippet of audio at the playhead while the user drags it (audio scrubbing). */

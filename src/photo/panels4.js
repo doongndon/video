@@ -10,6 +10,7 @@ import { icon } from '../ui/icons.js';
 import { PhotoDoc, newLayer, makeCanvas, shapePath } from './doc.js';
 import { GRADIENTS, gradientSwatch, resolveStopColor, listPatterns, patternCanvas, userPatterns, definePattern } from './resources.js';
 import { FX_DEFAULTS, STYLE_PRESETS, normalizeFx } from './styles.js';
+import { paintProps } from './shapes2.js';
 
 const menuAt = (e, items) => {
   const r = e.currentTarget.getBoundingClientRect();
@@ -48,6 +49,18 @@ function draggable(P, el, label, onDrop) {
     const sy = e.clientY;
     let ghost = null;
     const stageAt = (ev) => document.elementFromPoint(ev.clientX, ev.clientY)?.closest('.ph-stage');
+    // a row of the Layers panel (like Photoshop, presets can be dropped onto a layer there)
+    const rowAt = (ev) => {
+      const id = document.elementFromPoint(ev.clientX, ev.clientY)?.closest('.ph-layer[data-layer-id]')?.dataset.layerId;
+      return (id && P.doc?.layers.find((l) => String(l.id) === id)) || null;
+    };
+    let lit = null;
+    const light = (row) => {
+      if (lit === row) return;
+      lit?.classList.remove('ph-droprow');
+      lit = row;
+      lit?.classList.add('ph-droprow');
+    };
     const move = (ev) => {
       if (!ghost && Math.hypot(ev.clientX - sx, ev.clientY - sy) < 6) return;
       if (!ghost) {
@@ -56,13 +69,18 @@ function draggable(P, el, label, onDrop) {
       }
       ghost.style.left = `${ev.clientX + 14}px`;
       ghost.style.top = `${ev.clientY + 14}px`;
-      ghost.classList.toggle('ok', !!stageAt(ev) && !!P.doc);
+      const row = rowAt(ev) ? document.elementFromPoint(ev.clientX, ev.clientY).closest('.ph-layer') : null;
+      light(row);
+      ghost.classList.toggle('ok', (!!stageAt(ev) || !!row) && !!P.doc);
     };
     const up = (ev) => {
       window.removeEventListener('pointermove', move, true);
       window.removeEventListener('pointerup', up, true);
+      light(null);
       if (!ghost) return;
       ghost.remove();
+      const row = P.doc && rowAt(ev);
+      if (row) return onDrop(null, row);
       if (!stageAt(ev) || !P.doc) return;
       const p = P.toDoc(ev.clientX, ev.clientY);
       const inside = p.x >= 0 && p.y >= 0 && p.x < P.doc.width && p.y < P.doc.height;
@@ -74,6 +92,14 @@ function draggable(P, el, label, onDrop) {
 }
 /** Where a dropped gradient or pattern goes: a layer to style, or null for a new fill layer. */
 const dropTarget = (P, layer) => (layer && layer !== P.doc.layers[0] && layer.kind !== 'fill' && !layer.locked ? layer : null);
+/** A shape layer takes a gradient or pattern preset as its own fill (Photoshop 2020+), one undo step. */
+function fillShape(P, l, def, label) {
+  P.run(label, () => {
+    l.shape = { ...l.shape, ...paintProps('fill', def, P.fg, P.bg) };
+    P.doc.touch(l);
+  });
+  toast(`모양 칠: ${def.name}`);
+}
 
 /** A group header with a twist (folders, like Photoshop 2020's preset panels). */
 function folder(name, count, closed, onToggle) {
@@ -150,7 +176,8 @@ export function buildGradientsPanel(P) {
   const use = (g) => {
     current = g;
     const l = P.doc?.active;
-    if (l?.kind === 'fill' && l.fill?.type === 'gradient') {
+    if (l?.kind === 'shape' && l.shape?.type !== 'line') fillShape(P, l, { kind: 'gradient', gradient: resolved(g, P), name: g.name }, '모양 칠: 그레이디언트');
+    else if (l?.kind === 'fill' && l.fill?.type === 'gradient') {
       P.run('그레이디언트 칠 바꾸기', () => {
         l.fill = { ...l.fill, gradient: resolved(g, P) };
         P.doc.touch(l);
@@ -202,7 +229,8 @@ export function buildGradientsPanel(P) {
           // onto the picture: a layer under the pointer gets an overlay, elsewhere a fill layer
           draggable(P, b, g.name, (p, layer) => {
             const t = dropTarget(P, layer);
-            if (t) overlay(g, t);
+            if (t?.kind === 'shape' && t.shape?.type !== 'line') fillShape(P, t, { kind: 'gradient', gradient: resolved(g, P), name: g.name }, '모양 칠: 그레이디언트');
+            else if (t) overlay(g, t);
             else fillLayer(g);
           });
           onContext(b, (x, y) => presetMenu(g, name === '내 그레이디언트', x, y));
@@ -320,7 +348,8 @@ export function buildPatternsPanel(P) {
   const use = (p) => {
     current = p;
     const l = P.doc?.active;
-    if (l?.kind === 'fill' && l.fill?.type === 'pattern') {
+    if (l?.kind === 'shape' && l.shape?.type !== 'line') fillShape(P, l, { kind: 'pattern', pattern: p.id, scale, name: p.name }, '모양 칠: 패턴');
+    else if (l?.kind === 'fill' && l.fill?.type === 'pattern') {
       P.run('패턴 칠 바꾸기', () => {
         l.fill = { ...l.fill, pattern: p.id };
         P.doc.touch(l);
@@ -371,7 +400,8 @@ export function buildPatternsPanel(P) {
       b.addEventListener('dblclick', () => fillLayer(p));
       draggable(P, b, p.name, (pt, layer) => {
         const t = dropTarget(P, layer);
-        if (t) overlay(p, t);
+        if (t?.kind === 'shape' && t.shape?.type !== 'line') fillShape(P, t, { kind: 'pattern', pattern: p.id, scale, name: p.name }, '모양 칠: 패턴');
+        else if (t) overlay(p, t);
         else fillLayer(p);
       });
       onContext(b, (x, y) => presetMenu(p, x, y));
@@ -514,6 +544,8 @@ export function buildStylesPanel(P) {
     P.run(`스타일: ${st.name}`, () => {
       const fx = normalizeFx(structuredClone(st.fx || {}));
       l.fx = add ? { ...normalizeFx(l.fx || {}), ...fx } : fx;
+      // a style saved with "레이어 혼합 옵션 포함" (Layer Style ▸ 새 스타일) also sets those
+      if (st.blending && !add) Object.assign(l, structuredClone(st.blending));
       l._styled = null;
       doc.touch(l);
     });

@@ -377,6 +377,18 @@ export function layerStyleDialog(P, start = 'blending') {
     renderPane();
   }
 
+  // keep the chosen entry in view (the list scrolls sideways on phones); only the list scrolls
+  function revealOn() {
+    const on = side.querySelector('.pls-item.on');
+    if (!on || !side.isConnected) return;
+    const a = side.getBoundingClientRect();
+    const b = on.getBoundingClientRect();
+    if (b.left < a.left) side.scrollLeft -= a.left - b.left + 8;
+    else if (b.right > a.right) side.scrollLeft += b.right - a.right + 8;
+    if (b.top < a.top) side.scrollTop -= a.top - b.top;
+    else if (b.bottom > a.bottom) side.scrollTop += b.bottom - a.bottom;
+  }
+
   function renderSide() {
     const rows = [
       h('div.pls-prev', check('미리 보기', preview, (v) => { preview = v; apply(); })),
@@ -426,7 +438,7 @@ export function layerStyleDialog(P, start = 'blending') {
       }
     }
     side.replaceChildren(...rows, sideFoot);
-    side.querySelector('.pls-item.on')?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
+    revealOn();
     // move / delete the selected effect
     const k = baseKey(cur);
     const isFx = FX_LIST.includes(k) && cur !== 'bevelContour';
@@ -742,6 +754,7 @@ export function layerStyleDialog(P, start = 'blending') {
           const entry = { id: `u${Date.now()}`, name: name.value.trim() || '내 스타일', fx: incFx.checked ? structuredClone(st.fx) : {} };
           if (incBlend.checked) entry.blending = Object.fromEntries(BLEND_KEYS.map((k) => [k, st[k]]).filter(([, v]) => v !== undefined));
           saveUserStyle(entry);
+          P.emit?.('styles');
           toast(`스타일 "${entry.name}"을(를) 저장했습니다 (레이어 스타일 ▸ 스타일)`);
           if (cur === 'styles') paneStyles();
         },
@@ -767,6 +780,7 @@ export function layerStyleDialog(P, start = 'blending') {
     },
   });
   if (FX_LIST.includes(start)) changed();
+  requestAnimationFrame(revealOn);
   return undefined;
 }
 

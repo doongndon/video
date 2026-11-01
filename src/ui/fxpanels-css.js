@@ -134,6 +134,9 @@ body.mobile .ec-head .ibtn[aria-label^="타임라인 보기"] { display: none; }
 #tools button { position: relative; }
 #tools button.grp::after { content: ""; position: absolute; right: 2px; bottom: 2px; width: 0; height: 0; border-left: 4px solid transparent; border-bottom: 4px solid currentColor; opacity: 0.55; }
 
+/* ---------------- eyedropper waiting for a Program Monitor click */
+.monitor-view.ec-picking, .monitor-view.ec-picking * { cursor: crosshair !important; }
+
 /* ---------------- lumetri scopes */
 .scopes .scope-grid { flex: 1; display: grid; gap: 4px; padding: 4px; min-height: 0; background: #050607; }
 .scopes .scope-cell { position: relative; min-width: 0; min-height: 0; }
