@@ -300,8 +300,8 @@ export function definePattern(canvas, name) {
   return id;
 }
 
-/** Tile a pattern over w×h at a scale (percent). */
-export function paintPattern(w, h, id, scale = 100, ox = 0, oy = 0) {
+/** Tile a pattern over w×h at a scale (percent), starting at (ox, oy), turned by `angle` degrees. */
+export function paintPattern(w, h, id, scale = 100, ox = 0, oy = 0, angle = 0) {
   const c = mk(w, h);
   const g = c.getContext('2d');
   const p = patternCanvas(id);
@@ -311,7 +311,12 @@ export function paintPattern(w, h, id, scale = 100, ox = 0, oy = 0) {
   const pat = g.createPattern(tile, 'repeat');
   g.translate(ox, oy);
   g.fillStyle = pat;
-  g.fillRect(-ox, -oy, w, h);
+  if (angle) {
+    g.rotate((-angle * Math.PI) / 180);
+    // cover the whole canvas, wherever the turned origin is
+    const r = Math.hypot(w, h) + Math.hypot(ox, oy);
+    g.fillRect(-r, -r, r * 2, r * 2);
+  } else g.fillRect(-ox, -oy, w, h);
   return c;
 }
 

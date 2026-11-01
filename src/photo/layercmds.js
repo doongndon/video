@@ -577,7 +577,8 @@ export function installLayerCommands(P) {
     dest.addEventListener('change', () => { newRow.hidden = dest.value !== 'new'; });
     openModal({
       title: '레이어 복제',
-      width: '440px',
+      width: '550px',
+      side: true,
       body: [
         h('div.form-row', h('label', '복제'), h('div', one ? one.name : `레이어 ${items.length}개`)),
         h('div.form-row', h('label', '다른 이름으로'), name),

@@ -579,7 +579,8 @@ export function installCore2(P, ui) {
     sync();
     openModal({
       title: '새 레이어',
-      width: '440px',
+      width: '550px',
+      side: true,
       body: [
         formRow('이름', name),
         h('label.ph-prow', clip, h('span', ' 이전 레이어를 사용하여 클리핑 마스크 만들기')),

@@ -1,0 +1,159 @@
+/* Photo editor dialogs drawn like Photoshop's (the photo editor only; the video editor's dialogs are
+   untouched). On a computer: no dimming behind, a slim title bar that drags the window (common.js
+   openModal), compact 12 px controls, and with `side` the buttons in a right column (확인 on top) with
+   미리 보기 under them. Phones keep the bottom sheets of app.css; only the dialog contents change there.
+   Colours come from the photo theme tokens (photo.css), so the four interface themes follow. */
+
+/* ================================================================ every photo dialog (computer) */
+body.photo-mode:not(.mobile) .modal-backdrop.ps { background: transparent; }
+body.photo-mode:not(.mobile) .modal-backdrop.ps .modal {
+  background: var(--bg-2); border: 1px solid var(--ps-gutter, var(--line)); border-radius: 4px;
+  box-shadow: 0 10px 34px rgba(0, 0, 0, .55), 0 0 0 1px rgba(255, 255, 255, .05);
+  font-size: 12px;
+}
+body.photo-mode:not(.mobile) .modal-backdrop.ps .modal > header {
+  min-height: 30px; padding: 0 4px 0 12px; gap: 6px; font-size: 12px; font-weight: 400;
+  background: var(--bg-2); border-bottom: 1px solid var(--line); border-radius: 4px 4px 0 0;
+}
+body.photo-mode:not(.mobile) .modal > header.drag { cursor: default; touch-action: none; user-select: none; -webkit-user-select: none; }
+body.photo-mode:not(.mobile) .modal > header .modal-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+body.photo-mode:not(.mobile) .modal .modal-peek { height: 22px; padding: 0 8px; font-size: 11px; background: none; border-color: transparent; color: var(--text-dim); }
+body.photo-mode:not(.mobile) .modal .modal-peek:hover { background: var(--bg-4); color: var(--text); }
+.modal-x { flex: none; min-height: 0; width: 26px; height: 24px; padding: 0; display: inline-grid; place-items: center; background: none; border: 1px solid transparent; border-radius: 3px; color: var(--text-dim); }
+.modal-x:hover { background: #c42b1c; border-color: #c42b1c; color: #fff; }
+body.photo-mode:not(.mobile) .modal-backdrop.ps .modal > .body { padding: 12px 14px; gap: 8px; }
+body.photo-mode:not(.mobile) .modal-backdrop.ps .modal > footer { padding: 10px 14px 12px; gap: 6px; border-top: none; }
+body.photo-mode:not(.mobile) .modal-backdrop.ps .modal > footer > button { min-width: 84px; height: 24px; min-height: 0; padding: 0 12px; border-radius: 4px; font-size: 12px; background: var(--bg-4); border: 1px solid var(--line-2); color: var(--text); }
+body.photo-mode:not(.mobile) .modal-backdrop.ps .modal > footer > button:hover:not(:disabled) { background: var(--bg-5); }
+/* the default button (Enter) wears a light ring, as in Photoshop */
+body.photo-mode:not(.mobile) .modal-backdrop.ps .modal > footer > button.primary { border-color: var(--text-dim); box-shadow: inset 0 0 0 1px var(--text-dim); }
+body.photo-mode:not(.mobile) .modal-backdrop.ps .modal > footer > button:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+
+/* ---- buttons in a right column: 확인, 취소, other buttons, then 미리 보기 */
+body.photo-mode:not(.mobile) .modal.side { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: auto minmax(0, 1fr); }
+body.photo-mode:not(.mobile) .modal.side > header { grid-column: 1 / -1; }
+body.photo-mode:not(.mobile) .modal.side > .body { grid-column: 1; grid-row: 2; min-height: 0; }
+body.photo-mode:not(.mobile) .modal.side > footer {
+  grid-column: 2; grid-row: 2; width: 116px; box-sizing: border-box; padding: 14px 14px 14px 2px;
+  display: flex; flex-direction: column; flex-wrap: nowrap; justify-content: flex-start; align-items: stretch; gap: 7px;
+}
+body.photo-mode:not(.mobile) .modal.side > footer > button { min-width: 0; width: 100%; }
+body.photo-mode:not(.mobile) .modal.side > footer > button.primary { order: -1; }
+body.photo-mode:not(.mobile) .modal.side > footer > button.primary + button { margin-top: 0; }
+body.photo-mode:not(.mobile) .modal.side > footer > :not(button) { margin-top: 6px; }
+body.photo-mode:not(.mobile) .modal.side > footer label { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; white-space: nowrap; }
+/* a 미리 보기 checkbox moved from the body into the right column */
+body.photo-mode:not(.mobile) .modal.side > footer > .ps-pv { padding-left: 2px; }
+
+/* ---- compact controls inside photo dialogs (computer) */
+body.photo-mode:not(.mobile) .modal-backdrop.ps .modal .form-row { gap: 8px; }
+body.photo-mode:not(.mobile) .modal-backdrop.ps .modal input[type=checkbox],
+body.photo-mode:not(.mobile) .modal-backdrop.ps .modal input[type=radio] { width: 13px; height: 13px; margin: 0; accent-color: var(--accent); }
+body.photo-mode:not(.mobile) .modal-backdrop.ps .modal fieldset { border: 1px solid var(--line-2); border-radius: 3px; }
+body.photo-mode:not(.mobile) .modal-backdrop.ps .modal legend { font-size: 12px; color: var(--text-dim); padding: 0 4px; }
+body.photo-mode:not(.mobile) .modal-backdrop.ps .modal .note { font-size: 11px; }
+
+/* ================================================================ Layer Style (layerstyle.js) */
+.pls { display: grid; grid-template-columns: 196px minmax(0, 1fr); gap: 12px; }
+.pls-side { display: flex; flex-direction: column; min-height: 0; border: 1px solid var(--line); background: var(--bg-3); border-radius: 2px; }
+.pls-list { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; }
+.pls-item { display: flex; align-items: center; gap: 6px; min-height: 24px; padding: 0 4px 0 8px; cursor: default; color: var(--text-dim); font-size: 12px; user-select: none; white-space: nowrap; border-bottom: 1px solid var(--line); }
+.pls-item:hover { background: var(--bg-4); }
+.pls-item.on { background: var(--bg-5); color: var(--text); }
+.pls-item:focus-visible { outline: 1px solid var(--focus); outline-offset: -1px; }
+.pls-item.sub { padding-left: 22px; }
+.pls-item.head { color: var(--text); }
+.pls-item input[type=checkbox] { width: 12px; height: 12px; margin: 0; flex: none; accent-color: var(--accent); }
+.pls-item > span:not(.pls-n) { overflow: hidden; text-overflow: ellipsis; }
+.pls-item .pls-n { color: var(--text-faint); font-size: 10px; }
+.pls-add { margin-left: auto; min-height: 0; width: 16px; height: 16px; overflow: hidden; padding: 0; display: grid; place-items: center; flex: none; border: 1px solid var(--text-faint); border-radius: 2px; background: none; color: var(--text); }
+.pls-add:hover { border-color: var(--text); background: var(--bg-2); }
+.pls-sidefoot { display: flex; align-items: center; gap: 2px; padding: 3px 4px; border-top: 1px solid var(--line); background: var(--bg-2); }
+.pls-gap { flex: 1; }
+.pls-ib, .pls-fx { min-height: 0; height: 22px; min-width: 22px; padding: 0 3px; display: inline-flex; align-items: center; justify-content: center; gap: 2px; background: none; border: 1px solid transparent; border-radius: 3px; color: var(--text-dim); }
+.pls-ib:hover:not(:disabled), .pls-fx:hover { background: var(--bg-4); color: var(--text); }
+.pls-ib:disabled { opacity: .35; }
+.pls-fx i:first-child { font-family: Georgia, 'Times New Roman', serif; font-weight: 700; font-size: 13px; }
+.pls-main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.pls-pane { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 8px; padding-right: 4px; }
+.pls-pane h4 { margin: 0; font-size: 12px; font-weight: 400; color: var(--text); }
+.pls-defs { display: flex; justify-content: center; gap: 8px; padding-top: 10px; }
+.pls-defs:empty { display: none; }
+.pls-defs button, .pls-sbtn { min-height: 0; height: 22px; padding: 0 10px; font-size: 12px; border-radius: 4px; background: var(--bg-4); border: 1px solid var(--line-2); color: var(--text); white-space: nowrap; }
+.pls-defs button:hover, .pls-sbtn:hover { background: var(--bg-5); }
+.pls-group { margin: 0; padding: 4px 10px 8px; display: flex; flex-direction: column; gap: 5px; min-width: 0; border: 1px solid var(--line-2); border-radius: 3px; }
+.pls-group legend { font-size: 12px; color: var(--text); padding: 0 4px; }
+.pls-row { display: flex; align-items: center; gap: 6px; min-height: 24px; font-size: 12px; min-width: 0; flex-wrap: wrap; }
+.pls-lbl { flex: 0 0 96px; text-align: right; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pls-lbl:not(:empty)::after { content: ':'; }
+.pls-row input[type=range] { width: 120px; min-width: 60px; }
+.pls-row .ph-num { width: 50px; height: 22px; min-height: 0; padding: 0 4px; font-size: 12px; text-align: right; }
+.pls-row select { height: 22px; min-height: 0; font-size: 12px; max-width: 170px; }
+.pls-unit { color: var(--text-dim); font-size: 12px; min-width: 14px; }
+.pls-chk { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; color: var(--text); }
+.pls-row > .pls-chk, .pls-row > .pls-sbtn { margin-left: 8px; }
+.pls-row > .pls-lbl + .pls-chk, .pls-row > .pls-lbl + .pls-sbtn { margin-left: 0; }
+.pls-checks { display: grid; gap: 4px; padding-left: 102px; font-size: 12px; }
+.pls-color { width: 40px; height: 20px; padding: 0; border: 1px solid var(--line-2); border-radius: 2px; background: none; cursor: pointer; }
+.pls-dial { width: 32px; height: 32px; cursor: pointer; touch-action: none; flex-shrink: 0; }
+.pls-cicon { display: inline-flex; }
+.pls-contour { width: 26px; height: 26px; border: 1px solid var(--line-2); border-radius: 2px; background: #fff; flex-shrink: 0; }
+.pls-row .ph-gradbtn { padding: 1px; border-radius: 2px; }
+.pls-row .ph-gradbtn canvas { width: 120px; height: 18px; display: block; }
+.pls-glowfill .pls-chk { margin-left: 0; }
+.pls-glowfill .pls-chk + .pls-color, .pls-glowfill .pls-chk + .ph-gradbtn { margin-right: 10px; }
+.pls-patbtn { min-height: 0; height: 34px; padding: 1px 3px 1px 1px; display: inline-flex; align-items: center; gap: 3px; border-radius: 2px; }
+.pls-patbtn canvas { width: 30px; height: 30px; display: block; }
+.pls-patpop { position: absolute; z-index: 5; display: grid; grid-template-columns: repeat(6, 36px); gap: 3px; padding: 6px; max-height: 240px; overflow: auto; background: var(--bg-2); border: 1px solid var(--line-2); border-radius: 3px; box-shadow: 0 8px 22px rgba(0, 0, 0, .5); }
+.pls-patcell { min-height: 0; width: 36px; height: 36px; padding: 1px; line-height: 0; border-radius: 2px; }
+.pls-patcell.on { outline: 2px solid var(--focus); }
+.pls-patcell canvas { width: 32px; height: 32px; }
+.pls-bis { display: grid; gap: 6px; }
+.pls-bi { display: grid; gap: 2px; }
+.pls-bi-lab { display: flex; justify-content: space-between; font-size: 12px; color: var(--text-dim); }
+.pls-bi-lab b { font-weight: 400; font-variant-numeric: tabular-nums; color: var(--text); }
+.pls-bar { position: relative; height: 12px; margin: 2px 7px 14px; border: 1px solid var(--line-2); touch-action: none; cursor: ew-resize; }
+.pls-h { position: absolute; top: 100%; width: 0; height: 0; margin-left: -6px; border-left: 6px solid transparent; border-right: 6px solid transparent; border-bottom: 11px solid #e8e8e8; pointer-events: none; }
+.pls-h.dark { border-bottom-color: #111; filter: drop-shadow(0 0 1px #aaa); }
+.pls-h.lh { border-right-width: 0; margin-left: -6px; }
+.pls-h.rh { border-left-width: 0; margin-left: 0; }
+.pls-grid { display: grid; grid-template-columns: repeat(auto-fill, 48px); gap: 4px; }
+.pls-cell { min-height: 0; width: 48px; height: 48px; padding: 1px; line-height: 0; border-radius: 2px; background: var(--bg-3); }
+.pls-cell canvas { width: 44px; height: 44px; }
+.pls-note { font-size: 11px; color: var(--text-faint); }
+.pls-aside { display: flex; flex-direction: column; gap: 8px; }
+.pls-swwrap { width: 88px; height: 88px; display: grid; place-items: center; background: var(--bg); border: 1px solid var(--line); }
+.pls-swatch { width: 80px; height: 80px; }
+.pls-pane.plain { overflow: visible; }
+
+/* a fixed-size window as in Photoshop (the list and the settings scroll inside it) */
+body.photo-mode:not(.mobile) .modal.pls-dlg { height: min(560px, 90vh); }
+body.photo-mode:not(.mobile) .modal.pls-dlg > .body { overflow: hidden; display: flex; flex-direction: column; }
+body.photo-mode:not(.mobile) .modal.pls-dlg .pls { flex: 1; min-height: 0; }
+
+/* phones: the list scrolls sideways above the settings; the swatch stays out of the way */
+body.mobile .pls { grid-template-columns: minmax(0, 1fr); min-height: 0; gap: 8px; }
+body.mobile .pls-list { flex-direction: row; overflow-x: auto; }
+body.mobile .pls-item { flex: 0 0 auto; min-height: 40px; border-bottom: none; border-right: 1px solid var(--line); padding: 0 8px; }
+body.mobile .pls-item.sub { padding-left: 8px; }
+body.mobile .pls-add { width: 26px; height: 26px; }
+body.mobile .pls-item input[type=checkbox] { width: 18px; height: 18px; }
+body.mobile .pls-sidefoot button { height: 38px; min-width: 40px; }
+body.mobile .pls-pane { max-height: 46dvh; }
+body.mobile .pls-lbl { flex-basis: 76px; }
+body.mobile .pls-row { font-size: 13px; }
+body.mobile .pls-row input[type=range] { flex: 1; width: auto; }
+body.mobile .pls-row .ph-num { width: 58px; height: 32px; font-size: 16px; }
+body.mobile .pls-row select { height: 32px; font-size: 14px; }
+body.mobile .pls-checks { padding-left: 0; }
+body.mobile .pls-defs { flex-wrap: wrap; }
+body.mobile .pls-defs button { height: 36px; }
+body.mobile .pls-swwrap { display: none; }
+body.mobile .pls-aside { flex-direction: row; padding: 2px 0; }
+body.mobile .pls-color { width: 44px; height: 32px; }
+
+/* small buttons keep their own padding over photo.css's general button padding */
+body.photo-mode .modal .pls-add, body.photo-mode .modal .modal-x { padding: 0; }
+body.photo-mode .modal .pls-ib, body.photo-mode .modal .pls-fx { padding: 0 3px; }
+body.photo-mode .modal .pls-cell, body.photo-mode .modal .pls-patcell, body.photo-mode .modal .pls-row .ph-gradbtn { padding: 1px; }
+body.photo-mode .modal .pls-patbtn { padding: 1px 3px 1px 1px; }

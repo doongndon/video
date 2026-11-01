@@ -524,9 +524,11 @@ export function setPip(clipIds, pos, size = 35) {
       if (!motion || !m?.width || !m?.height) continue;
       for (const k of ['posX', 'posY', 'scale']) motion.params[k].kf = null;
       const fit = Math.min(s.width / m.width, s.height / m.height);
+      // 모션 ▸ 비율 is relative to the fitted picture, or to the media's own pixels (clip.native)
+      const k = c.native ? fit : 1;
       if (pos === 'fit' || pos === 'fill') {
         const fill = Math.max(s.width / m.width, s.height / m.height);
-        motion.params.scale.value = pos === 'fit' ? 100 : Math.round((fill / fit) * 1000) / 10;
+        motion.params.scale.value = Math.round((pos === 'fit' ? 1 : fill / fit) * k * 1000) / 10;
         motion.params.posX.value = s.width / 2;
         motion.params.posY.value = s.height / 2;
         continue;
@@ -535,7 +537,7 @@ export function setPip(clipIds, pos, size = 35) {
       const hh = m.height * fit * (size / 100);
       const mx = s.width * 0.04;
       const my = s.height * 0.05;
-      motion.params.scale.value = size;
+      motion.params.scale.value = Math.round(size * k * 10) / 10;
       motion.params.posX.value = Math.round(pos === 'center' ? s.width / 2 : pos.endsWith('l') ? mx + w / 2 : s.width - mx - w / 2);
       motion.params.posY.value = Math.round(pos === 'center' ? s.height / 2 : pos.startsWith('t') ? my + hh / 2 : s.height - my - hh / 2);
     }

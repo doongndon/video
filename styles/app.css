@@ -8,21 +8,22 @@
   --fs-tc: calc(16px * var(--ui-scale));
   --ctl-h: calc(28px * var(--ui-scale));
 
-  --bg: #16181c;
-  --bg-2: #1e2127;
-  --bg-3: #252930;
-  --bg-4: #30353e;
-  --bg-5: #3a404b;
-  --line: #353a44;
-  --line-2: #4a515e;
-  --text: #eef1f5;
-  --text-dim: #c3c9d3;
-  --text-faint: #8d95a3;
-  --accent: #3b8ff0;
-  --accent-2: #69abf7;
-  --accent-soft: #23466e;
-  --focus: #6fb0ff;
-  --value: #6cb6ff;
+  /* Premiere Pro's neutral greys (환경 설정 ▸ 모양 ▸ 밝기 sets them from src/ui/common.js) and its blue */
+  --bg: #1a1a1a;
+  --bg-2: #202020;
+  --bg-3: #232323;
+  --bg-4: #303030;
+  --bg-5: #3d3d3d;
+  --line: #292929;
+  --line-2: #404040;
+  --text: #eaeaea;
+  --text-dim: #c9c9c9;
+  --text-faint: #969696;
+  --accent: #2680eb;
+  --accent-2: #4b9cf5;
+  --accent-soft: #1d3a5c;
+  --focus: #4b9cf5;
+  --value: #4aa3ff;
   --warn: #f5b23d;
   --danger: #f05a5f;
   --ok: #45c46b;
@@ -676,3 +677,154 @@ body.mobile .peek-bar { bottom: calc(12px + env(safe-area-inset-bottom, 0px)); l
 body.mobile .peek-bar .peek-note { flex: 1; min-width: 0; font-size: var(--fs-xs); line-height: 1.4; }
 body.mobile .peek-bar button { min-height: 44px; }
 body.mobile .modal-peek { height: 36px; }
+
+/* ---------------- Premiere Pro look (video editor; the photo editor's look lives in styles/photo.css) */
+body:not(.photo-mode) #menubar { background: var(--bg-2); border-bottom-color: var(--bg); }
+body:not(.photo-mode):not(.mobile) #menubar .project-name { display: none; }
+#workspace { position: relative; background: var(--bg); }
+body:not(.mobile) .panel-group { border-radius: 4px; margin: 2px; border-color: var(--bg); background: var(--bg-3); }
+body:not(.mobile) .panel-group.focused { border-color: var(--accent); box-shadow: none; }
+body:not(.mobile) .panel-group.maximized { inset: calc(72px * var(--ui-scale)) 4px calc(28px * var(--ui-scale)) 4px; }
+body:not(.mobile) .tabs { height: calc(28px * var(--ui-scale)); background: var(--bg-3); border-bottom-color: var(--line); padding: 0 4px; }
+body:not(.mobile) .tabs .tab { padding: 0 8px; border-right: none; font-weight: 400; color: var(--text-faint); gap: 6px; }
+body:not(.mobile) .tabs .tab.active { background: transparent; box-shadow: none; font-weight: 400; color: var(--text); }
+.tabs .tab .tab-name { display: flex; align-items: center; height: 100%; }
+body:not(.mobile) .tabs .tab.active .tab-name { box-shadow: inset 0 -2px 0 var(--accent); }
+.tabs .tab .tab-menu { display: none; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 3px; color: var(--text-faint); }
+body:not(.mobile) .tabs .tab.active .tab-menu { display: inline-flex; }
+.tabs .tab .tab-menu:hover { background: var(--bg-5); color: var(--text); }
+.tabs .tab .tab-menu .ico svg { width: 12px; height: 12px; }
+body:not(.mobile) #tools { border-radius: 4px; margin: 2px 0; border-color: var(--bg); background: var(--bg-3); width: calc(38px * var(--ui-scale)); }
+body:not(.mobile) #tools button { width: calc(30px * var(--ui-scale)); height: calc(30px * var(--ui-scale)); border-radius: 3px; }
+body:not(.mobile) #tools button.active { background: var(--bg-5); border-color: transparent; color: var(--value); }
+body:not(.mobile) #meters { border-radius: 4px; margin: 2px; border-color: var(--bg); background: var(--bg-3); }
+/* monitors: a black viewer, flat transport buttons, Premiere's blue timecode */
+body:not(.photo-mode) .monitor-view { background: #101010; }
+body:not(.mobile) .transport { background: var(--bg-3); border-top-color: var(--line); }
+body:not(.mobile) .transport .ibtn.play { background: transparent; border-color: transparent; }
+body:not(.mobile) .transport .ibtn:hover, body:not(.mobile) .transport .ibtn.play:hover { background: var(--bg-4); border-color: transparent; }
+body:not(.mobile) .monitor-scrub { background: var(--bg-3); }
+body:not(.mobile) .tl-top, body:not(.mobile) .tl-bottom, body:not(.mobile) .tl-headers, body:not(.mobile) .tl-ruler-spacer, body:not(.mobile) .seq-tabs, body:not(.mobile) .panel-toolbar, body:not(.mobile) .panel-footer { background: var(--bg-3); }
+#statusbar { background: var(--bg-2); border-top-color: var(--bg); }
+
+/* ---------------- header bar: 홈 | 가져오기 | 편집 | 내보내기, project name, workspaces */
+#pr-header { display: flex; align-items: stretch; gap: 8px; height: calc(38px * var(--ui-scale)); padding: 0 8px; background: var(--bg-2); border-bottom: 1px solid var(--bg); flex-shrink: 0; min-width: 0; }
+body.photo-mode #pr-header, body.mobile #pr-header { display: none; }
+#pr-header .hm-modes { display: flex; align-items: stretch; gap: 2px; flex-shrink: 0; }
+#pr-header .hm-mode { background: none; border: none; border-radius: 0; min-height: 0; padding: 0 12px; color: var(--text-dim); font-size: var(--fs-l); box-shadow: inset 0 -2px 0 transparent; }
+#pr-header .hm-mode:hover { color: var(--text); background: none; }
+#pr-header .hm-mode.on { color: var(--text); box-shadow: inset 0 -2px 0 var(--accent); font-weight: 600; }
+#pr-header .hm-home { padding: 0 10px; margin-right: 4px; }
+#pr-header .hm-home.on { box-shadow: inset 0 -2px 0 var(--accent); color: var(--value); }
+#pr-header .hm-title { flex: 1 1 0; min-width: 60px; background: none; border: none; min-height: 0; color: var(--text); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: center; }
+#pr-header .hm-title:hover { color: var(--value); background: none; }
+#pr-header .hm-ws { display: flex; align-items: stretch; gap: 0; min-width: 0; flex: 0 1 auto; overflow-x: auto; scrollbar-width: none; }
+#pr-header .hm-ws::-webkit-scrollbar { display: none; }
+#pr-header .hm-ws-tab { background: none; border: none; border-radius: 0; min-height: 0; padding: 0 10px; white-space: nowrap; color: var(--text-faint); box-shadow: inset 0 -2px 0 transparent; }
+#pr-header .hm-ws-tab:hover { color: var(--text); background: none; }
+#pr-header .hm-ws-tab.on { color: var(--value); box-shadow: inset 0 -2px 0 var(--accent); }
+#pr-header .hm-ws-menu { align-self: center; flex-shrink: 0; }
+@media (max-width: 1100px) { #pr-header .hm-mode { padding: 0 8px; font-size: var(--fs); } #pr-header .hm-ws-tab { padding: 0 7px; } }
+
+/* ---------------- full-area pages (홈, 가져오기, 내보내기) over the panels */
+.hm-page { position: absolute; inset: 0; z-index: 45; background: var(--bg); display: flex; min-height: 0; outline: none; overflow: hidden; }
+.hm-page h3 { margin: 0; font-size: var(--fs); color: var(--text-dim); font-weight: 600; }
+.hm-page .note { color: var(--text-faint); font-size: var(--fs-s); margin: 0; }
+.hm-page .grow { flex: 1; }
+
+/* 홈 */
+.home-nav { width: calc(220px * var(--ui-scale)); flex-shrink: 0; display: flex; flex-direction: column; gap: 8px; padding: 20px 14px; background: var(--bg-2); border-right: 1px solid var(--line); overflow-y: auto; }
+.home-nav > button { display: flex; align-items: center; gap: 8px; justify-content: flex-start; min-height: calc(34px * var(--ui-scale)); padding: 0 12px; }
+.home-nav > button:not(.primary) { background: transparent; border-color: transparent; }
+.home-nav > button:not(.primary):hover { background: var(--bg-4); }
+.home-storage { display: grid; gap: 6px; padding: 10px; background: var(--bg-3); border-radius: 6px; }
+.home-storage-head { display: flex; align-items: center; gap: 6px; }
+.home-storage .progress { height: 6px; }
+.home-atstart { font-size: var(--fs-s); color: var(--text-dim); }
+.home-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 8px; padding: 22px 28px; overflow: hidden; }
+.home-main h2 { margin: 0; font-size: calc(22px * var(--ui-scale)); font-weight: 600; }
+.home-bar { display: flex; align-items: center; gap: 6px; margin-top: 12px; }
+.home-search { display: inline-flex; align-items: center; gap: 4px; background: var(--bg-2); border: 1px solid var(--line-2); border-radius: 5px; padding: 0 6px; color: var(--text-faint); }
+.home-search input { border: none; background: transparent; min-height: calc(26px * var(--ui-scale)); width: calc(200px * var(--ui-scale)); padding: 0 2px; outline: none; }
+.home-recent { flex: 1; overflow-y: auto; align-content: start; }
+.home-recent.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(calc(190px * var(--ui-scale)), 1fr)); gap: 14px; padding: 4px 2px 20px; }
+.home-item { position: relative; border-radius: 6px; cursor: pointer; outline: none; }
+.home-recent.grid .home-item { display: flex; flex-direction: column; gap: 3px; padding: 6px; }
+.home-item:hover, .home-item:focus-visible { background: var(--bg-3); }
+.home-item:focus-visible { box-shadow: 0 0 0 2px var(--focus); }
+.home-thumb { position: relative; aspect-ratio: 16 / 9; background: #0e0e0e; border: 1px solid var(--line); border-radius: 4px; display: grid; place-items: center; overflow: hidden; color: var(--text-faint); }
+.home-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.home-item.current .home-thumb { border-color: var(--accent); }
+.home-badge { position: absolute; left: 6px; top: 6px; background: var(--accent); color: #fff; font-size: var(--fs-xs); padding: 0 6px; border-radius: 3px; }
+.home-name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding-right: 26px; }
+.home-meta { color: var(--text-faint); font-size: var(--fs-xs); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.home-more { position: absolute; right: 4px; bottom: 6px; min-height: 0; height: 24px; min-width: 24px; opacity: 0; }
+.home-item:hover .home-more, .home-item:focus-within .home-more, body.mobile .home-more { opacity: 1; }
+.home-recent.list { display: flex; flex-direction: column; }
+.home-recent.list .home-head, .home-recent.list .home-item { display: grid; grid-template-columns: 72px minmax(0, 1fr) 150px 90px 30px; align-items: center; gap: 12px; padding: 4px 8px; }
+.home-recent.list .home-head { color: var(--text-faint); font-size: var(--fs-xs); border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--bg); z-index: 1; }
+.home-recent.list .home-item { border-radius: 0; border-bottom: 1px solid var(--bg-2); }
+.home-recent.list .home-thumb { width: 72px; }
+.home-recent.list .home-badge { display: none; }
+.home-recent.list .home-more { position: static; opacity: 1; }
+.home-recent .empty-hint { grid-column: 1 / -1; }
+
+/* 가져오기 */
+.im-side, .im-settings { width: calc(240px * var(--ui-scale)); flex-shrink: 0; display: flex; flex-direction: column; gap: 8px; padding: 16px 12px; background: var(--bg-2); overflow-y: auto; }
+.im-side { border-right: 1px solid var(--line); }
+.im-settings { border-left: 1px solid var(--line); }
+.im-src { display: flex; align-items: center; gap: 8px; justify-content: flex-start; }
+.im-recent { display: flex; flex-direction: column; gap: 2px; }
+.im-recent-row { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 2px 6px; text-align: left; background: transparent; border-color: transparent; padding: 4px 6px; align-items: center; }
+.im-recent-row span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.im-recent-row small { grid-column: 2; color: var(--text-faint); font-size: var(--fs-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.im-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 10px; padding: 16px 18px; overflow: hidden; }
+.im-proj { display: flex; align-items: center; gap: 6px; color: var(--text-dim); }
+.im-drop { display: grid; justify-items: center; gap: 6px; padding: 26px 16px; border: 2px dashed var(--line-2); border-radius: 8px; color: var(--text-faint); text-align: center; cursor: pointer; flex-shrink: 0; }
+.im-drop b { color: var(--text); font-size: var(--fs-l); }
+.im-drop:hover { border-color: var(--accent); color: var(--text-dim); }
+.import-page.has-files .im-drop { padding: 10px 16px; grid-auto-flow: column; }
+.import-page.has-files .im-drop .ico svg { width: 20px; height: 20px; }
+.im-tools { display: flex; align-items: center; gap: 6px; }
+.import-page:not(.has-files) .im-tools { display: none; }
+.im-grid { flex: 1; overflow-y: auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(calc(150px * var(--ui-scale)), 1fr)); gap: 10px; align-content: start; }
+.im-tile { display: flex; flex-direction: column; gap: 2px; padding: 5px; border-radius: 6px; cursor: pointer; border: 1px solid transparent; }
+.im-tile:hover { background: var(--bg-3); }
+.im-tile:not(.off) { border-color: var(--accent); background: var(--bg-2); }
+.im-tile.off { opacity: .55; }
+.im-th { position: relative; aspect-ratio: 16 / 9; background: #0e0e0e; border-radius: 4px; overflow: hidden; display: grid; place-items: center; color: var(--text-faint); }
+.im-th img, .im-th video { width: 100%; height: 100%; object-fit: cover; pointer-events: none; }
+.im-th input { position: absolute; left: 6px; top: 6px; }
+.im-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: var(--fs-s); }
+.im-meta { color: var(--text-faint); font-size: var(--fs-xs); }
+.im-opt { margin-top: 6px; }
+.im-settings input[type=text] { width: 100%; }
+.im-count { color: var(--text-dim); font-size: var(--fs-s); }
+.im-btns { display: flex; gap: 8px; justify-content: flex-end; }
+
+/* 내보내기 */
+.ex-settings { width: min(620px, 50%); flex-shrink: 0; overflow-y: auto; background: var(--bg-2); border-right: 1px solid var(--line); }
+.ex-settings .modal.inline { background: transparent; border: none; border-radius: 0; box-shadow: none; min-width: 0; max-width: none; max-height: none; width: 100%; }
+.ex-settings .modal.inline footer { position: sticky; bottom: 0; background: var(--bg-2); }
+.ex-preview { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 10px; padding: 16px 18px; }
+.ex-head { display: flex; align-items: center; gap: 8px; }
+.ex-view { flex: 1; min-height: 0; background: #0e0e0e; border-radius: 4px; display: grid; place-items: center; overflow: hidden; }
+.ex-img { max-width: 100%; max-height: 100%; object-fit: contain; }
+.ex-scrub { display: flex; align-items: center; gap: 10px; }
+.ex-scrub input { flex: 1; }
+.ex-info { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 6px 16px; }
+.ex-info > div { display: flex; flex-direction: column; }
+.ex-info span { color: var(--text-faint); font-size: var(--fs-xs); }
+/* phones: the pages stack */
+body.mobile .hm-page { flex-direction: column; overflow-y: auto; }
+body.mobile .home-nav, body.mobile .im-side, body.mobile .im-settings, body.mobile .ex-settings { width: auto; border: none; flex-shrink: 0; overflow: visible; }
+body.mobile .home-nav { padding: 12px; flex-direction: row; flex-wrap: wrap; }
+body.mobile .home-nav .grow, body.mobile .home-storage { display: none; }
+body.mobile .home-main, body.mobile .im-main { padding: 12px; overflow: visible; }
+body.mobile .home-recent { overflow: visible; }
+body.mobile .home-recent.grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+body.mobile .home-recent.list .home-head, body.mobile .home-recent.list .home-item { grid-template-columns: 56px minmax(0, 1fr) 30px; }
+body.mobile .home-recent.list .home-meta, body.mobile .home-recent.list .home-head span:nth-child(n+3) { display: none; }
+body.mobile .home-recent.list .home-thumb { width: 56px; }
+body.mobile .home-search input { width: 120px; }
+body.mobile .im-grid { overflow: visible; grid-template-columns: repeat(2, minmax(0, 1fr)); }

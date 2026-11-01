@@ -7,7 +7,8 @@ import * as media from './media.js';
 import { commands } from './commands.js';
 import { initAutosave, restoreSession } from './persist.js';
 import { installShortcuts } from './shortcuts.js';
-import { panelGroup, initSplitters, toast, applyUiScale, installFocusHygiene, loadPref } from './ui/common.js';
+import { panelGroup, initSplitters, toast, applyUiScale, applyBrightness, installFocusHygiene, loadPref } from './ui/common.js';
+import { initHeaderModes, setHeaderMode } from './ui/header-modes.js';
 import { createMenubar } from './ui/menubar.js';
 import { createProjectPanel } from './ui/project-panel.js';
 import { createSourceMonitor } from './ui/source-monitor.js';
@@ -22,6 +23,7 @@ import { createQuickPanel } from './ui/quick-panel.js';
 import { createAiPanel } from './ui/ai-panel.js';
 import { createEssentialSoundPanel } from './ui/essential-sound.js';
 import { createEssentialGraphicsPanel } from './ui/essential-graphics.js';
+import { createLearnPanel } from './learn/pr-learn.js';
 import './ui/audio-menus.js';
 import { initMobile } from './ui/mobile.js';
 import { formatTimecode } from './util.js';
@@ -49,6 +51,7 @@ function buildWorkspace() {
     { id: 'essentialGraphics', title: '기본 그래픽', body: graphics, onShow: () => graphics.onShow(), onHide: () => graphics.onHide() },
     { id: 'scopes', title: 'Lumetri 범위', body: scopes, onShow: () => scopes.onShow(), onHide: () => scopes.setVisible(false) },
     { id: 'multicam', title: '멀티캠', body: multicam, onShow: () => multicam.onShow(), onHide: () => multicam.onHide() },
+    { id: 'learn', title: '학습', body: createLearnPanel() },
   ]);
   panelGroup($('pg-top-right'), 'topRight', [{ id: 'program', title: '프로그램', body: createProgramMonitor() }]);
   panelGroup($('pg-bottom-left'), 'bottomLeft', [
@@ -151,8 +154,10 @@ function installFileDrop() {
 
 async function boot() {
   applyUiScale();
+  applyBrightness();
   installFocusHygiene();
   buildWorkspace();
+  initHeaderModes();
   buildStatusBar();
   initMobile();
   installShortcuts();
@@ -165,18 +170,22 @@ async function boot() {
   const restored = await restoreSession();
   initAutosave();
   const blank = /[?&]blank\b/.test(location.search);
+  const firstVisit = !loadPref('guideSeen', false);
   if (restored) toast('지난번 작업을 불러왔습니다');
-  else if (!blank) {
+  else if (!blank && firstVisit) {
     try {
       await loadSampleProject();
-      toast('샘플 프로젝트를 열었습니다. 파일 ▸ 새로 만들기 ▸ 프로젝트로 빈 프로젝트를 시작할 수 있습니다.');
+      toast('샘플 프로젝트를 열었습니다. 왼쪽 위 홈(집 모양) 버튼에서 새 프로젝트를 만들 수 있습니다.');
     } catch (err) {
       console.warn('sample project failed', err);
     }
   }
-  if (!blank && !loadPref('guideSeen', false)) {
+  if (!blank && firstVisit) {
     try { localStorage.setItem('montage.guideSeen', 'true'); } catch { /* storage unavailable */ }
     openGuideDialog();
+  } else if (!blank && (!restored || loadPref('home.atStart', false)) && initialMode() !== 'photo' && !location.hash.startsWith('#docs')) {
+    // Premiere's start: the 홈 screen when there is no project to go back to (or when asked for)
+    setHeaderMode('home');
   }
   playback.requestRender();
   appMode.on((m) => {

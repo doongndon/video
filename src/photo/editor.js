@@ -40,7 +40,7 @@ import { FX_NAMES } from './styles.js';
 import { buildToolbar, buildToolStrip, buildOptionsBar, buildLayersPanel, buildColorPanel, buildPropertiesPanel, buildHistoryPanel } from './panels.js';
 import { installCore2, arrangeMenus } from './core2.js';
 import { installLearn } from './learn.js';
-import { installTheme, buildHome, rememberFile, recentMenu } from './psui.js';
+import { installTheme, buildHome, rememberFile, recentMenu, keepDoc } from './psui.js';
 import { installArtboards } from './artboards.js';
 
 const isMobile = () => document.body.classList.contains('mobile');
@@ -166,9 +166,9 @@ export function createPhotoEditor(root) {
   // ---------------------------------------------------------------- DOM
   const view = h('canvas.ph-view');
   const over = h('canvas.ph-over');
-  // the home screen while no document is open (psui.js)
+  // the home screen: over the whole editor while no document is open, or from the Home button (psui.js)
   const welcome = buildHome(P, { newDoc: () => D.newDocDialog(P), open: () => P.cmd.open(), openFromVideo: () => P.cmd.openFromVideo() });
-  const stage = h('div.ph-stage', view, over, welcome);
+  const stage = h('div.ph-stage', view, over);
   const tabs = h('div.ph-tabs');
   const status = h('div.ph-status', { hidden: true });
   const toolbar = buildToolbar(P);
@@ -398,7 +398,7 @@ export function createPhotoEditor(root) {
   const center = h('div.ph-center', tabs, stage);
   const bodyEl = h('div.ph-body', toolbar, center, side);
   const textBox2 = h('div.ph-textedit', { hidden: true });
-  root.append(h('div.ph', opts, bodyEl, strip, status, mnav, sheet, textBox2));
+  root.append(h('div.ph', opts, bodyEl, strip, status, mnav, sheet, textBox2, welcome));
 
   P.showPanel = (id, colorTarget) => {
     if (colorTarget) P.emit('colortarget', colorTarget);
@@ -432,6 +432,7 @@ export function createPhotoEditor(root) {
     if (id === 'adjust') return list('조정', [...menus['이미지']().find((x) => x.label?.startsWith('조정')).submenu(), '-', { group: '조정 레이어 (원본을 바꾸지 않음)' }, ...menus['레이어']().find((x) => x.label === '새 조정 레이어').submenu()]);
     if (id === 'filter') return list('필터', menus['필터']());
     return list('더보기', [
+      { label: '홈 화면 (내 문서)', action: () => P.showHome(true) },
       { label: '새 문서…', action: () => D.newDocDialog(P) },
       { label: '열기…', action: () => P.cmd.open() },
       { label: '내보내기 형식…', action: () => P.exportDialog() },
@@ -481,7 +482,9 @@ export function createPhotoEditor(root) {
   P.closeDoc = async (i = P.index) => {
     const d = P.docs[i];
     if (!d) return;
-    if (!d.saved && !(await confirmDialog('문서 닫기', `"${d.name}"을(를) 닫을까요? 저장하지 않은 변경은 자동 저장본에서도 지워집니다.`))) return;
+    // the home screen keeps it with all its layers (psui.js / library.js); asked only when that fails
+    const kept = await keepDoc(P, d);
+    if (!kept && !d.saved && !(await confirmDialog('문서 닫기', `"${d.name}"을(를) 닫을까요? 저장하지 않은 변경은 자동 저장본에서도 지워집니다.`))) return;
     i = P.docs.indexOf(d);
     if (i < 0) return;
     if (i === P.index) {
@@ -518,7 +521,7 @@ export function createPhotoEditor(root) {
 
   function docChanged() {
     const doc = P.doc;
-    welcome.hidden = !!doc;
+    P.showHome(!doc);
     updateStatus();
     // a document opened while another was showing (or restored) fits the window when it comes up
     if (doc && !doc.view?.fitted) P.fit();

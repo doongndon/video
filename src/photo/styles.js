@@ -4,7 +4,7 @@
 // The result is a list of passes drawn in order, each with its own blend mode, so a multiply shadow
 // really multiplies with the layers below.
 
-import { hexRgb, paintGradient, paintPattern } from './resources.js';
+import { hexRgb, paintGradient, paintPattern, gradientLut } from './resources.js';
 
 export const FX_KEYS = ['dropShadow', 'innerShadow', 'outerGlow', 'innerGlow', 'bevel', 'satin', 'colorOverlay', 'gradientOverlay', 'patternOverlay', 'stroke'];
 
@@ -318,19 +318,20 @@ function alphaBounds(A, w, h) {
  * A w×h canvas with a gradient laid out on `box` (Photoshop's gradient overlay / gradient stroke: angle,
  * scale and style measured on the layer's bounds or the document), continuing past the box.
  */
-function gradientIn(w, h, box, gr, { angle = 90, scale = 100, style = 'linear', reverse = false, fg, bg } = {}) {
+function gradientIn(w, h, box, gr, { angle = 90, scale = 100, style = 'linear', reverse = false, fg, bg, offset = null, dither = false } = {}) {
   const a = (angle * Math.PI) / 180;
-  const cx = box.x + box.w / 2;
-  const cy = box.y + box.h / 2;
+  // offset: where the gradient was dragged to on the picture, in percent of the box (정렬 재설정 clears it)
+  const cx = box.x + box.w / 2 + (box.w * (offset?.[0] || 0)) / 100;
+  const cy = box.y + box.h / 2 + (box.h * (offset?.[1] || 0)) / 100;
   const k = scale / 100;
   if (style === 'linear' || style === 'reflected' || style === 'diamond' || style === 'angle') {
     const half = ((Math.abs(Math.cos(a)) * box.w + Math.abs(Math.sin(a)) * box.h) / 2) * k;
     const from = style === 'linear' ? { x: cx - Math.cos(a) * half, y: cy + Math.sin(a) * half } : { x: cx, y: cy };
     const to = { x: cx + Math.cos(a) * half, y: cy - Math.sin(a) * half };
-    return paintGradient(w, h, gr, from, to, { style, reverse, fg, bg });
+    return paintGradient(w, h, gr, from, to, { style, reverse, fg, bg, dither });
   }
   const r = (Math.hypot(box.w, box.h) / 2) * k;
-  return paintGradient(w, h, gr, { x: cx, y: cy }, { x: cx + r * Math.cos(a), y: cy - r * Math.sin(a) }, { style, reverse, fg, bg });
+  return paintGradient(w, h, gr, { x: cx, y: cy }, { x: cx + r * Math.cos(a), y: cy - r * Math.sin(a) }, { style, reverse, fg, bg, dither });
 }
 
 /** An RGBA canvas from a colour and an alpha array. */
@@ -349,6 +350,34 @@ function colourCanvas(w, h, color, alpha, opacity = 1) {
     d[i + 1] = gg;
     d[i + 2] = b;
     d[i + 3] = a * 255;
+  }
+  g.putImageData(img, 0, 0);
+  return c;
+}
+
+/**
+ * A glow's paint: its colour, or (the gradient choice) a gradient running from the layer's edge to the
+ * glow's outer end, its stops' opacity included; 파형 (jitter) scatters where each pixel reads it.
+ */
+function glowCanvas(w, h, e, s, fg, bg) {
+  if (e.fill !== 'gradient' || !e.gradient) return colourCanvas(w, h, e.color, s);
+  const lut = gradientLut(e.gradient, { fg, bg });
+  const jit = clamp01((e.jitter || 0) / 100);
+  const c = document.createElement('canvas');
+  c.width = w;
+  c.height = h;
+  const g = c.getContext('2d');
+  const img = g.createImageData(w, h);
+  const d = img.data;
+  for (let j = 0, i = 0; j < s.length; j++, i += 4) {
+    const v = s[j];
+    if (v <= 0) continue;
+    const t = jit ? clamp01(1 - v + (Math.random() - 0.5) * jit) : 1 - v;
+    const k = Math.round(t * 255) * 4;
+    d[i] = lut[k];
+    d[i + 1] = lut[k + 1];
+    d[i + 2] = lut[k + 2];
+    d[i + 3] = lut[k + 3] * Math.min(1, v * 8);
   }
   g.putImageData(img, 0, 0);
   return c;
@@ -388,10 +417,14 @@ export function stylePasses(body, fx, { fg = '#000000', bg = '#ffffff', globalAn
   let layerBox = null;
   const getLayerBox = () => (layerBox ||= alphaBounds(A, w, h) || { x: 0, y: 0, w, h });
   const gradBox = (e) => (e.align === false && docBox ? docBox : getLayerBox());
-  const gradient = (e, opts) => gradientIn(w, h, gradBox(e), e.gradient, { fg, bg, ...opts });
+  const gradient = (e, opts) => gradientIn(w, h, gradBox(e), e.gradient, { fg, bg, offset: e.offset, dither: !!e.dither, ...opts });
   // patterns start at the layer's origin (레이어에 연결) or the document's
-  const patternAt = (e) => (e.link === false && docBox ? [docBox.x, docBox.y] : origin ? [origin.x, origin.y] : [0, 0]);
-  const texture = (bv) => (bv.textureOn && (bv.texDepth ?? 100) ? textureHeights(w, h, bv, patternAt({ link: bv.texLink })) : null);
+  // plus where the pattern was dragged to on the picture (원점에 스냅 clears it)
+  const patternAt = (e) => {
+    const o = e.link === false && docBox ? [docBox.x, docBox.y] : origin ? [origin.x, origin.y] : [0, 0];
+    return [o[0] + (e.phase?.[0] || 0), o[1] + (e.phase?.[1] || 0)];
+  };
+  const texture = (bv) => (bv.textureOn && (bv.texDepth ?? 100) ? textureHeights(w, h, bv, patternAt({ link: bv.texLink, phase: bv.texPhase })) : null);
   // enabled instances of an effect type, bottom (drawn first) to top
   const list = (k) => instanceKeys(fx, k).map((key) => fx[key]).filter((e) => e?.enabled).reverse();
   const global = (e) => (fx.useGlobalLight || e.useGlobalLight) && globalAngle != null;
@@ -447,14 +480,14 @@ export function stylePasses(body, fx, { fg = '#000000', bg = '#ffffff', globalAn
       }
     }
     if (og.noise) addNoise(s, og.noise / 100);
-    passes.push({ canvas: colourCanvas(w, h, og.color, s), blend: og.blend, opacity: og.opacity, kind: 'outerGlow' });
+    passes.push({ canvas: glowCanvas(w, h, og, s, fg, bg), blend: og.blend, opacity: og.opacity, kind: 'outerGlow' });
   }
 
   // ---- the layer itself
   passes.push({ canvas: body, blend: null, opacity: 1, kind: 'body' });
 
   // ---- painted inside the layer (bottom to top: pattern, gradient, colour, satin, inner glow, inner shadow)
-  for (const po of list('patternOverlay')) passes.push({ canvas: maskedCanvas(paintPattern(w, h, po.pattern, po.scale, ...patternAt(po)), A), blend: po.blend, opacity: po.opacity, kind: 'patternOverlay', interior: true });
+  for (const po of list('patternOverlay')) passes.push({ canvas: maskedCanvas(paintPattern(w, h, po.pattern, po.scale, ...patternAt(po), po.angle || 0), A), blend: po.blend, opacity: po.opacity, kind: 'patternOverlay', interior: true });
   for (const go of list('gradientOverlay')) passes.push({ canvas: maskedCanvas(gradient(go, { angle: go.angle ?? 90, scale: go.scale ?? 100, style: go.style || 'linear', reverse: !!go.reverse }), A), blend: go.blend, opacity: go.opacity, kind: 'gradientOverlay', interior: true });
   for (const co of list('colorOverlay')) passes.push({ canvas: colourCanvas(w, h, co.color, A), blend: co.blend, opacity: co.opacity, kind: 'colorOverlay', interior: true });
   for (const sa of list('satin')) {
@@ -497,7 +530,7 @@ export function stylePasses(body, fx, { fg = '#000000', bg = '#ffffff', globalAn
       s[i] = (igl.source === 'center' ? 1 - e : e) * A[i];
     }
     if (igl.noise) addNoise(s, igl.noise / 100);
-    passes.push({ canvas: colourCanvas(w, h, igl.color, s), blend: igl.blend, opacity: igl.opacity, kind: 'innerGlow', interior: true });
+    passes.push({ canvas: glowCanvas(w, h, igl, s, fg, bg), blend: igl.blend, opacity: igl.opacity, kind: 'innerGlow', interior: true });
   }
   for (const ish of list('innerShadow')) {
     const inv = A.map((v) => 1 - v);
@@ -535,7 +568,7 @@ export function stylePasses(body, fx, { fg = '#000000', bg = '#ffffff', globalAn
     strokeA = s;
     let canvas;
     if (st.fillType === 'gradient') canvas = maskedCanvas(gradient(st, { angle: st.angle ?? 90, style: st.style || 'linear', scale: st.scale ?? 100, reverse: !!st.reverse }), s);
-    else if (st.fillType === 'pattern') canvas = maskedCanvas(paintPattern(w, h, st.pattern || 'checker', st.scale ?? 100, ...patternAt(st)), s);
+    else if (st.fillType === 'pattern') canvas = maskedCanvas(paintPattern(w, h, st.pattern || 'checker', st.scale ?? 100, ...patternAt(st), st.patAngle || 0), s);
     else canvas = colourCanvas(w, h, st.color, s);
     passes.push({ canvas, blend: st.blend, opacity: st.opacity, kind: 'stroke' });
   }

@@ -7,7 +7,7 @@ import { playback } from '../playback.js';
 import { commands as c } from '../commands.js';
 import * as edit from '../edit.js';
 import { h, isMac } from '../util.js';
-import { showMenu, closeMenus, UI_SCALES, uiScale, promptDialog, toast, toggleMaximize, panelIds } from './common.js';
+import { showMenu, closeMenus, UI_SCALES, uiScale, promptDialog, toast, toggleMaximize, panelIds, openAppearanceDialog } from './common.js';
 import { LABEL_COLORS } from '../model.js';
 import { templateMenu } from '../templates.js';
 import { WORKSPACES } from './workspaces.js';
@@ -117,7 +117,7 @@ const PANEL_EN = {
   '효과 컨트롤': 'Effect Controls', '효과': 'Effects', '기본 그래픽': 'Essential Graphics', '기본 사운드': 'Essential Sound', '작업 내역': 'History',
   '정보': 'Info', '라이브러리': 'Libraries', 'Lumetri 색상': 'Lumetri Color', 'Lumetri 범위': 'Lumetri Scopes', '마커': 'Markers',
   '미디어 브라우저': 'Media Browser', '메타데이터': 'Metadata', '멀티 카메라': 'Multi-Camera', '프로그램 모니터': 'Program Monitor',
-  '프로젝트': 'Project', '참조 모니터': 'Reference Monitor', '소스 모니터': 'Source Monitor', '텍스트': 'Text', '타임라인': 'Timelines', '도구': 'Tools',
+  '프로젝트': 'Project', '참조 모니터': 'Reference Monitor', '소스 모니터': 'Source Monitor', '텍스트': 'Text', '타임라인': 'Timelines', '도구': 'Tools', '학습': 'Learn',
 };
 const panelOrder = (it) => PANEL_EN[String(it.label).replace(/\s*\(.*\)$/, '')] || it.label;
 
@@ -277,6 +277,8 @@ function videoMenus() {
   const panel = (id, label) => ({ label, key: pk(id), action: () => c.showPanel(id) });
   return {
     '파일': () => base([
+      // the header bar's house button (Premiere's 홈 screen)
+      c.home ? { label: '홈', hint: '최근 프로젝트', action: c.home } : null,
       {
         label: '새로 만들기',
         submenu: () => base([
@@ -338,8 +340,20 @@ function videoMenus() {
       {
         label: '환경 설정',
         submenu: () => [
+          { label: '모양…', hint: '밝기', action: openAppearanceDialog },
           { label: '화면 크기', submenu: () => UI_SCALES.map(([v, name]) => ({ label: name, checked: Math.abs(uiScale() - v) < 0.01, action: () => c.uiScale(v) })) },
           { label: '오디오 스크러빙 (끌 때 소리 듣기)', checked: !!store.ui.audioScrub, action: c.toggleAudioScrub },
+          {
+            label: '기본 미디어 비율 조정',
+            submenu: () => edit.MEDIA_SCALING.map(([v, name]) => ({
+              label: name,
+              checked: edit.defaultMediaScaling() === v,
+              action: () => {
+                edit.setDefaultMediaScaling(v);
+                toast(`새로 놓는 클립: ${name}`);
+              },
+            })),
+          },
         ],
       },
     ]),

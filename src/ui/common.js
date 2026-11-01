@@ -33,7 +33,22 @@ export function panelGroup(el, name, panels) {
   const tabs = h('div.tabs');
   el.append(tabs);
   const entries = panels.map((p) => {
-    const tab = h('div.tab', { onclick: () => activate(p.id) }, p.title);
+    // Premiere's ≡ panel menu, shown next to the panel's name while it is in front
+    const menuBtn = h('span.tab-menu', {
+      role: 'button', title: `${p.title} 패널 메뉴`, 'aria-label': `${p.title} 패널 메뉴`,
+      onclick: (e) => {
+        e.stopPropagation();
+        const r = menuBtn.getBoundingClientRect();
+        showMenu(panelMenu(group, p), r.left, r.bottom + 2);
+      },
+    }, icon('menu', 12));
+    const tab = h('div.tab', {
+      onclick: () => activate(p.id),
+      oncontextmenu: (e) => {
+        e.preventDefault();
+        showMenu(panelMenu(group, p), e.clientX, e.clientY);
+      },
+    }, h('span.tab-name', p.title), menuBtn);
     const body = p.body;
     body.classList.add('panel-body');
     body.dataset.panel = p.id;
@@ -65,8 +80,26 @@ export function panelGroup(el, name, panels) {
   return group;
 }
 
-/** onShow(id) runs whenever a panel is brought forward on purpose (the phone layout opens its sheet). */
-export const panelHooks = { onShow: null };
+/**
+ * onShow(id) runs whenever a panel is brought forward on purpose (the phone layout opens its sheet).
+ * menu(id) may return extra items for that panel's ≡ menu.
+ */
+export const panelHooks = { onShow: null, menu: null };
+
+function panelMenu(group, p) {
+  const max = group.el.classList.contains('maximized');
+  const extra = panelHooks.menu?.(p.id) || [];
+  return [
+    { label: max ? '패널 그룹 복원' : '패널 그룹 최대화', key: '`', action: () => { group.activate(p.id); toggleMaximize({ active: true }); } },
+    group.entries.length > 1 ? {
+      label: '이 그룹의 패널',
+      submenu: () => group.entries.map((e) => ({ label: e.title, checked: e.id === group.active, action: () => group.activate(e.id) })),
+    } : null,
+    ...(extra.length ? ['-', ...extra] : []),
+    '-',
+    { label: '작업 영역 재설정', key: 'Alt+Shift+0', action: () => import('./workspaces.js').then((m) => m.resetWorkspace()) },
+  ].filter(Boolean);
+}
 
 /** Bring a panel to front wherever it lives. */
 export function showPanel(id, { quiet = false } = {}) {
@@ -397,13 +430,19 @@ const focusables = (root) => [...root.querySelectorAll(FOCUSABLE)].filter(canFoc
  * Keys: Enter runs the primary button (not from a text area or a focused button), Esc closes,
  * Tab stays inside the dialog. Only the topmost dialog answers; the editors' shortcuts wait.
  */
-export function openModal({ title, body, buttons = [{ label: '닫기', primary: true }], onClose, width, peek, compare, mount }) {
+export function openModal({ title, body, buttons = [{ label: '닫기', primary: true }], onClose, width, peek, compare, mount, side, aside }) {
   if (mount) return inlineModal({ title, body, buttons, onClose, mount });
   const footer = h('footer');
   const head = h('header', h('span.modal-title', title));
+  const bodyEl = h('div.body', body);
   const modal = h('div.modal', { role: 'dialog', 'aria-modal': 'true', 'aria-label': typeof title === 'string' ? title : null, style: width ? { width } : null },
-    head, h('div.body', body), footer);
+    head, bodyEl, footer);
   const backdrop = h('div.modal-backdrop', modal);
+  // Photoshop's dialogs (photo editor, not phones): the picture behind is not dimmed, the title bar
+  // drags the window, × closes it; `side` puts the buttons in a right column with `aside` under them
+  const psLook = document.body.classList.contains('photo-mode') && !document.body.classList.contains('mobile');
+  if (psLook) backdrop.classList.add('ps');
+  if (side) modal.classList.add('side');
   const prevFocus = document.activeElement;
   const entry = { modal, close: () => close() };
   const isTop = () => pruneModals()[modalStack.length - 1] === entry;
@@ -445,6 +484,7 @@ export function openModal({ title, body, buttons = [{ label: '닫기', primary: 
     } else setTimeout(() => head.querySelector('.modal-peek')?.focus({ preventScroll: true }), 0);
   };
   if (canPeek) head.append(h('button.modal-peek', { title: '창 숨기기 (H): 그림 전체를 보며 미리 보기', 'aria-label': '창 숨기기', onclick: () => setPeek(true) }, icon('eyeOff', 15), h('span', '창 숨기기')));
+  if (psLook) head.append(h('button.modal-x', { title: '닫기 (Esc)', 'aria-label': '닫기', onclick: () => close() }, icon('close', 13)));
   const close = () => {
     if (closed) return;
     setPeek(false);
@@ -538,7 +578,9 @@ export function openModal({ title, body, buttons = [{ label: '닫기', primary: 
     b.el = btn;
     footer.append(btn);
   }
+  if (aside) (side && psLook ? footer : bodyEl).append(aside);
   document.body.append(backdrop);
+  if (psLook) dragByTitle(modal, head, typeof title === 'string' ? title : '');
   modalStack.push(entry);
   document.addEventListener('keydown', guard, true);
   // on phones, focusing a text field would pop up the keyboard over the dialog
@@ -549,6 +591,47 @@ export function openModal({ title, body, buttons = [{ label: '닫기', primary: 
     (first(phone ? 'button.primary' : 'input:not([type=hidden]),select,textarea,button.primary') || first(FOCUSABLE))?.focus({ preventScroll: phone });
   }, 0);
   return { close, modal, footer, peek: setPeek };
+}
+
+/** Drag a dialog by its title bar, as in Photoshop; where each dialog was left is remembered (by title). */
+function dragByTitle(modal, head, key) {
+  const all = loadPref('photo.dlgpos', {});
+  let at = Array.isArray(all[key]) ? all[key] : [0, 0];
+  const put = () => {
+    // the title bar stays reachable on the screen
+    modal.style.translate = '';
+    const r = modal.getBoundingClientRect();
+    at = [clamp(at[0], 80 - r.right, window.innerWidth - 80 - r.left), clamp(at[1], -r.top, window.innerHeight - 32 - r.top)];
+    modal.style.translate = at[0] || at[1] ? `${at[0]}px ${at[1]}px` : '';
+  };
+  if (at[0] || at[1]) put();
+  head.classList.add('drag');
+  head.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0 || e.target.closest('button, input, select, a')) return;
+    e.preventDefault();
+    head.setPointerCapture(e.pointerId);
+    const x0 = e.clientX - at[0];
+    const y0 = e.clientY - at[1];
+    const mv = (ev) => {
+      at = [ev.clientX - x0, ev.clientY - y0];
+      put();
+    };
+    const up = () => {
+      head.removeEventListener('pointermove', mv);
+      head.removeEventListener('pointerup', up);
+      head.removeEventListener('pointercancel', up);
+      const keep = loadPref('photo.dlgpos', {});
+      delete keep[key];
+      keep[key] = at;
+      // only the last few dialogs' places are kept
+      const keys = Object.keys(keep);
+      for (const k of keys.slice(0, Math.max(0, keys.length - 40))) delete keep[k];
+      savePref('photo.dlgpos', keep);
+    };
+    head.addEventListener('pointermove', mv);
+    head.addEventListener('pointerup', up);
+    head.addEventListener('pointercancel', up);
+  });
 }
 
 /**
@@ -948,6 +1031,56 @@ export function applyUiScale(v = uiScale()) {
   savePref('uiScale', v);
   window.dispatchEvent(new Event('resize'));
   window.dispatchEvent(new Event('montage:uiscale'));
+}
+
+// ---------------------------------------------------------------- appearance (환경 설정 ▸ 모양)
+
+/** Premiere's default brightness: dark greys (0 = darkest, 1 = lightest). */
+export const DEFAULT_BRIGHTNESS = 0.1;
+
+export function brightness() {
+  const v = Number(loadPref('appearance.brightness', DEFAULT_BRIGHTNESS));
+  return Number.isFinite(v) ? clamp(v, 0, 1) : DEFAULT_BRIGHTNESS;
+}
+
+/**
+ * 밝기: the video editor's neutral greys from dark to medium, like Premiere's slider. Set on the
+ * root, so the photo editor's own greys (on body.photo-mode) still win there.
+ */
+export function applyBrightness(v = brightness(), { save = true } = {}) {
+  v = clamp(Number(v) || 0, 0, 1);
+  const base = 7 + v * 30;
+  const grey = (l) => `hsl(0 0% ${clamp(l, 0, 100).toFixed(1)}%)`;
+  const st = document.documentElement.style;
+  const set = { '--bg': 0, '--bg-2': 2.5, '--bg-3': 3.5, '--bg-4': 9, '--bg-5': 14, '--line': 6, '--line-2': 15 };
+  for (const [k, d] of Object.entries(set)) st.setProperty(k, grey(base + d));
+  st.setProperty('--text-faint', grey(57 + v * 14));
+  st.setProperty('--text-dim', grey(78 + v * 8));
+  if (save) savePref('appearance.brightness', v);
+}
+
+/** 환경 설정 ▸ 모양…: the 밝기 slider (live) with 기본값. */
+export function openAppearanceDialog() {
+  const start = brightness();
+  const slider = h('input', { type: 'range', min: 0, max: 100, step: 1, value: Math.round(start * 100), 'aria-label': '밝기', style: { flex: '1' } });
+  slider.addEventListener('input', () => applyBrightness(slider.value / 100, { save: false }));
+  let keep = false;
+  const dlg = openModal({
+    title: '환경 설정 · 모양',
+    width: '440px',
+    body: [
+      h('div.form-row', h('label', '밝기'), h('div.inline', { style: { width: '100%' } }, h('span.note', '어둡게'), slider, h('span.note', '밝게'))),
+      h('div.note', '영상 편집 화면의 회색 밝기를 바꿉니다. 사진 편집은 사진 편집의 환경 설정 ▸ 인터페이스에서 바꿉니다.'),
+    ],
+    buttons: [
+      { label: '기본값', action: () => { slider.value = Math.round(DEFAULT_BRIGHTNESS * 100); applyBrightness(DEFAULT_BRIGHTNESS, { save: false }); return false; } },
+      { label: '취소' },
+      { label: '확인', primary: true, action: () => { keep = true; applyBrightness(slider.value / 100); } },
+    ],
+    onClose: () => { if (!keep) applyBrightness(start, { save: false }); },
+  });
+  // the editor behind stays visible while the slider moves
+  dlg.modal.parentElement?.style.setProperty('background', 'rgba(0,0,0,.12)');
 }
 
 /**

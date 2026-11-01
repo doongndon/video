@@ -1276,6 +1276,8 @@ export function createScopesPanel() {
 
 // ---------------------------------------------------------------- multicam
 
+const mcVisible = new Set();
+
 export function createMulticamPanel() {
   const grid = h('div.multicam-grid');
   const info = h('span.note');
@@ -1368,14 +1370,18 @@ export function createMulticamPanel() {
   });
   store.on('change', () => playback.requestRender());
   return Object.assign(body, {
+    // the panel and the Program monitor's 멀티 카메라 view are separate copies: angles keep decoding
+    // while either is showing
     onShow: () => {
       visible = true;
+      mcVisible.add(body);
       playback.multicamPreview = true;
       playback.requestRender();
     },
     onHide: () => {
       visible = false;
-      playback.multicamPreview = false;
+      mcVisible.delete(body);
+      playback.multicamPreview = mcVisible.size > 0;
     },
   });
 }

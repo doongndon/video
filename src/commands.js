@@ -83,7 +83,7 @@ async function resetProjectState() {
 
 async function newProject() {
   if (store.project.mediaOrder.length > 1 || Object.keys(seq().clips).length) {
-    if (!(await confirmDialog('새 프로젝트', '현재 프로젝트와 자동 저장본을 지우고 새로 시작할까요?\n필요하면 먼저 파일 ▸ 프로젝트 파일로 저장을 하세요.'))) return;
+    if (!(await confirmDialog('새 프로젝트', '빈 프로젝트를 새로 시작할까요?\n지금 프로젝트는 저장되어 홈 화면의 최근 항목에 남습니다.'))) return;
   }
   await resetProjectState();
   store.loadProject(createProject('제목 없는 프로젝트'));
@@ -204,7 +204,7 @@ export const commands = {
   },
   loadSample: async () => {
     if (store.project.mediaOrder.length > 1 || Object.keys(seq().clips).length) {
-      if (!(await confirmDialog('샘플 프로젝트 열기', '현재 프로젝트를 샘플 프로젝트로 바꿀까요?\n필요하면 먼저 프로젝트 파일로 저장하세요.'))) return;
+      if (!(await confirmDialog('샘플 프로젝트 열기', '샘플 프로젝트를 새로 열까요?\n지금 프로젝트는 저장되어 홈 화면의 최근 항목에 남습니다.'))) return;
     }
     await resetProjectState();
     setAutosave(true);

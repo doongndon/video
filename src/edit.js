@@ -254,6 +254,7 @@ export function placeMedia(mediaId, opts) {
     const clipKind = m.kind === 'sequence' ? 'nest' : m.kind;
     if (vTrack) {
       const c = createClip(s, { kind: clipKind, trackId: vTrack.id, mediaId, name: m.name, start, duration, inPoint, linkId, color: m.color });
+      applyMediaScaling(c, s);
       s.clips[c.id] = c;
       created.push(c.id);
     }
@@ -1960,23 +1961,62 @@ export function matchSequenceToMedia(mediaId) {
 }
 
 /**
- * 프레임 크기로 설정 / 프레임 크기로 비율 조정: fit the clip's picture inside the frame. Pictures are
- * fitted to the frame at 100 %, so this resets the size (and its keyframes) to 100 %.
+ * 프레임 크기로 비율 조정 / 프레임 크기로 설정 (Premiere's Scale to Frame Size / Set to Frame Size):
+ * both fit the picture inside the frame. 비율 조정 fits the picture itself (모션 ▸ 비율 stays 100 %);
+ * 설정 keeps the media's own pixels (clip.native) and lowers 모션 ▸ 비율 instead (e.g. 50 % for 4K
+ * in an HD sequence), so zooming in later stays sharp. Size keyframes are cleared.
  */
 export function setClipsToFrameSize(ids, label = '프레임 크기로 설정') {
   const s = seq();
+  const keep = label === '프레임 크기로 설정';
   let n = 0;
   store.transact(label, () => {
     for (const id of ids) {
       const c = s.clips[id];
       const motion = c?.effects.find((e) => e.type === 'motion');
       if (!motion || isLocked(c.trackId)) continue;
-      motion.params.scale.value = 100;
+      const fit = fitScaleOf(c, s);
+      if (keep && fit) c.native = true;
+      else delete c.native;
+      motion.params.scale.value = keep && fit ? Math.round(fit * 1000) / 10 : 100;
       motion.params.scale.kf = null;
       n++;
     }
   });
   return n;
+}
+
+/** Scale that fits a picture clip's media inside the frame, or 0 when the clip has no media size. */
+export function fitScaleOf(c, s = seq()) {
+  const m = c && (c.kind === 'video' || c.kind === 'image' || c.kind === 'nest') ? media(c.mediaId) : null;
+  return m?.width && m?.height ? Math.min(s.width / m.width, s.height / m.height) : 0;
+}
+
+// 환경 설정 ▸ 기본 미디어 비율 조정 (Premiere's Default Media Scaling) for clips placed from now on:
+// 'fit' 프레임 크기로 비율 조정 (Montage's default), 'set' 프레임 크기로 설정, 'none' 없음 (own pixels, 100 %)
+export const MEDIA_SCALING = [['none', '없음'], ['fit', '프레임 크기로 비율 조정'], ['set', '프레임 크기로 설정']];
+export function defaultMediaScaling() {
+  try {
+    const v = JSON.parse(localStorage.getItem('montage.mediaScaling'));
+    return MEDIA_SCALING.some(([k]) => k === v) ? v : 'fit';
+  } catch {
+    return 'fit';
+  }
+}
+export function setDefaultMediaScaling(v) {
+  try {
+    localStorage.setItem('montage.mediaScaling', JSON.stringify(v));
+  } catch { /* storage unavailable */ }
+}
+
+/** Apply 기본 미디어 비율 조정 to a newly placed clip. */
+function applyMediaScaling(c, s) {
+  const mode = defaultMediaScaling();
+  const fit = mode === 'fit' ? 0 : fitScaleOf(c, s);
+  if (!fit) return;
+  c.native = true;
+  const motion = c.effects.find((e) => e.type === 'motion');
+  if (motion && mode === 'set') motion.params.scale.value = Math.round(fit * 1000) / 10;
 }
 
 // ---------------------------------------------------------------- slide & rate stretch

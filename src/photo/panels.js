@@ -482,6 +482,114 @@ function presetPicker(P, t) {
   return b;
 }
 
+/**
+ * Photoshop's number option: "불투명도: 100% ▾". Drag the label sideways to change the value
+ * (scrubby slider; Shift: faster, Alt: slower), type it in the field, or drop a slider down from ▾.
+ * onChange(value, done) runs live while dragging and with done = true when the change ends.
+ */
+export function numOption({ label, glyph = null, value, min, max, unit = '', title = null, onChange }) {
+  const name = title || label;
+  const num = h('input.ph-num', { type: 'number', min, max, value, 'aria-label': name });
+  const range = h('input', { type: 'range', min, max, value, 'aria-label': name });
+  let v = +value;
+  const set = (x, done) => {
+    const n = clamp(Math.round(+x), min, max);
+    if (!Number.isFinite(n)) return;
+    v = n;
+    num.value = n;
+    range.value = n;
+    onChange(n, done);
+  };
+  num.addEventListener('change', () => set(num.value, true));
+  range.addEventListener('input', () => set(range.value, false));
+  range.addEventListener('change', () => set(range.value, true));
+  const lab = h('span.ph-scrub', { title: `${name}: 좌우로 끌어서 값 바꾸기` }, glyph || `${label}:`);
+  lab.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    lab.setPointerCapture(e.pointerId);
+    const x0 = e.clientX;
+    const v0 = v;
+    const per = Math.max(0.2, (max - min) / 300);
+    let moved = false;
+    const mv = (ev) => {
+      const dx = ev.clientX - x0;
+      if (!moved && Math.abs(dx) < 3) return;
+      moved = true;
+      set(v0 + dx * per * (ev.shiftKey ? 10 : ev.altKey ? 0.2 : 1), false);
+    };
+    const up = () => {
+      lab.removeEventListener('pointermove', mv);
+      lab.removeEventListener('pointerup', up);
+      lab.removeEventListener('pointercancel', up);
+      if (moved) set(v, true);
+      else num.focus();
+    };
+    lab.addEventListener('pointermove', mv);
+    lab.addEventListener('pointerup', up);
+    lab.addEventListener('pointercancel', up);
+  });
+  const box = h('span.ph-numdrop', num, unit ? h('small', unit) : null);
+  const arrow = h('button.ph-dropbtn', { type: 'button', 'aria-label': `${name} 슬라이더`, title: name }, icon('chevDown', 10));
+  arrow.addEventListener('click', () => {
+    if (range.closest('.ph-pop')) return range.closest('.ph-pop').close();
+    const pop = popover(box, range);
+    pop.classList.add('ph-slpop');
+    range.focus();
+    return undefined;
+  });
+  box.append(arrow);
+  return h('span.ph-opt.ph-nopt', lab, box);
+}
+
+// option-bar switches Photoshop shows as icons: [icon, tooltip]
+const ICON_TOGGLES = {
+  pressureOpacity: ['penPressure', '불투명도에 항상 압력 사용 (끄면 브러시 설정이 압력을 정합니다)'],
+  airbrush: ['airbrush', '에어브러시 스타일 효과 쌓기 사용 (누르고 있으면 계속 쌓임)'],
+  pressureSize: ['penPressure', '크기에 항상 압력 사용 (끄면 브러시 설정이 압력을 정합니다)'],
+};
+/** Tools that paint with a round brush but have no brush preset picker of their own. */
+const sizedBrush = (t) => t.options.some((x) => x[0] === 'size' && x[2] === 'range') && (t.group === 'paint' || t.group === 'retouch' || t.id === 'quickSel');
+
+/** A small brush picker for the tools above: tip preview, size and ▾ (size and hardness sliders). */
+function sizePicker(P, t, o) {
+  const hard = t.options.find((x) => x[0] === 'hardness');
+  const sz = t.options.find((x) => x[0] === 'size');
+  const hd = hard ? clamp(o.hardness ?? 100, 0, 99) : 99;
+  const dot = h('span.ph-tipdot', { style: { background: `radial-gradient(circle closest-side, var(--text) ${hd}%, transparent 100%)` } });
+  const b = h('button.small.ph-bpbtn', { title: '브러시 사전 설정 피커 (크기와 경도)', 'aria-label': '브러시 사전 설정 피커' }, dot, h('span', String(o.size)), icon('chevDown', 11));
+  const row = (def) => {
+    const [key, label, , min, max] = def;
+    const r = h('input', { type: 'range', min, max, value: P.opts(t.id)[key], 'aria-label': label });
+    const n = h('input.ph-num', { type: 'number', min, max, value: P.opts(t.id)[key], 'aria-label': label });
+    const set = (x) => {
+      const val = clamp(Math.round(+x), min, max);
+      r.value = val;
+      n.value = val;
+      P.setOpt(t.id, key, val);
+    };
+    r.addEventListener('input', () => set(r.value));
+    n.addEventListener('change', () => set(n.value));
+    return h('label.ph-bprow', h('span', label), r, n, h('small', key === 'size' ? 'px' : '%'));
+  };
+  b.addEventListener('click', () => {
+    if (document.querySelector('.ph-pop.ph-szpop')) return document.querySelector('.ph-pop.ph-szpop').close();
+    popover(b, row(sz), hard ? row(hard) : null).classList.add('ph-szpop');
+    return undefined;
+  });
+  return b;
+}
+
+/** 홈 (house) at the far left of the options bar: the home screen over the open documents. */
+function homeButton(P) {
+  return h('button.ph-ibtn.ph-homebtn', { title: '홈 화면', 'aria-label': '홈 화면', onclick: () => {
+    if (P.showHome) return P.showHome();
+    const home = document.querySelector('.ph-stage .ph-home');
+    if (home && P.doc) home.hidden = !home.hidden;
+    return undefined;
+  } }, icon('homeIcon', 16));
+}
+
 export function buildOptionsBar(P) {
   const el = h('div.ph-opts');
   // a slider or number in the bar changing its own option must not rebuild the bar under the pointer
@@ -492,28 +600,40 @@ export function buildOptionsBar(P) {
     if (selfChange || !t) return;
     const o = P.opts(t.id);
     const ctrls = [];
+    // size and hardness live in the brush preset picker (the tool's own, or a small one here)
+    const lead = (t.leadButtons?.(P) || []).filter(Boolean);
+    const brushPicker = lead.some((b) => b.classList?.contains('ph-bpbtn'));
+    const picker = !brushPicker && sizedBrush(t) ? sizePicker(P, t, o) : null;
+    const inPicker = (key) => (brushPicker || picker) && (key === 'size' || key === 'hardness');
+    // the brush tip's angle (∠ 0°), before the pressure-for-size switch as in Photoshop
+    let angleDone = !brushPicker;
+    const angleOpt = () => {
+      angleDone = true;
+      return numOption({ label: '각도', glyph: icon('angle', 15), title: '브러시 각도', value: Math.round(o.angle ?? 0), min: -180, max: 180, unit: '°', onChange: (v) => setSelf('angle', v) });
+    };
+    const setSelf = (key, v) => {
+      selfChange = true;
+      try {
+        P.setOpt(t.id, key, v);
+      } finally {
+        selfChange = false;
+      }
+    };
     for (const def of t.options) {
-      const [key, label, type, min, max, , list] = def;
+      const [key, rawLabel, type, min, max, , list] = def;
+      // "페더 (px)": the unit goes after the field
+      const m = /^(.*?)\s*\((px|%|°)\)$/.exec(rawLabel);
+      const label = m ? m[1] : rawLabel;
       // ranges keep their unit where a select keeps its list
-      const unit = typeof list === 'string' ? list : def[7];
+      const unit = typeof list === 'string' ? list : def[7] || m?.[2];
       if (t.id === 'shape' && ((key === 'sides' && !['polygon', 'star'].includes(o.type)) || (key === 'radius' && o.type !== 'round'))) continue;
+      if (inPicker(key)) continue;
+      if (key === 'pressureSize' && !angleDone) ctrls.push(angleOpt());
       if (type === 'range' || type === 'number') {
-        const r = type === 'range' ? h('input', { type: 'range', min, max, value: o[key], 'aria-label': label }) : null;
-        const n = h('input.ph-num', { type: 'number', min, max, value: o[key], 'aria-label': label });
-        const set = (v) => {
-          const val = clamp(Math.round(+v), min, max);
-          selfChange = true;
-          try {
-            P.setOpt(t.id, key, val);
-          } finally {
-            selfChange = false;
-          }
-          if (r) r.value = val;
-          n.value = val;
-        };
-        r?.addEventListener('input', () => set(r.value));
-        n.addEventListener('change', () => set(n.value));
-        ctrls.push(h('label.ph-opt', h('span', label), r, n, unit && typeof unit === 'string' ? h('small', unit) : null));
+        ctrls.push(numOption({ label, value: o[key], min, max, unit: typeof unit === 'string' && unit.length <= 3 ? unit : '', onChange: (v) => setSelf(key, v) }));
+      } else if (type === 'bool' && ICON_TOGGLES[key]) {
+        const [ic, tip] = ICON_TOGGLES[key];
+        ctrls.push(h(`button.ph-ibtn.ph-otog${o[key] ? '.on' : ''}`, { title: tip, 'aria-label': rawLabel, 'aria-pressed': String(!!o[key]), onclick: () => P.setOpt(t.id, key, !o[key]) }, icon(ic, 16)));
       } else if (type === 'bool') {
         const b = h('input', { type: 'checkbox', checked: !!o[key] });
         b.addEventListener('change', () => P.setOpt(t.id, key, b.checked));
@@ -530,7 +650,7 @@ export function buildOptionsBar(P) {
         const s = h('select', { 'aria-label': label }, items.map(([v, txt]) => h('option', { value: v }, txt)));
         s.value = o[key];
         s.addEventListener('change', () => P.setOpt(t.id, key, isNaN(+s.value) || s.value === '' ? s.value : +s.value));
-        ctrls.push(h('label.ph-opt', h('span', label), s));
+        ctrls.push(h('label.ph-opt', h('span', `${label}:`), s));
       } else if (type === 'font') {
         const b = h('button.small', { title: '글꼴 고르기' }, fontLabel(o[key]));
         b.style.fontFamily = `"${o[key]}", "Noto Sans KR", sans-serif`;
@@ -633,7 +753,18 @@ export function buildOptionsBar(P) {
     } else if (t.optionButtons) {
       ctrls.push(...t.optionButtons(P).filter(Boolean));
     }
-    if (P.symmetryButton && ['brush', 'pencil', 'eraser', 'mixer'].includes(t.id)) ctrls.push(P.symmetryButton());
+    if (!angleDone) ctrls.push(angleOpt());
+    if (P.symmetryButton && ['brush', 'pencil', 'eraser', 'mixer'].includes(t.id)) {
+      // Photoshop shows the butterfly icon; the state ("대칭: 방사형 8") stays in the tooltip
+      const sb = P.symmetryButton();
+      const state = sb.textContent.replace(/\s*▾\s*$/, '');
+      sb.setAttribute('aria-label', `대칭 칠하기 (${state})`);
+      sb.title = `${state} · ${sb.title}`;
+      sb.classList.remove('small');
+      sb.classList.add('ph-ibtn', 'ph-symbtn');
+      sb.replaceChildren(icon('symmetry', 16), h('span.ph-caret'));
+      ctrls.push(sb);
+    }
     if (P.doc?.active?.mask && ['brush', 'pencil', 'eraser', 'bucket', 'gradient'].includes(t.id)) {
       ctrls.push(h('span.ph-opt.ph-hint', P.editMask ? '마스크에 칠하는 중 (검정=숨김, 흰색=보임)' : ''));
     }
@@ -641,7 +772,7 @@ export function buildOptionsBar(P) {
     for (const c of ctrls) if (c?.tagName === 'BUTTON' && c.textContent.startsWith('선택 및 마스크')) c.classList.add('ph-right');
     // the tool preset picker (the tool's icon) first, then leadButtons: controls Photoshop shows
     // next (the brush preset picker)
-    el.replaceChildren(presetPicker(P, t), ...(t.leadButtons?.(P) || []).filter(Boolean), ...ctrls);
+    el.replaceChildren(homeButton(P), presetPicker(P, t), ...lead, ...(picker ? [picker] : []), ...ctrls);
   };
   P.on('tool', render);
   P.on('opts', render);
@@ -655,10 +786,11 @@ export function buildOptionsBar(P) {
 
 const thumbCache = new WeakMap();
 /** Layers panel ▸ Panel Options ▸ thumbnail size (px; 0: none). */
-export const THUMB_SIZES = [[0, '없음'], [24, '작게'], [40, '중간'], [64, '크게']];
-let thumbSize = 40;
+export const THUMB_SIZES = [[0, '없음'], [26, '작게'], [40, '중간'], [64, '크게']];
+// small by default, as in Photoshop (rows about 32 px)
+let thumbSize = 26;
 try {
-  const v = +loadPref('photo.layerThumb', 40);
+  const v = +loadPref('photo.layerThumb', 26);
   if (THUMB_SIZES.some(([n]) => n === v)) thumbSize = v;
 } catch { /* default */ }
 function thumb(P, l, which = 'content') {
@@ -759,19 +891,23 @@ function thumb(P, l, which = 'content') {
   }
   g.restore();
   if (l.kind === 'smart') {
+    // the smart object badge at the bottom right, sized to the thumbnail
+    const b = Math.max(8, Math.round(S * 0.3));
     g.fillStyle = '#fff';
-    g.fillRect(S - 12, S - 12, 11, 11);
+    g.fillRect(S - b - 1, S - b - 1, b, b);
     g.strokeStyle = '#333';
-    g.strokeRect(S - 11.5, S - 11.5, 10, 10);
+    g.strokeRect(S - b - 0.5, S - b - 0.5, b - 1, b - 1);
     g.fillStyle = '#333';
-    g.fillRect(S - 9, S - 9, 5, 5);
+    const k = Math.round(b / 2.2);
+    g.fillRect(S - b + Math.round((b - k) / 2) - 1, S - b + Math.round((b - k) / 2) - 1, k, k);
   }
   if (l.kind === 'text') {
+    const tb = Math.min(14, Math.max(10, Math.round(S * 0.4)));
     g.fillStyle = 'rgba(0,0,0,.65)';
-    g.fillRect(0, S - 14, 14, 14);
+    g.fillRect(0, S - tb, tb, tb);
     g.fillStyle = '#fff';
-    g.font = 'bold 11px sans-serif';
-    g.fillText('T', 3, S - 3);
+    g.font = `bold ${tb - 3}px sans-serif`;
+    g.fillText('T', tb * 0.22, S - tb * 0.22);
   }
   const copy = makeCanvas(S, S);
   copy.getContext('2d').drawImage(c, 0, 0);
@@ -1068,10 +1204,13 @@ export function buildLayersPanel(P) {
       });
     }
     const fxOn = hasFx(l.fx);
+    // the 배경 layer: italic name and a lock at the right (click: make it a normal layer)
+    const isBg = l.kind === 'raster' && !l.parent && doc.layers[0] === l && l.name === '배경';
     const badges = [
+      isBg ? h('button.ph-badge.ph-bglock', { title: '배경 레이어 (누르면 일반 레이어로 바꿉니다)', 'aria-label': '배경 레이어 잠금 풀기', onclick: (e) => { e.stopPropagation(); P.cmd.layerFromBackground?.(); } }, icon('lock', 12)) : null,
       l.linkId ? h('span.ph-badge', { title: '연결된 레이어' }, icon('link', 12)) : null,
       fxOn ? onDbl(h('button.ph-badge.fx', { title: '효과 보기/숨기기 · 두 번 클릭: 레이어 스타일', onclick: (e) => { e.stopPropagation(); l.fxOpen = !l.fxOpen; P.emit('layers'); } }, 'fx', l.fxOpen ? '▾' : '▸'), `${l.id}:fxb`, () => { l.fxOpen = !l.fxOpen; P.selectLayer(l.id); P.cmd.layerStyle('blending'); }) : null,
-      l.locked || l.lockPixels || l.lockPos || l.lockAlpha ? h('span.ph-badge', { title: '잠김' }, icon('lock', 12)) : null,
+      !isBg && (l.locked || l.lockPixels || l.lockPos || l.lockAlpha) ? h('span.ph-badge', { title: '잠김' }, icon('lock', 12)) : null,
     ];
     // the name itself (double-click: rename); the rest of the row is the empty part (double-click: style)
     const nameText = h('span.ph-lnametext', l.name);
@@ -1101,7 +1240,7 @@ export function buildLayersPanel(P) {
       inp.focus();
       inp.select();
     });
-    const row = h(`div.ph-layer${sel.has(l.id) ? '.on' : ''}${l.id === doc.activeId ? '.active' : ''}${doc.shown(l) ? '' : '.hidden'}${l.clip ? '.clipped' : ''}`, {
+    const row = h(`div.ph-layer${sel.has(l.id) ? '.on' : ''}${l.id === doc.activeId ? '.active' : ''}${doc.shown(l) ? '' : '.hidden'}${l.clip ? '.clipped' : ''}${isBg ? '.bg' : ''}`, {
       role: 'treeitem', 'aria-selected': String(sel.has(l.id)), 'aria-level': String(depth + 1), draggable: 'true', 'data-layer-id': l.id,
       style: { paddingLeft: `${6 + depth * 16 + (l.clip ? 12 : 0)}px` },
     }, eye, twist, t, mt, vt, name, h('span.ph-badges', badges));
@@ -1322,10 +1461,20 @@ export function buildLayersPanel(P) {
 
 export function buildColorPanel(P) {
   let target = 'fg';
-  const fgB = h('button.ph-cbig.fg', { onclick: () => { target = 'fg'; sync(); } }, '전경');
-  const bgB = h('button.ph-cbig.bg', { onclick: () => { target = 'bg'; sync(); } }, '배경');
+  // Photoshop's Color panel: small foreground / background squares at the left, the colour field
+  // and hue slider at the right (a click on the chosen square opens the Color Picker)
+  const pick = (which) => {
+    if (target === which && P.colorPicker) return P.colorPicker(which);
+    target = which;
+    sync();
+    return undefined;
+  };
+  const fgB = h('button.ph-cbig.fg', { title: '전경색 (다시 누르면 색상 피커)', 'aria-label': '전경색', onclick: () => pick('fg') });
+  const bgB = h('button.ph-cbig.bg', { title: '배경색 (다시 누르면 색상 피커)', 'aria-label': '배경색', onclick: () => pick('bg') });
   const picker = createColorPicker({ value: P.fg, onChange: (v, done) => P.setColor(v, target === 'bg', !done) });
-  const sw = h('div.ph-swatches', SWATCHES.map((c) => h('button.ph-swatch', { style: { background: c }, title: c, 'aria-label': c, onclick: () => P.setColor(c, target === 'bg') })));
+  // a lower field than the dialogs' so the panel stays small
+  const field = picker.el.querySelector('.cp-sv');
+  if (field) field.height = 90;
   const recent = h('div.ph-swatches.recent');
   const sync = () => {
     fgB.style.background = P.fg;
@@ -1333,12 +1482,15 @@ export function buildColorPanel(P) {
     fgB.classList.toggle('on', target === 'fg');
     bgB.classList.toggle('on', target === 'bg');
     picker.set(target === 'fg' ? P.fg : P.bg);
-    recent.replaceChildren(...P.recent.map((c) => h('button.ph-swatch', { style: { background: c }, title: c, 'aria-label': c, onclick: () => P.setColor(c, target === 'bg') })));
+    recent.replaceChildren(...P.recent.slice(0, 16).map((c) => h('button.ph-swatch', { style: { background: c }, title: c, 'aria-label': c, onclick: () => P.setColor(c, target === 'bg') })));
   };
   P.on('color', sync);
   P.on('colortarget', (t) => { target = t; sync(); });
   sync();
-  return h('div.ph-panel.color', h('div.ph-crow', fgB, bgB, h('button.small', { onclick: () => P.swapColors(), title: '바꾸기 (X)', 'aria-label': '전경색과 배경색 바꾸기' }, icon('swapColors', 13))), picker.el, h('div.ph-sub', '견본'), sw, h('div.ph-sub', '최근 색'), recent);
+  const swap = h('button.ph-cswap', { onclick: () => P.swapColors(), title: '전경색과 배경색 전환 (X)', 'aria-label': '전경색과 배경색 바꾸기' }, icon('swapColors', 11));
+  const def = h('button.ph-cdef', { onclick: () => P.defaultColors(), title: '기본 전경색과 배경색 (D)', 'aria-label': '기본 전경색과 배경색' }, icon('defaultColors', 10));
+  const sw = h('div.ph-swatches.ph-cswatches', SWATCHES.map((c) => h('button.ph-swatch', { style: { background: c }, title: c, 'aria-label': c, onclick: () => P.setColor(c, target === 'bg') })));
+  return h('div.ph-panel.color', h('div.ph-cmain', h('div.ph-cfgbg', bgB, fgB, swap, def), picker.el), h('div.ph-sub.ph-csub', '견본'), sw, h('div.ph-sub', '최근 색'), recent);
 }
 
 // ---------------------------------------------------------------- properties

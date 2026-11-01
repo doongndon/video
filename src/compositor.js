@@ -717,7 +717,9 @@ export class Compositor {
     const alpha = clamp(opacity * (opts.alpha ?? 1), 0, 1);
     if (alpha <= 0.001) return;
 
-    const baseScale = src.fit ? Math.min(W / src.w, H / src.h) : 1;
+    // pictures are fitted to the frame (프레임 크기로 비율 조정) unless the clip keeps its own pixels
+    // (clip.native: 프레임 크기로 설정 / 기본 미디어 비율 조정 없음, where 모션 ▸ 비율 sizes it)
+    const baseScale = src.fit && !clip.native ? Math.min(W / src.w, H / src.h) : 1;
     let flipX = 1;
     let flipY = 1;
     const matte = !opts._noMatte && userFx.find((f) => f.type === 'trackMatte' && f.v.track && f.v.track !== clip.trackId)?.v;
@@ -1388,7 +1390,7 @@ export class Compositor {
     const motionFx = clip.effects.find((e) => e.type === 'motion');
     if (!motionFx) return null;
     const m = evalEffect(motionFx, tl);
-    const base = size.fit ? Math.min(seq.width / size.w, seq.height / size.h) : 1;
+    const base = size.fit && !clip.native ? Math.min(seq.width / size.w, seq.height / size.h) : 1;
     const s = (base * m.scale) / 100;
     const sx = m.uniform === false ? (base * (m.scaleW ?? 100)) / 100 : s;
     const rad = (m.rotation * Math.PI) / 180;

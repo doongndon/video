@@ -495,6 +495,7 @@ export function colorPickerDialog({ title = '색상 피커', value = '#000000', 
     title,
     width: 'auto',
     peek: false,
+    side: true,
     body: [h('div.pcp', field, strip, side)],
     buttons: [{ label: '취소' }, { label: '확인', primary: true, action: () => {
       commitTyping();

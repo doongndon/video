@@ -44,6 +44,12 @@ injectStyle('pm-style', `
 .pm-refbar .tc { min-width: 0; font-size: var(--fs-s); padding: 0 4px; }
 .pm-refbar b { color: var(--text); font-weight: 600; padding: 0 4px; }
 .transport .ibtn.on { color: var(--value); border-color: var(--accent); }
+.pm-row { flex: 1; min-height: 0; display: flex; }
+.pm-row > .monitor-view { flex: 1; min-width: 0; }
+.pm-multicam { display: none; }
+.monitor.mc-on .pm-multicam { display: flex; flex-direction: column; flex: 1; min-width: 0; border-right: 1px solid var(--line-2); }
+.pm-multicam > .multicam { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+@media (max-width: 700px) { .monitor.mc-on .pm-row { flex-direction: column; } .monitor.mc-on .pm-multicam { border-right: 0; border-bottom: 1px solid var(--line-2); } }
 `);
 
 export function createProgramMonitor() {
@@ -119,7 +125,24 @@ export function createProgramMonitor() {
     loopBtn, safeBtn, compareBtn, settingsBtn,
     h('span.grow'),
     durEl);
-  const root = h('div.monitor', view, scrubBar, transport);
+  // 멀티 카메라 보기 (Premiere: 프로그램 모니터 설정 ▸ 멀티 카메라, Shift+0): the angles on the left,
+  // the program on the right; the angle grid is a second copy of the 멀티 카메라 panel
+  const mcHost = h('div.pm-multicam');
+  const root = h('div.monitor', h('div.pm-row', mcHost, view), scrubBar, transport);
+  let mcPanel = null;
+  let mcView = false;
+  async function setMulticamView(on) {
+    mcView = !!on;
+    if (mcView && !mcPanel) {
+      const { createMulticamPanel } = await import('./panels.js');
+      mcPanel = createMulticamPanel();
+      mcHost.append(mcPanel);
+    }
+    root.classList.toggle('mc-on', mcView);
+    if (mcPanel) mcPanel[mcView ? 'onShow' : 'onHide']();
+    layout();
+    playback.requestRender();
+  }
 
   async function saveFrame() {
     const blob = await exportFrame();
@@ -286,6 +309,8 @@ export function createProgramMonitor() {
       { label: '안내선 추가…', action: () => guideDialog() },
       { label: '안내선 템플릿', submenu: () => GUIDE_TEMPLATES.map(([l, fn]) => ({ label: l, action: () => applyGuideTemplate(fn) })) },
       { label: '안내선 지우기', disabled: !has, action: clearGuides },
+      '-',
+      { label: '멀티 카메라', key: 'Shift+0', checked: mcView, action: () => setMulticamView(!mcView) },
       '-',
       { label: '비교 보기', checked: cmp.on, action: () => setCompare(!cmp.on) },
       { label: '비교 방식', submenu: () => [['side', '나란히'], ['vsplit', '세로 분할 (왼쪽 / 오른쪽)'], ['hsplit', '가로 분할 (위 / 아래)']].map(([v, l]) => ({ label: l, checked: cmp.mode === v, action: () => setCompare(true, { mode: v }) })) },
@@ -651,8 +676,8 @@ export function createProgramMonitor() {
     const size = q && compositor.sourceSize(c, store.ui.playhead);
     if (!size?.w || !size?.h) return null;
     const { w: sw, h: sh } = size;
-    const base = size.fit ? Math.min(s.width / sw, s.height / sh) : 1;
-    const c0 = [(q[0][0] + q[2][0]) / 2, (q[0][1] + q[2][1]) / 2];
+    const base = size.fit && !c.native ? Math.min(s.width / sw, s.height / sh) : 1;
+    const c0 =[(q[0][0] + q[2][0]) / 2, (q[0][1] + q[2][1]) / 2];
     const ax = [(q[1][0] - q[0][0]) / sw, (q[1][1] - q[0][1]) / sw];
     const bx = [(q[3][0] - q[0][0]) / sh, (q[3][1] - q[0][1]) / sh];
     const det = ax[0] * bx[1] - ax[1] * bx[0] || 1e-9;
@@ -2316,6 +2341,7 @@ export function createProgramMonitor() {
 
   Object.assign(programApi, {
     canvas: frame, saveFrame, layout, settingsMenu, setZoom, setCompare,
+    toggleMulticamView: () => setMulticamView(!mcView), multicamView: () => mcView,
     toggleOpt: (k) => setOpt(k, !opts[k]),
     addGuide, clearGuides, guideDialog,
     viewState: () => ({ zoom, pan: { ...pan }, resolution, pauseRes, safe, ...opts, compare: { ...cmp }, fr: { ...fr }, rr: rr && { ...rr } }),

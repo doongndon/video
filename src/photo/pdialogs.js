@@ -423,7 +423,8 @@ export function canvasSizeDialog(P) {
   refill();
   openModal({
     title: '캔버스 크기',
-    width: '460px',
+    width: '560px',
+    side: true,
     body: [cur, h('div.ph-sub', '새로운 크기'), formRow('폭', w, wu), formRow('높이', hh), formRow('', rel.el), formRow('기준', grid),
       formRow('캔버스 확장 색상', ext, extColor),
       h('div.note', isBg ? '늘어난 곳은 배경 레이어에서 확장 색상으로 칠해지고, 다른 레이어에서는 투명합니다.' : '배경 레이어가 없어 늘어난 곳은 투명합니다.')],
@@ -842,36 +843,11 @@ const POS_PAIRS = [['x', 'y'], ['x1', 'y1'], ['x2', 'y2'], ['fx', 'fy']];
 const SCALE_FREE = new Set(['vignette', 'spherize', 'pinch', 'twirl', 'lensCorrection', 'polar', 'oil', 'depthBlur', 'skinSmoothing']);
 
 /**
- * A live-preview dialog as in Photoshop: the picture around it is not dimmed (the colours of the
- * preview are judged there) and the window can be dragged by its title bar to see what is under it.
+ * A live-preview dialog: the picture around it is not dimmed, also on phones (the colours of the
+ * preview are judged there). On a computer openModal also lets the title bar drag the window.
  */
 function movable(modal) {
   modal.parentElement.style.background = 'transparent';
-  const head = modal.querySelector('header');
-  if (!head || document.body.classList.contains('mobile')) return;
-  head.style.cursor = 'move';
-  head.style.touchAction = 'none';
-  let at = [0, 0];
-  head.addEventListener('pointerdown', (e) => {
-    if (e.button !== 0 || e.target.closest('button, input, select')) return;
-    e.preventDefault();
-    head.setPointerCapture(e.pointerId);
-    const x0 = e.clientX - at[0];
-    const y0 = e.clientY - at[1];
-    const mv = (ev) => {
-      // the title bar stays on the screen
-      at = [clamp(ev.clientX - x0, -window.innerWidth / 2, window.innerWidth / 2), clamp(ev.clientY - y0, -window.innerHeight / 2 + 40, window.innerHeight / 2)];
-      modal.style.translate = `${at[0]}px ${at[1]}px`;
-    };
-    const up = () => {
-      head.removeEventListener('pointermove', mv);
-      head.removeEventListener('pointerup', up);
-      head.removeEventListener('pointercancel', up);
-    };
-    head.addEventListener('pointermove', mv);
-    head.addEventListener('pointerup', up);
-    head.addEventListener('pointercancel', up);
-  });
 }
 
 /**
@@ -1155,10 +1131,13 @@ function liveLayerDialog(P, { title, defs, params, compute, label, slow = false,
   let placePins = null;
   const dlg = openModal({
     title,
-    width: box ? '560px' : '460px',
+    width: box ? '640px' : '580px',
     peek: true,
     compare,
-    body: [...(boxRow ? [boxRow] : []), ...paramEditors(defs, params, () => { schedule(false); placePins?.(true); }, P, { source: () => base, sampleAt, ctls }), h('div.inline', pv.el), status],
+    // Photoshop: 확인 · 취소 down the right with 미리 보기 under them
+    side: true,
+    aside: h('div.inline.ps-pv', pv.el),
+    body: [...(boxRow ? [boxRow] : []), ...paramEditors(defs, params, () => { schedule(false); placePins?.(true); }, P, { source: () => base, sampleAt, ctls }), status],
     buttons: [{ label: '취소' }, {
       label: '확인', primary: true, action: () => {
         clearTimeout(timer);
@@ -1398,8 +1377,9 @@ function maskDialog(P, kind, id) {
   }
   const dlg = openModal({
     title: `${def.name} — ${name}`,
-    width: '460px',
+    width: '580px',
     peek: true,
+    side: true,
     body: [...controls, h('div.note', `${name}에 적용합니다 (흰색 = 보임, 검정 = 숨김). 그림에 쓰려면 레이어 패널에서 레이어 썸네일을 누르세요.`)],
     buttons: [{ label: '취소' }, {
       label: '확인', primary: true, action: () => {
@@ -1591,7 +1571,8 @@ export function smartFilterDialog(P, id, params, index = null) {
   let placePins = null;
   const dlg = openModal({
     title: `고급 필터: ${filterName(id)}`,
-    width: '460px',
+    width: '580px',
+    side: true,
     body: [...paramEditors(defs, p, () => { clearTimeout(timer); timer = setTimeout(apply, 60); placePins?.(true); }, P, { source, sampleAt: (x, y) => spot(doc.flatten({ fg: P.fg, bg: P.bg }), x, y), ctls }),
       ...paramEditors([['opacity', '불투명도 (%)', 0, 100, 100]], op, () => { entry.opacity = op.opacity / 100; clearTimeout(timer); timer = setTimeout(apply, 60); }, P),
       h('div.note', '고급 개체에 넣는 필터는 원본을 바꾸지 않습니다. 레이어 패널에서 끄거나 두 번 눌러 다시 고칠 수 있습니다.')],
@@ -1701,7 +1682,8 @@ export function gradientEditor(P, gr, onApply) {
   paint();
   openModal({
     title: '그레이디언트 편집기',
-    width: '440px',
+    width: '560px',
+    side: true,
     body: [h('div.ph-sub', '사전 설정'), presets, h('div.ph-sub', '불투명도 정지점 (위) · 색 정지점 (아래) — 끌어서 옮기고, 줄을 두 번 눌러 추가'), h('div.ph-gwrap', stopsA, bar, stopsC), detail,
       h('div.inline', h('button.small', { onclick: () => { g.stops = g.stops.map((s) => ({ ...s, pos: 1 - s.pos })); g.alphas = g.alphas.map((s) => ({ ...s, pos: 1 - s.pos })); paint(); } }, '좌우 뒤집기'))],
     buttons: [{ label: '취소' }, { label: '확인', primary: true, action: () => onApply(structuredClone(g)) }],
@@ -1726,7 +1708,8 @@ export function fillLayerDialog(P, type) {
     const p = { gradient: structuredClone(GRADIENTS[0]), style: 'linear', angle: 90, scale: 100, reverse: false };
     openModal({
       title: '새 칠 레이어: 그레이디언트',
-      width: '420px',
+      width: '530px',
+      side: true,
       body: paramEditors([['gradient', '그레이디언트', null, null, null, 'gradient'], ['style', '스타일', null, null, 'linear', GRADIENT_STYLES], ['angle', '각도 (°)', -180, 180, 90], ['scale', '비율 (%)', 10, 150, 100], ['reverse', '반전', null, null, false, 'bool']], p, () => {}, P),
       buttons: [{ label: '취소' }, { label: '확인', primary: true, action: () => P.cmd.newFillLayer({ type: 'gradient', ...structuredClone(p), gradient: resolveGradient(p.gradient, P) }) }],
     });
@@ -1735,7 +1718,8 @@ export function fillLayerDialog(P, type) {
   const p = { pattern: 'checker', scale: 100 };
   openModal({
     title: '새 칠 레이어: 패턴',
-    width: '380px',
+    width: '490px',
+    side: true,
     body: paramEditors([['pattern', '패턴', null, null, 'checker', 'pattern'], ['scale', '비율 (%)', 1, 1000, 100]], p, () => {}, P),
     buttons: [{ label: '취소' }, { label: '확인', primary: true, action: () => P.cmd.newFillLayer({ type: 'pattern', ...p }) }],
   });
@@ -1767,7 +1751,8 @@ export function fillDialog(P) {
   sync();
   openModal({
     title: '칠',
-    width: '420px',
+    width: '530px',
+    side: true,
     body: [h('div.ph-sub', '내용'), formRow('내용', what, color), patRow, h('div.ph-sub', '혼합'), formRow('모드', mode), formRow('불투명도 (%)', op), formRow('', keepAlpha.el),
       h('div.note', P.doc.selection ? '선택 영역을 채웁니다.' : '선택 영역이 없어 레이어 전체를 채웁니다.')],
     buttons: [{ label: '취소' }, {
@@ -1823,7 +1808,8 @@ export function strokeDialog(P) {
   const pos = sel([['outside', '바깥쪽'], ['center', '가운데'], ['inside', '안쪽']], 'center');
   openModal({
     title: '획 (선택 영역 테두리 그리기)',
-    width: '400px',
+    width: '510px',
+    side: true,
     body: [formRow('두께 (px)', width), formRow('색', color), formRow('위치', pos)],
     buttons: [{ label: '취소' }, { label: '확인', primary: true, action: () => P.strokeSelection(+width.value, color.value, pos.value) }],
   });

@@ -11,8 +11,8 @@ import { showPanel, savePref, loadPref, panelIds, toast, promptDialog, confirmDi
  */
 export const WORKSPACES = [
   {
-    id: 'learning', name: '학습', hint: '빠른 편집 패널에서 기능을 차례로 써 보며 배웁니다 (도움말 ▸ 설명서도 함께 보세요)',
-    tabs: [['quick', 'source'], ['project']], vars: { '--tl-w': '34%', '--bl-w': '30%', '--top-h': '55%' },
+    id: 'learning', name: '학습', hint: '학습 패널의 실습을 따라 하며 배웁니다 (도움말 ▸ 설명서도 함께 보세요)',
+    tabs: [['learn', 'quick', 'source'], ['project']], vars: { '--tl-w': '34%', '--bl-w': '30%', '--top-h': '55%' },
   },
   {
     id: 'assembly', name: '어셈블리', hint: '프로젝트 패널을 크게: 촬영 소스를 고르고 소스 모니터에서 시작/끝을 표시해 타임라인에 넣습니다',
@@ -54,7 +54,7 @@ export const WORKSPACES = [
 
 const VARS = ['--tl-w', '--bl-w', '--top-h'];
 const GROUP_PANELS = [
-  ['source', 'effectControls', 'quick', 'ai', 'mixer', 'clipMixer', 'essentialSound', 'scopes', 'multicam', 'lumetri', 'essentialGraphics', 'graphics', 'captions', 'text'],
+  ['source', 'effectControls', 'quick', 'ai', 'mixer', 'clipMixer', 'essentialSound', 'scopes', 'multicam', 'lumetri', 'essentialGraphics', 'graphics', 'captions', 'text', 'learn'],
   ['project', 'effects', 'markers', 'history', 'lumetri', 'essentialGraphics', 'graphics', 'captions', 'text'],
 ];
 
@@ -83,6 +83,7 @@ export function applyWorkspace(id) {
   }
   savePref('workspace', id);
   window.dispatchEvent(new Event('resize'));
+  window.dispatchEvent(new CustomEvent('montage:workspace', { detail: id }));
 }
 
 /** 저장된 레이아웃으로 재설정 (Alt+Shift+0): the current workspace as it was defined. */
@@ -111,6 +112,7 @@ export async function saveWorkspaceAs() {
   list.push(ws);
   savePref('workspaces.custom', list);
   savePref('workspace', ws.id);
+  window.dispatchEvent(new CustomEvent('montage:workspace', { detail: ws.id }));
   toast(`"${ws.name}" 작업 영역을 저장했습니다 (창 ▸ 작업 영역)`);
 }
 
@@ -118,6 +120,7 @@ async function deleteWorkspace(ws) {
   if (!(await confirmDialog('작업 영역 삭제', `"${ws.name}" 작업 영역을 삭제할까요?`))) return;
   savePref('workspaces.custom', customWorkspaces().filter((w) => w.id !== ws.id));
   if (currentWorkspace() === ws.id) savePref('workspace', 'edit');
+  window.dispatchEvent(new CustomEvent('montage:workspace', { detail: currentWorkspace() }));
 }
 
 /** The 창 ▸ 작업 영역 submenu (Premiere's order and keys). */

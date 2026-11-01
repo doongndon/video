@@ -922,7 +922,11 @@ export function createEffectControls({ only = null } = {}) {
           if (begun) store.commit();
           begun = false;
         });
-        control.addEventListener('keydown', (e) => e.stopPropagation());
+        control.addEventListener('keydown', (e) => {
+          e.stopPropagation();
+          // Esc ends typing, as in Premiere (the shortcuts work again)
+          if (e.key === 'Escape') control.blur();
+        });
         updaters.push(() => {
           const v = findFx(c.id, fx.id)?.params[key]?.value;
           if (!begun && typeof v === 'string' && control.value !== v) control.value = v;

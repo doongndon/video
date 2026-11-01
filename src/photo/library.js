@@ -11,8 +11,9 @@ import * as IO from './io.js';
 
 const DB = 'montage-photo-library';
 const MB = 1e6;
-/** Limit for everything kept here (also the 삭제됨 documents). */
-export const LIMIT = (/Mobi|Android|iPhone|iPad/i.test(navigator.userAgent) ? 250 : 600) * MB;
+/** Limit for everything kept here (also the 삭제됨 documents); the pref photo.home.limitMB changes it. */
+const limitMB = +loadPref('photo.home.limitMB', 0) || 0;
+export const LIMIT = (limitMB > 0 ? limitMB : /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent) ? 250 : 600) * MB;
 const MAX_ITEMS = 300;
 // removed documents are deleted for good after this long (like Photoshop's deleted cloud documents)
 const TRASH_DAYS = 30;
@@ -184,7 +185,7 @@ export function put(P, doc, { force = false } = {}) {
 export function putSoon(P, docs) {
   for (const doc of docs) {
     if (!keepable(doc) || timers.has(doc) || (stamps.get(doc) === stampOf(doc) && get(doc.id))) continue;
-    const wait = Math.max(0, (lastPut.get(doc) || 0) + PUT_EVERY - Date.now());
+    const wait = Math.max(1500, (lastPut.get(doc) || 0) + PUT_EVERY - Date.now());
     timers.set(doc, setTimeout(() => {
       timers.delete(doc);
       if (P.docs.includes(doc)) put(P, doc);

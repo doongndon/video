@@ -11,8 +11,10 @@ import { uid } from '../util.js';
 
 const MB_URL = '../../vendor/mediabunny/mediabunny.min.mjs';
 const SR = 48000;
+// pictures are drawn in a 640×360 space and rendered at S times that (960×540)
 const W = 640;
 const H = 360;
+const S = 1.5;
 const FPS = 25;
 // bump when a generator changes, so cached files are made again
 const GEN_VER = 1;
@@ -344,9 +346,16 @@ const blinkAt = (t) => {
 };
 const envAt = (env, t) => env[Math.max(0, Math.min(env.length - 1, Math.round(t * 100)))] || 0;
 
-function office(w, h) {
-  const c = new OffscreenCanvas(w, h);
+/** An offscreen picture of w×h logical pixels, rendered at the output scale. */
+function off(w, h) {
+  const c = new OffscreenCanvas(Math.round(w * S), Math.round(h * S));
   const g = c.getContext('2d');
+  g.scale(S, S);
+  return [c, g];
+}
+
+function office(w, h) {
+  const [c, g] = off(w, h);
   const gr = g.createLinearGradient(0, 0, 0, h);
   gr.addColorStop(0, '#c9b9a3');
   gr.addColorStop(1, '#9c8a73');
@@ -411,8 +420,7 @@ function ridge(g, w, h, y0, amp, color, seed) {
 
 /** Wide pictures the camera pans over, drawn once. */
 function landscapePano(w, h) {
-  const c = new OffscreenCanvas(w, h);
-  const g = c.getContext('2d');
+  const [c, g] = off(w, h);
   const sky = g.createLinearGradient(0, 0, 0, h * 0.6);
   sky.addColorStop(0, '#5b8fd1');
   sky.addColorStop(1, '#f2d8b0');
@@ -445,8 +453,7 @@ function landscapePano(w, h) {
 }
 
 function cityPano(w, h) {
-  const c = new OffscreenCanvas(w, h);
-  const g = c.getContext('2d');
+  const [c, g] = off(w, h);
   const sky = g.createLinearGradient(0, 0, 0, h);
   sky.addColorStop(0, '#1b2140');
   sky.addColorStop(0.7, '#d0745a');
@@ -482,18 +489,18 @@ const PICTURES = {
   interview: (sp) => {
     const bg = office(W, H);
     return (g, t) => {
-      g.drawImage(bg, 0, 0);
+      g.drawImage(bg, 0, 0, W, H);
       person(g, W * 0.66, H * 0.2 + Math.sin(t * 1.3) * 2, 1.15, { mouth: envAt(sp.env, t), blink: blinkAt(t) });
     };
   },
   landscape: () => {
     const pano = landscapePano(W * 2, H);
-    return (g, t) => g.drawImage(pano, -W * (t / 8) * 0.9, 0);
+    return (g, t) => g.drawImage(pano, -W * (t / 8) * 0.9, 0, W * 2, H);
   },
   city: () => {
     const pano = cityPano(W * 2.2, H);
     return (g, t) => {
-      g.drawImage(pano, -W * 1.1 + W * (t / 8) * 1.0, 0);
+      g.drawImage(pano, -W * 1.1 + W * (t / 8) * 1.0, 0, W * 2.2, H);
       // traffic lights streaking along the street
       g.fillStyle = '#121019';
       g.fillRect(0, H * 0.9, W, H * 0.1);
@@ -530,13 +537,13 @@ const PICTURES = {
     g.fill();
   },
   greenscreen: () => (g, t) => {
-    g.fillStyle = '#00b140';
+    // a chroma green a little off the 울트라 키 default, so picking it with the eyedropper shows
+    g.fillStyle = '#12bf4a';
     g.fillRect(0, 0, W, H);
     person(g, W / 2, H * 0.18, 1.2, { mouth: 0.3 + 0.3 * Math.sin(t * 9), blink: blinkAt(t + 1), shirt: '#c0392b', wave: Math.sin(t * 4) * 0.5 });
   },
   face: () => {
-    const wall = new OffscreenCanvas(W, H);
-    const wg = wall.getContext('2d');
+    const [wall, wg] = off(W, H);
     const r = rng(41);
     wg.fillStyle = '#8b5a44';
     wg.fillRect(0, 0, W, H);
@@ -548,7 +555,7 @@ const PICTURES = {
       }
     }
     return (g, t) => {
-      g.drawImage(wall, 0, 0);
+      g.drawImage(wall, 0, 0, W, H);
       const u = t / 8;
       const x = W * (0.15 + 0.7 * u);
       const y = H * (0.48 + 0.12 * Math.sin(u * Math.PI * 2));
@@ -693,7 +700,7 @@ function sliceBuffer(buf, s0, s1) {
 /** Encode frames drawn by draw(g, t) and/or an AudioBuffer into a WebM Blob. */
 async function encodeWebM({ dur, draw, audio, onProgress }) {
   const MB = await import(MB_URL);
-  const videoCodec = draw ? await MB.getFirstEncodableVideoCodec(['vp8', 'vp9'], { width: W, height: H, frameRate: FPS }) : null;
+  const videoCodec = draw ? await MB.getFirstEncodableVideoCodec(['vp8', 'vp9'], { width: W * S, height: H * S, frameRate: FPS }) : null;
   if (draw && !videoCodec) throw new Error('이 브라우저에서는 연습 영상을 만들 수 없습니다 (최신 Chrome·Edge 권장)');
   const audioCodec = audio ? await MB.getFirstEncodableAudioCodec(['opus', 'vorbis', 'pcm-s16'], { numberOfChannels: 2, sampleRate: SR }) : null;
   if (!draw && !audioCodec) throw new Error('이 브라우저에서는 연습 소리를 만들 수 없습니다');
@@ -703,8 +710,8 @@ async function encodeWebM({ dur, draw, audio, onProgress }) {
   let video = null;
   if (draw) {
     canvas = document.createElement('canvas');
-    canvas.width = W;
-    canvas.height = H;
+    canvas.width = W * S;
+    canvas.height = H * S;
     g = canvas.getContext('2d', { alpha: false });
     video = new MB.CanvasSource(canvas, { codec: videoCodec, quality: MB.QUALITY_HIGH, keyFrameInterval: 1 });
     output.addVideoTrack(video, { frameRate: FPS });
@@ -717,6 +724,7 @@ async function encodeWebM({ dur, draw, audio, onProgress }) {
       const total = Math.round(dur * FPS);
       let audioPos = 0;
       for (let i = 0; i < total; i++) {
+        g.setTransform(S, 0, 0, S, 0, 0);
         draw(g, i / FPS);
         await video.add(i / FPS, 1 / FPS);
         if (sound) {

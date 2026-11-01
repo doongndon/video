@@ -107,7 +107,7 @@ export async function openProjectById(id) {
  */
 export function buildHomePage(api) {
   const search = h('input', { type: 'search', placeholder: '최근 항목 검색', 'aria-label': '최근 항목 검색' });
-  const viewBtns = [['grid', '격자 보기'], ['list', '목록 보기']].map(([v, label]) => h('button.icon.ph-view', {
+  const viewBtns = [['grid', '격자 보기'], ['list', '목록 보기']].map(([v, label]) => h('button.icon.home-view', {
     'data-view': v, title: label, 'aria-label': label, onclick: () => { savePref('home.view', v); paint(); },
   }, icon(v, 16)));
   const listBox = h('div.home-recent');
@@ -239,6 +239,7 @@ export function buildHomePage(api) {
       h('button.primary.home-new', { onclick: () => api.newProject() }, icon('fileNew', 16), '새 프로젝트'),
       h('button.home-open', { onclick: () => api.openFile() }, icon('fileOpen', 16), '프로젝트 열기'),
       h('button.home-sample', { onclick: () => api.sample() }, icon('film', 16), '샘플 프로젝트'),
+      h('button.home-back', { onclick: () => api.go('edit'), title: '열려 있는 프로젝트로 돌아가기 (Esc)' }, icon('chevLeft', 16), '편집으로 돌아가기'),
       h('div.grow'),
       storageBox,
       h('label.check.home-atstart', atStart, ' 시작할 때 홈 화면 보기')),

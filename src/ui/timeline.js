@@ -2248,7 +2248,7 @@ export function createTimeline() {
           store.setPlayhead(Math.max(store.ui.playhead, c.start));
           store.transact(`앵글 ${i + 1}(으)로 전환`, () => { const cc = store.seq.clips[c.id]; if (cc) cc.multicam = { angle: i + 1 }; });
         } })) } : null,
-        { label: '프레임 크기로 비율 조정', disabled: !visual, action: () => edit.setClipsToFrameSize(ids, '프레임 크기로 비율 조정') },
+        { label: '프레임 크기로 비율 조정', disabled: !visual, checked: !!edit.fitScaleOf(c) && !c.native, action: () => edit.setClipsToFrameSize(ids, '프레임 크기로 비율 조정') },
         { label: '프레임 크기로 설정', disabled: !visual, action: () => edit.setClipsToFrameSize(ids, '프레임 크기로 설정') },
         { label: '화면 채우기 (비율 맞춰 확대)', disabled: !(c.kind === 'video' || c.kind === 'image' || c.kind === 'nest'), action: () => scaleToFill(sel) },
         // Premiere's nesting: 클립 키프레임 표시 ▸ 시간 다시 매핑 ▸ 속도 (one submenu per effect)
@@ -2325,7 +2325,8 @@ export function createTimeline() {
         if (!m?.width || !motion) continue;
         const fit = Math.min(s.width / m.width, s.height / m.height);
         const fill = Math.max(s.width / m.width, s.height / m.height);
-        motion.params.scale.value = Math.round((fill / fit) * 1000) / 10;
+        // a clip that keeps its own pixels (프레임 크기로 설정) is sized from 100 % = native
+        motion.params.scale.value = Math.round((fill / (c.native ? 1 : fit)) * 1000) / 10;
         motion.params.scale.kf = null;
       }
     });
