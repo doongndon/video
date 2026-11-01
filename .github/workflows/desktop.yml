@@ -1,0 +1,71 @@
+# Builds the Montage desktop app for Windows (installer + portable EXE) on every push to this branch,
+# after a quick check that the app starts on Linux, and puts the EXE files on the Releases page
+# under the tag desktop-latest.
+name: Desktop app (Windows EXE)
+
+on:
+  push:
+    branches: [claude/exciting-lamport-u0leve]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: desktop-app
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    name: Start check (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Copy the web app
+        run: bash desktop/copy-app.sh
+      - name: Install Electron
+        working-directory: desktop
+        run: npm install --no-audit --no-fund
+      - name: Start the app and open both editors
+        working-directory: desktop
+        run: xvfb-run -a npx electron . --smoke-test --no-sandbox --disable-gpu
+
+  windows:
+    name: Windows EXE
+    needs: smoke
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Copy the web app
+        shell: bash
+        run: bash desktop/copy-app.sh
+      - name: Build the installer and the portable EXE
+        working-directory: desktop
+        shell: bash
+        run: |
+          npm install --no-audit --no-fund
+          npm version "1.0.${{ github.run_number }}" --no-git-tag-version
+          npx electron-builder --win --x64 --publish never
+      - name: Keep the EXE files with this run
+        uses: actions/upload-artifact@v4
+        with:
+          name: Montage-Windows
+          path: desktop/dist/*.exe
+      - name: Put them on the Releases page (desktop-latest)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete desktop-latest --yes --cleanup-tag || true
+          gh release create desktop-latest desktop/dist/*.exe \
+            --target "$GITHUB_SHA" --prerelease \
+            --title "Montage 데스크톱 앱 (Windows) 최신판" \
+            --notes "Montage-Setup-*.exe: 설치형 (시작 메뉴와 바탕 화면에 바로 가기를 만듭니다). Montage-*-portable.exe: 설치 없이 바로 실행합니다. 서명되지 않은 프로그램이라 처음 실행할 때 'Windows의 PC 보호' 창이 나오면 '추가 정보' ▸ '실행'을 누르세요. 커밋 $GITHUB_SHA 에서 만들었습니다."

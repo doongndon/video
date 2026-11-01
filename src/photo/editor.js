@@ -1751,7 +1751,7 @@ export function createPhotoEditor(root) {
       KeyB: () => (mod ? (sh && alt ? D.adjustDialog(P, 'bw') : sh ? C.autoColor() : D.adjustDialog(P, 'colorBalance')) : tool('B')),
       KeyG: () => (mod ? (alt ? C.toggleClip() : sh ? C.ungroup() : C.groupLayers()) : tool('G')),
       KeyF: () => (mod ? (sh ? C.fade() : alt ? D.lastFilterDialog(P) : D.repeatFilter(P)) : null),
-      KeyW: () => (mod ? (alt && sh ? (C.exportAs ? C.exportAs() : D.exportDialog(P)) : alt ? C.closeAll() : null) : tool('W')),
+      KeyW: () => (mod ? (alt && sh ? (C.exportAs ? C.exportAs() : D.exportDialog(P)) : alt ? C.closeAll() : sh ? null : P.closeDoc()) : tool('W')),
       KeyQ: () => (mod ? null : C.quickMask()),
       KeyH: () => (mod ? null : tool('H')),
       KeyR: () => (mod ? (alt ? C.selectAndMask() : sh ? filter('lensCorrection') : null) : tool('R')),

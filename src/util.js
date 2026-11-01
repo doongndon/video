@@ -15,19 +15,35 @@ export function snapFrame(t, fps) {
   return Math.round(t * fps) / fps;
 }
 
-/** Format seconds as SMPTE-style timecode HH:MM:SS:FF. */
+// 29.97 and 59.94 fps count in drop-frame timecode like Premiere Pro (00;01;00;02): the labels
+// skip 2 (or 4) frame numbers each minute except every tenth, so they keep up with the clock
+function dropFrames(fps) {
+  return Math.abs(fps - 29.97) < 0.01 ? 2 : Math.abs(fps - 59.94) < 0.01 ? 4 : 0;
+}
+
+/** Format seconds as SMPTE-style timecode HH:MM:SS:FF (HH;MM;SS;FF for drop-frame rates). */
 export function formatTimecode(t, fps) {
   if (!Number.isFinite(t)) return '--:--:--:--';
   const neg = t < 0;
-  const totalFrames = Math.round(Math.abs(t) * fps);
-  const f = totalFrames % Math.round(fps);
-  const totalSec = Math.floor(totalFrames / Math.round(fps));
+  const base = Math.round(fps);
+  let totalFrames = Math.round(Math.abs(t) * fps);
+  const drop = dropFrames(fps);
+  if (drop) {
+    const per10 = Math.round(fps * 600);
+    const perMin = base * 60 - drop;
+    const d = Math.floor(totalFrames / per10);
+    const m = totalFrames % per10;
+    totalFrames += 9 * drop * d + (m > drop ? drop * Math.floor((m - drop) / perMin) : 0);
+  }
+  const f = totalFrames % base;
+  const totalSec = Math.floor(totalFrames / base);
   const s = totalSec % 60;
   const m = Math.floor(totalSec / 60) % 60;
   const h = Math.floor(totalSec / 3600);
   const p = (n) => String(n).padStart(2, '0');
+  const sep = drop ? ';' : ':';
   // 100 fps and up count frames with three digits
-  return `${neg ? '-' : ''}${p(h)}:${p(m)}:${p(s)}:${String(f).padStart(fps > 99.5 ? 3 : 2, '0')}`;
+  return `${neg ? '-' : ''}${p(h)}${sep}${p(m)}${sep}${p(s)}${sep}${String(f).padStart(fps > 99.5 ? 3 : 2, '0')}`;
 }
 
 /** Parse "HH:MM:SS:FF", "MM:SS:FF", "SS:FF" or plain frame count into seconds. */
@@ -39,6 +55,11 @@ export function parseTimecode(str, fps) {
   if (parts.some((n) => Number.isNaN(n))) return null;
   while (parts.length < 4) parts.unshift(0);
   const [h, m, sec, f] = parts;
+  const drop = dropFrames(fps);
+  if (drop) {
+    const mins = h * 60 + m;
+    return (((h * 3600 + m * 60 + sec) * Math.round(fps) + f) - drop * (mins - Math.floor(mins / 10))) / fps;
+  }
   return h * 3600 + m * 60 + sec + f / fps;
 }
 
