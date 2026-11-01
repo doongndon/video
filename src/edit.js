@@ -1683,7 +1683,7 @@ export function createMulticamSequence(mediaIds, offsets, { name, place = true }
     ats[i].muted = i > 0;
   });
   let mid = null;
-  store.transact('멀티캠 소스 시퀀스 만들기', () => {
+  store.transact('멀티 카메라 소스 시퀀스 만들기', () => {
     mid = addSequenceToProject(p, mc);
   });
   if (place) {

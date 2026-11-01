@@ -138,8 +138,11 @@ export function openExportSettings() {
   });
 
   const show = (el, on) => {
-    const row = el.closest('.form-row') || el;
-    row.hidden = !on;
+    // the first update runs before the fields are placed in their rows: it hid the field itself, so
+    // once it is in a row, show or hide the row and clear the field's own flag (목표 음량 stayed hidden)
+    const row = el.closest('.form-row');
+    if (row) el.hidden = false;
+    (row || el).hidden = !on;
   };
 
   const update = () => {

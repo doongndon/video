@@ -14,7 +14,7 @@ import { extendMenu } from './menubar.js';
 import { injectStyle } from './style-inject.js';
 import {
   openColorMatteDialog, openMulticamDialog, openExtractAudioDialog, openNewSequenceDialog, openBarsToneDialog, openCountingLeaderDialog,
-  openSubclipDialog, openEditSubclipDialog,
+  openSubclipDialog, openEditSubclipDialog, importSrt,
 } from './dialogs.js';
 import { createTransparentVideo } from '../generated-media.js';
 import { noteFontUsed } from '../fonts.js';
@@ -66,7 +66,7 @@ injectStyle('pp-style', `
 
 export const projectApi = {};
 
-export function pickFiles({ accept = 'video/*,audio/*,image/*,.cube,.ttf,.otf,.woff,.woff2', multiple = true } = {}) {
+export function pickFiles({ accept = 'video/*,audio/*,image/*,.cube,.ttf,.otf,.woff,.woff2,.srt', multiple = true } = {}) {
   return new Promise((resolve) => {
     const input = h('input', { type: 'file', accept, multiple });
     input.addEventListener('change', () => resolve([...input.files]));
@@ -74,9 +74,17 @@ export function pickFiles({ accept = 'video/*,audio/*,image/*,.cube,.ttf,.otf,.w
   });
 }
 
+/** Import media files; .srt caption files go onto a caption track, as with Premiere's 파일 ▸ 가져오기. */
+export async function importAny(files) {
+  const isSrt = (f) => /\.srt$/i.test(f.name);
+  for (const f of files.filter(isSrt)) await importSrt(f);
+  const rest = files.filter((f) => !isSrt(f));
+  return rest.length ? importFiles(rest) : [];
+}
+
 export async function importDialog() {
   const files = await pickFiles();
-  if (files.length) await importFiles(files);
+  if (files.length) await importAny(files);
 }
 
 // ---------------------------------------------------------------- item details (columns)
@@ -228,7 +236,7 @@ export function createProjectPanel() {
     if (!e.dataTransfer.files.length) return;
     e.preventDefault();
     e.stopPropagation();
-    importFiles([...e.dataTransfer.files]);
+    importAny([...e.dataTransfer.files]);
   });
   list.addEventListener('pointerdown', (e) => {
     store.setFocus('project');
@@ -717,7 +725,7 @@ export function createProjectPanel() {
       m.kind === 'video' && m.posterTime != null ? { label: '포스터 프레임 지우기', action: () => store.transact('포스터 프레임 지우기', () => { const x = store.project.media[id]; if (x) delete x.posterTime; }) } : null,
       '-',
       { label: '오디오 추출 (소리만 따로 만들기)…', disabled: sub || !timed || !m.hasAudio || st !== 'ready', action: () => openExtractAudioDialog({ mediaId: id }) },
-      { label: `멀티캠 소스 시퀀스 만들기… (${videos.length}개 선택)`, disabled: videos.length < 2, action: openMulticamDialog },
+      { label: `멀티 카메라 소스 시퀀스 만들기… (${videos.length}개 선택)`, disabled: videos.length < 2, action: openMulticamDialog },
       { label: '이 클립에 맞춰 시퀀스 설정 바꾸기', disabled: !(m.width && m.kind === 'video') && m.kind !== 'image', action: () => matchSequence(m) },
       m.kind === 'color' ? { label: '색상 바꾸기…', action: () => changeColor(id) } : null,
       { label: '이름 바꾸기…', action: () => rename(id) },

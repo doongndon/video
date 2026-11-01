@@ -1462,7 +1462,8 @@ export function installBrushTools(P) {
   }
   const group = (first) => TOOL_GROUPS.find((g) => g[0] === first);
   group('eyedropper').push('sampler', 'ruler', 'note', 'count');
-  group('heal').push('healBrush', 'patch', 'contentMove', 'remove', 'redEye');
+  // Photoshop's order: spot healing, remove, healing brush, patch, content-aware move, red eye
+  group('heal').push('remove', 'healBrush', 'patch', 'contentMove', 'redEye');
   group('brush').push('colorReplace', 'mixer');
   group('eraser').push('bgEraser', 'magicEraser');
   TOOL_GROUPS.splice(TOOL_GROUPS.indexOf(group('clone')) + 1, 0, ['historyBrush']);

@@ -434,7 +434,16 @@ export function installShapes2(P) {
     return base;
   };
   const NAMES = { rect: '사각형', ellipse: '타원', triangle: '삼각형', polygon: '다각형', line: '선', custom: '모양' };
-  const layerName = (s) => (s.type === 'custom' ? P.customShapeName(s.custom) : s.type === 'polygon' && s.starRatio < 100 ? '별' : NAMES[s.type] || '모양');
+  // Photoshop numbers shape layers: 사각형 1, 타원 2… and calls custom shapes 모양 1
+  const layerName = (s) => {
+    const base = s.type === 'custom' ? '모양' : s.type === 'polygon' && s.starRatio < 100 ? '별' : NAMES[s.type] || '모양';
+    let n = 0;
+    for (const l of P.doc?.layers || []) {
+      const m = (l.name || '').startsWith(`${base} `) && /^\d+$/.test(l.name.slice(base.length + 1)) ? +l.name.slice(base.length + 1) : 0;
+      n = Math.max(n, m);
+    }
+    return `${base} ${n + 1}`;
+  };
 
   /** Put a finished shape on the canvas: a shape layer (or combined into the active one), a path or pixels. */
   const place = (s, x, y, rotation, before) => {

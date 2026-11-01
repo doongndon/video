@@ -204,6 +204,7 @@ function skyReplacement(P) {
     let drag = null;
     bd.addEventListener('pointerdown', (e) => {
       if (e.target !== bd || !made || !img) return;
+      e.preventDefault(); // no text selection in the dialog while dragging
       drag = { x: e.clientX, y: e.clientY, dx, dy };
       bd.setPointerCapture(e.pointerId);
       bd.style.cursor = 'move';
@@ -261,18 +262,48 @@ function matchColor(P) {
   const doc = P.doc;
   const l = doc?.active;
   if (!l || l.kind !== 'raster' || !l.canvas) return toast('이미지(일반) 레이어를 고르세요');
+  // 이미지 통계: the source is another open photo or this one (then a layer other than the target),
+  // the whole picture (병합) or one of its layers; 없음 leaves only 중화
   const others = P.docs.filter((d) => d !== doc);
-  if (!others.length) return toast('색을 가져올 사진을 하나 더 여세요 (다른 탭)');
-  const srcSel = h('select', others.map((d, i) => h('option', { value: i }, d.name)));
-  const lumR = h('input', { type: 'range', min: 0, max: 200, value: 100 });
-  const colR = h('input', { type: 'range', min: 0, max: 200, value: 100 });
+  const srcDocs = [...others, doc];
+  const otherSrc = others.length ? 0 : -1;
+  const srcSel = h('select', h('option', { value: -1 }, '없음'), srcDocs.map((d, i) => h('option', { value: i }, d === doc ? `${d.name} (현재 문서)` : d.name)));
+  srcSel.value = String(otherSrc);
+  const layerSel = h('select');
+  const srcLayers = () => {
+    const sd = srcDocs[+srcSel.value];
+    return sd ? sd.layers.filter((x) => x.canvas && x !== l && (x.kind === 'raster' || x.kind === 'smart')).reverse() : [];
+  };
+  const fillLayers = () => {
+    const list = srcLayers();
+    layerSel.replaceChildren(h('option', { value: -1 }, '병합'), ...list.map((x, i) => h('option', { value: i }, x.name)));
+    // in this photo, a layer other than the target is the useful source (e.g. the new sky)
+    layerSel.value = srcDocs[+srcSel.value] === doc && list.length ? '0' : '-1';
+    layerSel.disabled = !srcDocs[+srcSel.value];
+  };
+  const layerPixels = (sd, x) => {
+    const c = makeCanvas(sd.width, sd.height);
+    const g = c.getContext('2d');
+    g.drawImage(x.canvas, x.x || 0, x.y || 0);
+    if (x.mask?.canvas && x.mask.enabled !== false) {
+      g.globalCompositeOperation = 'destination-in';
+      g.drawImage(x.mask.canvas, x.mask.x || 0, x.mask.y || 0);
+    }
+    return c;
+  };
+  const neutral = h('input', { type: 'checkbox' });
+  const lumR = h('input', { type: 'range', min: 1, max: 200, value: 100 });
+  const colR = h('input', { type: 'range', min: 1, max: 200, value: 100 });
   const fadeR = h('input', { type: 'range', min: 0, max: 100, value: 0 });
   const before = doc.capture();
   const base = l.canvas;
   const tgt = ycStats(base);
   const apply = () => {
-    const sd = others[+srcSel.value];
-    const src = ycStats(sd.flatten ? sd.flatten() : base);
+    const sd = srcDocs[+srcSel.value];
+    const x = sd && srcLayers()[+layerSel.value];
+    const src = sd ? ycStats(x ? layerPixels(sd, x) : sd.flatten({ fg: P.fg, bg: P.bg })) : { mean: [...tgt.mean], sd: [...tgt.sd] };
+    // 중화: take the colour cast out (neutral chroma)
+    if (neutral.checked) src.mean = [src.mean[0], 0, 0];
     const lk = +lumR.value / 100;
     const ck = +colR.value / 100;
     const fk = 1 - +fadeR.value / 100;
@@ -302,12 +333,17 @@ function matchColor(P) {
     });
     P.redraw();
   };
-  for (const e of [srcSel, lumR, colR, fadeR]) e.addEventListener('change', apply);
+  srcSel.addEventListener('change', fillLayers);
+  fillLayers();
+  for (const e of [srcSel, layerSel, lumR, colR, fadeR, neutral]) e.addEventListener('change', apply);
   let ok = false;
   openModal({
     title: '색상 일치',
-    width: '400px',
-    body: [formRow('색을 가져올 사진', srcSel), formRow('광도', lumR), formRow('색 강도', colR), formRow('희미하게', fadeR), h('div.note', '다른 탭에 연 사진의 밝기와 색감을 지금 레이어에 옮겨요. 영화 장면처럼 맞추고 싶을 때 좋아요.')],
+    width: '420px',
+    body: [h('div.note', `대상: ${doc.name} (${l.name})`),
+      h('h4', '이미지 옵션'), formRow('광도', lumR), formRow('색상 강도', colR), formRow('페이드', fadeR), formRow('중화', neutral),
+      h('h4', '이미지 통계'), formRow('소스', srcSel), formRow('레이어', layerSel),
+      h('div.note', '소스 사진(다른 탭이나 이 사진의 다른 레이어, 예: 새 하늘)의 밝기와 색감을 지금 레이어에 옮겨요. 합성한 물체를 배경에 맞출 때 좋아요.')],
     buttons: [{ label: '취소' }, { label: '확인', primary: true, action: () => { ok = true; P.commit('색상 일치', before); } }],
     onClose: () => {
       if (ok) return;

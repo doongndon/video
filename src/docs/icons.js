@@ -48,9 +48,16 @@ export const ICONS = {
   right: '<path d="M6 3.5 10.5 8 6 12.5"/>',
   arrow: '<path d="M3 8h10M9 4l4 4-4 4"/>',
   film: '<rect x="2" y="2.5" width="12" height="11" rx="1.5"/><path d="M4.5 2.5v11M11.5 2.5v11M2 5.5h2.5M2 8h2.5M2 10.5h2.5M11.5 5.5H14M11.5 8H14M11.5 10.5H14"/>',
+  graph: '<path d="M2.5 2.5v11h11"/><path d="M4.5 11C7 11 7.5 5 10 5h3"/><circle cx="4.5" cy="11" r=".9"/><circle cx="10" cy="5" r=".9"/>',
+  marker: '<path d="M4.5 2.5h7v8L8 13.5l-3.5-3z"/>',
+  monitor: '<rect x="2" y="3" width="12" height="8.5" rx="1"/><path d="M6 14h4M8 11.5V14"/><path d="M7 5.5v3.5l3-1.75z"/>',
+  meter: '<path d="M3 13.5V9M6.3 13.5V5M9.7 13.5V7M13 13.5V3"/>',
   lock: '<rect x="3" y="7" width="10" height="7" rx="1.5"/><path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2"/>',
   check: '<path d="M3 8.5 6.5 12 13 4.5"/>',
   open: '<path d="M9 2.5h4.5V7M13.5 2.5 7.5 8.5M11.5 9.5v4h-9v-9h4"/>',
+  channels: '<circle cx="8" cy="5.8" r="3.3"/><circle cx="5.6" cy="10" r="3.3"/><circle cx="10.4" cy="10" r="3.3"/>',
+  shapes: '<rect x="2" y="2.5" width="5.5" height="5.5" rx=".8"/><circle cx="11.2" cy="5.2" r="2.8"/><path d="M8 9l3.5 5h-7z"/>',
+  camera: '<path d="M2 5.5h3l1.2-2h3.6l1.2 2h3v7.5H2z"/><circle cx="8" cy="9" r="2.4"/>',
 };
 
 export function svg(name, size = 16) {

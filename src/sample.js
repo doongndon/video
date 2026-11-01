@@ -67,13 +67,6 @@ export async function loadSampleProject() {
   const dusk = createSyntheticMedia('color', { name: '노을', color: '#5b2a4a' });
   const adj = createSyntheticMedia('adjustment', { name: '조정 레이어' });
 
-  let musicId = null;
-  try {
-    [musicId] = await importFiles([await synthMusic()]);
-  } catch (err) {
-    console.warn('sample music unavailable', err);
-  }
-
   edit.placeMedia(blue, { mode: 'overwrite', start: 0, vTrackId: v1.id, inPoint: 0, outPoint: 6 });
   edit.placeMedia(dusk, { mode: 'overwrite', start: 6, vTrackId: v1.id, inPoint: 0, outPoint: 6 });
   const bgA = Object.values(s.clips).find((c) => c.mediaId === blue);
@@ -138,7 +131,15 @@ export async function loadSampleProject() {
     if (g) g.params.amount.value = 18;
   });
 
-  if (musicId && mediaStatus(musicId) === 'ready') {
+  // the music is synthesized and analyzed last: everything above runs without awaiting, so an
+  // undo pressed while the sample loads cannot remove clips the steps above still look up
+  let musicId = null;
+  try {
+    [musicId] = await importFiles([await synthMusic()]);
+  } catch (err) {
+    console.warn('sample music unavailable', err);
+  }
+  if (musicId && mediaStatus(musicId) === 'ready' && store.project.media[musicId]) {
     edit.placeMedia(musicId, { mode: 'overwrite', start: 0, aTrackId: a1.id, video: false });
     const music = Object.values(store.seq.clips).find((c) => c.mediaId === musicId);
     if (music) edit.applyTransition(music.id, 'out', 'constantPower', 2);

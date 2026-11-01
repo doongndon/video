@@ -1336,7 +1336,7 @@ export function createMulticamPanel() {
       cells = [];
       info.textContent = '';
       grid.style.gridTemplateColumns = '1fr';
-      grid.replaceChildren(h('div.empty-hint', '재생헤드 아래에 멀티캠 클립이 없습니다.\n\n프로젝트 패널에서 같은 장면을 찍은 영상 여러 개를 선택한 뒤\n클립 ▸ 멀티캠 소스 시퀀스 만들기를 누르세요.'));
+      grid.replaceChildren(h('div.empty-hint', '재생헤드 아래에 멀티캠 클립이 없습니다.\n\n프로젝트 패널에서 같은 장면을 찍은 영상 여러 개를 선택한 뒤\n클립 ▸ 멀티 카메라 소스 시퀀스 만들기를 누르세요.'));
       return;
     }
     build(mc);

@@ -36,10 +36,11 @@ export function openSpeedDialog(ids) {
   const speed = h('input', { type: 'number', value: Math.round(c.speed * 10000) / 100, min: 1, max: 10000, step: 1, style: { width: '96px' }, disabled: !timed });
   const dur = h('input', { type: 'text', value: formatTimecode(c.duration, s.fps), style: { width: '120px' } });
   const link = check(true, '속도와 길이를 함께 바꾸기', { disabled: !timed });
-  const reverse = check(!!c.reverse, '거꾸로 재생 (역재생)', { disabled: !timed });
-  const pitch = check(c.maintainPitch !== false, '음 높이 유지 (빠르게/느리게 해도 목소리 톤 그대로)', { disabled: !timed });
+  // Premiere's 클립 속도/지속 시간 names: 역방향 속도 / 오디오 피치 유지 / 잔물결 편집, 후행 클립 이동
+  const reverse = check(!!c.reverse, '역방향 속도 (거꾸로 재생)', { disabled: !timed });
+  const pitch = check(c.maintainPitch !== false, '오디오 피치 유지 (빠르게/느리게 해도 목소리 톤 그대로)', { disabled: !timed });
   const hold = check(!!c.hold, '프레임 고정 (시작 프레임에서 멈춘 화면)', { disabled: c.kind !== 'video' });
-  const ripple = check(false, '뒤에 있는 클립도 함께 밀거나 당기기 (잔물결 편집)');
+  const ripple = check(false, '잔물결 편집, 후행 클립 이동');
   const srcLen = c.duration * c.speed;
   speed.addEventListener('input', () => {
     const v = parseFloat(speed.value) / 100;
@@ -56,7 +57,7 @@ export function openSpeedDialog(ids) {
     },
   }, `${p}%`)));
   openModal({
-    title: `클립 속도 / 지속 시간${clips.length > 1 ? ` (${clips.length}개)` : ''}`,
+    title: `클립 속도/지속 시간${clips.length > 1 ? ` (${clips.length}개)` : ''}`,
     body: [
       formRow('속도 (%)', speed, quick),
       formRow('', link.el),
@@ -777,19 +778,20 @@ export function openMulticamDialog() {
   const notReady = ids.filter((id) => mediaStatus(id) !== 'ready');
   const list = h('ol.angle-list', ids.map((id) => h('li', p.media[id].name)));
   const sync = select([
-    ['audio', '소리 파형으로 맞추기 (박수 소리 등)'],
-    ['in', '각 영상의 시작(In) 표시 지점 맞추기'],
+    // Premiere's 동기화 지점: 오디오 / 시작 표시 (plus the file start)
+    ['audio', '오디오 (소리 파형으로 맞추기 · 박수 소리 등)'],
+    ['in', '시작 표시 (각 영상의 In 지점 맞추기)'],
     ['start', '파일 시작 지점 맞추기'],
   ], 'audio');
   const name = h('input', { type: 'text', value: `멀티캠 ${Object.values(p.sequences).filter((x) => x.multicam).length + 1}`, style: { width: '100%' } });
   const place = check(true, '현재 시퀀스의 재생헤드 위치에 넣기');
   const status = note(notReady.length ? `아직 준비되지 않은 파일이 ${notReady.length}개 있습니다.` : '');
   openModal({
-    title: '멀티캠 소스 시퀀스 만들기',
+    title: '멀티 카메라 소스 시퀀스 만들기',
     width: '540px',
     body: [
       formRow('앵글 순서', list),
-      formRow('동기화 방법', sync),
+      formRow('동기화 지점', sync),
       formRow('이름', name),
       formRow('', place.el),
       status,

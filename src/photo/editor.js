@@ -1990,7 +1990,7 @@ function installCommands(P) {
     if (!b) return toast('복사할 픽셀이 없습니다');
     const out = makeCanvas(b.w, b.h);
     out.getContext('2d').drawImage(c, -b.x, -b.y);
-    P.clipboard = { canvas: out, x: b.x, y: b.y };
+    P.clipboard = { canvas: out, x: b.x, y: b.y, docId: doc.id };
     out.toBlob((blob) => {
       try {
         navigator.clipboard?.write?.([new ClipboardItem({ 'image/png': blob })]).catch(() => {});
@@ -2003,14 +2003,19 @@ function installCommands(P) {
     C.copy();
     C.clear('잘라내기');
   };
-  C.paste = () => {
+  // like Photoshop: Paste centres the picture on the selection, or on the canvas when it came from
+  // another photo; from the same photo (and with Paste in Place) it lands where it was copied
+  C.paste = (inPlace = false) => {
     if (!need()) return;
     const cb = P.clipboard;
     if (!cb) return toast('붙여 넣을 내용이 없습니다 (다른 프로그램의 이미지는 Ctrl+V로 바로 붙여 넣을 수 있습니다)');
+    const doc = P.doc;
+    const sb = !inPlace && doc.selection ? SEL.alphaBounds(doc.selection.canvas) : null;
+    const centre = sb ? [sb.x + sb.w / 2, sb.y + sb.h / 2] : !inPlace && cb.docId && cb.docId !== doc.id ? [doc.width / 2, doc.height / 2] : null;
     P.run('붙여넣기', () => {
       const l = newLayer('raster', { name: P.doc.nextLayerName(), canvas: cloneCanvas(cb.canvas) });
-      l.x = cb.x;
-      l.y = cb.y;
+      l.x = centre ? Math.round(centre[0] - cb.canvas.width / 2) : cb.x;
+      l.y = centre ? Math.round(centre[1] - cb.canvas.height / 2) : cb.y;
       P.addLayer(l);
       P.doc.selection = null;
     });

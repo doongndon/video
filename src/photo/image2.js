@@ -528,7 +528,7 @@ export function installImage2(P) {
   };
 
   // ---- Edit ▸ Paste Special
-  C.pasteInPlace = () => C.paste();
+  C.pasteInPlace = () => C.paste(true);
   const pasteMasked = (outside) => {
     if (!need()) return;
     const doc = P.doc;
@@ -838,7 +838,11 @@ export function installImage2(P) {
   C.saveForWeb = () => {
     if (!need()) return;
     const doc = P.doc;
-    const fmt = sel([['gif', 'GIF'], ['png8', 'PNG-8 (256색, 작음)'], ['png24', 'PNG-24 (모든 색)'], ['jpg', 'JPG']], 'png8');
+    // a document with timeline frames saves as an animated GIF (Photoshop's way to export one)
+    const anim = (doc.frames?.length || 0) > 1 && !!P.exportAnimatedGif;
+    const fmt = sel([['gif', 'GIF'], ['png8', 'PNG-8 (256색, 작음)'], ['png24', 'PNG-24 (모든 색)'], ['jpg', 'JPG']], anim ? 'gif' : 'png8');
+    const loopSel = sel([['1', '한 번'], ['3', '3번'], ['0', '계속']], String([1, 3, 0].includes(doc.frameLoop) ? doc.frameLoop : 0));
+    const rowLoop = formRow('반복 옵션', loopSel);
     const palette = sel(PALETTES, 'adaptive');
     const colors = num(128, 2, 256);
     const dither = sel(DITHERS, 'diffusion');
@@ -872,6 +876,7 @@ export function installImage2(P) {
       }
       const q = quantize(read(c), { palette: palette.value, colors: +colors.value, dither: dither.value, transparency: transp.checked });
       const out = toCanvas(indexedToImage(q));
+      if (fmt.value === 'gif' && anim) return { blob: await P.exportAnimatedGif({ scale: k, loop: +loopSel.value }), canvas: out, ext: 'gif' };
       const blob = fmt.value === 'gif' ? gifBlob(q) : await png8Blob(q);
       return { blob, canvas: out, ext: fmt.value === 'gif' ? 'gif' : 'png' };
     };
@@ -880,22 +885,24 @@ export function installImage2(P) {
       const indexed = fmt.value === 'gif' || fmt.value === 'png8';
       for (const r of rowsIdx) r.hidden = !indexed;
       rowQ.hidden = fmt.value !== 'jpg';
+      rowLoop.hidden = !(anim && fmt.value === 'gif');
       info.textContent = '계산 중…';
       const r = await build();
       if (my !== token) return;
+      const animNote = anim && fmt.value === 'gif' ? ` · 애니메이션 프레임 ${doc.frames.length}개` : '';
       const k = Math.min(1, 320 / r.canvas.width, 200 / r.canvas.height);
       prev.width = Math.max(1, Math.round(r.canvas.width * k));
       prev.height = Math.max(1, Math.round(r.canvas.height * k));
       const pg = prev.getContext('2d');
       pg.imageSmoothingEnabled = k < 1;
       pg.drawImage(r.canvas, 0, 0, prev.width, prev.height);
-      info.textContent = `${r.canvas.width} × ${r.canvas.height} px · 약 ${(r.blob.size / 1024).toFixed(1)} KB`;
+      info.textContent = `${r.canvas.width} × ${r.canvas.height} px · 약 ${(r.blob.size / 1024).toFixed(1)} KB${animNote}`;
     };
-    for (const e of [fmt, palette, colors, dither, transp, quality, scale]) e.addEventListener('change', refresh);
+    for (const e of [fmt, palette, colors, dither, transp, quality, scale, loopSel]) e.addEventListener('change', refresh);
     openModal({
       title: '웹용으로 저장',
       width: '460px',
-      body: [formRow('형식', fmt), ...rowsIdx, rowQ, formRow('크기 (%)', scale), prev, info],
+      body: [formRow('형식', fmt), ...rowsIdx, rowQ, rowLoop, formRow('크기 (%)', scale), prev, info],
       buttons: [{ label: '취소' }, {
         label: '저장', primary: true, action: async () => {
           const r = await build();
@@ -1110,7 +1117,7 @@ function extendMenus(P, C, proof) {
     if (i >= 0) {
       items.splice(i + 1, 0, { label: '특수 붙여넣기', disabled: no(), submenu: [
         { label: '제자리에 붙여넣기', key: 'Ctrl+Shift+V', action: () => C.pasteInPlace() },
-        { label: '안쪽에 붙여넣기 (선택 영역 마스크)', disabled: !P.doc?.selection, action: () => C.pasteInto() },
+        { label: '안쪽에 붙여넣기 (선택 영역 마스크)', key: 'Ctrl+Alt+Shift+V', disabled: !P.doc?.selection, action: () => C.pasteInto() },
         { label: '바깥쪽에 붙여넣기', disabled: !P.doc?.selection, action: () => C.pasteOutside() },
       ] });
     }

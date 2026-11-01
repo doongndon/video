@@ -110,10 +110,20 @@ export function installLayerCommands(P) {
   // ---------------------------------------------------------------- create
 
   C.newLayer = (name) => need() && P.run('새 레이어', () => P.addLayer(newLayer('raster', { name: name || doc().nextLayerName(), canvas: makeCanvas(doc().width, doc().height) })));
+  // Photoshop numbers fill and adjustment layers: 색상 칠 1, 레벨 1, 레벨 2…
+  const numbered = (base) => {
+    let n = 0;
+    const re = new RegExp(`^${base.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')} (\\d+)$`);
+    for (const x of doc().layers) {
+      const m = re.exec(x.name || '');
+      if (m) n = Math.max(n, +m[1]);
+    }
+    return `${base} ${n + 1}`;
+  };
   C.newAdjustLayer = (type) => {
     if (!need()) return;
     P.run(`새 조정 레이어: ${ADJUSTMENTS[type].name}`, () => {
-      const l = newLayer('adjust', { name: ADJUSTMENTS[type].name, adjust: { type, params: defaultParams(type) } });
+      const l = newLayer('adjust', { name: numbered(ADJUSTMENTS[type].name), adjust: { type, params: defaultParams(type) } });
       doc().addMask(l, 'white', !!doc().selection);
       P.addLayer(l);
     });
@@ -122,7 +132,7 @@ export function installLayerCommands(P) {
   C.newFillLayer = (fill, name) => {
     if (!need()) return;
     P.run('새 칠 레이어', () => {
-      const l = newLayer('fill', { name: name || { solid: '색상 칠', gradient: '그레이디언트 칠', pattern: '패턴 칠' }[fill.type], fill });
+      const l = newLayer('fill', { name: name || numbered({ solid: '색상 칠', gradient: '그레이디언트 칠', pattern: '패턴 칠' }[fill.type]), fill });
       doc().addMask(l, 'white', !!doc().selection);
       P.addLayer(l);
       doc().selection = null;
@@ -385,8 +395,12 @@ export function installLayerCommands(P) {
     P.run('보이는 레이어 병합', () => {
       const flat = d.flatten({ fg: P.fg, bg: P.bg });
       const keep = d.layers.filter((l) => !d.shown(l) && !l.parent);
-      const l = newLayer('raster', { name: '병합됨', canvas: flat });
-      d.layers = [...keep.flatMap((k) => [...d.descendants(k.id), k]), l];
+      // Photoshop merges into the Background when it is visible (it stays at the bottom)
+      const bgl = d.layers[0];
+      const intoBg = bgl && bgl.name === '배경' && !bgl.parent && d.shown(bgl);
+      const l = newLayer('raster', { name: intoBg ? '배경' : '병합됨', canvas: flat });
+      const rest = keep.flatMap((k) => [...d.descendants(k.id), k]);
+      d.layers = intoBg ? [l, ...rest] : [...rest, l];
       d.activeId = l.id;
       d.selectedIds = [l.id];
     });
@@ -891,13 +905,20 @@ export function installLayerCommands(P) {
     const sub = f.name.toLowerCase().endsWith('.psd') ? await IO.openFile(f) : null;
     const c = sub ? sub.flatten() : await IO.canvasFromFile(f);
     P.run('내용 바꾸기', () => {
-      const sx = l.smart.w / c.width;
-      const sy = l.smart.h / c.height;
-      const k = Math.min(sx, sy);
+      // Photoshop keeps the layer's transform (its scale and rotation) and the old content's centre
+      const k = 1;
       const [a, b, cc, d, e, ff] = l.smart.m;
-      l.smart = { ...l.smart, w: c.width, h: c.height, m: [a * k, b * k, cc * k, d * k, e, ff] };
+      const ow = l.smart.w / 2;
+      const oh = l.smart.h / 2;
+      const nw = (c.width * k) / 2;
+      const nh = (c.height * k) / 2;
+      const ex = e + a * ow + cc * oh - (a * nw + cc * nh);
+      const fy = ff + b * ow + d * oh - (b * nw + d * nh);
+      l.smart = { ...l.smart, w: c.width, h: c.height, m: [a * k, b * k, cc * k, d * k, ex, fy] };
       l.smartSrc = c;
       l.smartDoc = sub;
+      // Photoshop renames the layer after the new file
+      l.name = f.name.replace(/\.[^.]+$/, '') || l.name;
       doc().touch(l);
     });
     return undefined;

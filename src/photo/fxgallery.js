@@ -561,7 +561,7 @@ add('mosaicTiles', '텍스처', '모자이크 타일', [['tile', '타일 크기'
     }
   });
 });
-add('patchwork', '텍스처', '패치워크', [['size', '사각형 크기', 0, 10, 4], ['relief', '부조', 0, 25, 8]], (c, p) => {
+add('patchwork', '텍스처', '이어붙이기', [['size', '사각형 크기', 0, 10, 4], ['relief', '부조', 0, 25, 8]], (c, p) => {
   const s = px(c);
   const sz = p.size * 2 + 4;
   const gw = Math.ceil(s.w / sz);
@@ -579,7 +579,7 @@ add('patchwork', '텍스처', '패치워크', [['size', '사각형 크기', 0, 1
     for (let ch = 0; ch < 3; ch++) o[ch] = means[k + ch] * (1 + sh[i] * 0.8);
   });
 });
-add('stainedGlass', '텍스처', '스테인드 글라스', [['cell', '셀 크기', 2, 50, 10], ['border', '테두리 두께', 1, 20, 4], ['light', '빛 강도', 0, 10, 3]], (c, p, { fg }) => {
+add('stainedGlass', '텍스처', '채색 유리', [['cell', '셀 크기', 2, 50, 10], ['border', '테두리 두께', 1, 20, 4], ['light', '빛 강도', 0, 10, 3]], (c, p, { fg }) => {
   const s = px(c);
   const v = voronoi(s.w, s.h, p.cell * 2.2, 151, 0.9);
   const means = regionMeans(s.img, v.id, v.n);

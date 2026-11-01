@@ -445,8 +445,10 @@ export const TEMPLATES = [
       return [
         { kind: 'color', start: 0, color: '#000000', transIn: 0.5 },
         // rolls from just below the frame until it has left the top (linear, like a credit roll)
+        // marked as a 롤 so 기본 그래픽 ▸ 반응형 디자인 - 시간 ▸ 롤 shows it checked and can retime it
         { kind: 'text', start: 0, text, name: '엔딩 크레딧', motion: { posY: store.seq.height + hh / 2 },
-          kf: { 'motion.posY': [[0, store.seq.height + hh / 2, 'linear'], [D, -hh / 2]] } },
+          kf: { 'motion.posY': [[0, store.seq.height + hh / 2, 'linear'], [D, -hh / 2]] },
+          roll: { dir: 'roll', rest: store.seq.height / 2 } },
       ];
     },
   },
@@ -506,6 +508,12 @@ export function buildTemplate(tpl, s, t0, { trackFor, add }) {
       if (!fx?.params[key]) continue;
       fx.params[key].kf = keys.map(([kt, v, ease = 'linear']) => ({ t: Math.min(kt, end - start), v, ease }));
       fx.params[key].value = keys[keys.length - 1][1];
+    }
+    if (layer.roll) {
+      // the same marks features.applyRollCrawl leaves: the clip's roll options and the resting position
+      const p = findEffect(c, 'motion')?.params[layer.roll.dir === 'roll' ? 'posY' : 'posX'];
+      if (p) p.restValue = layer.roll.rest;
+      c.roll = { dir: layer.roll.dir, startOff: true, endOff: true, preRoll: 0, postRoll: 0, easeIn: 0, easeOut: 0 };
     }
     if (layer.transIn) c.transIn = { type: 'crossDissolve', duration: Math.min(layer.transIn, end - start) };
     if (layer.transOut) c.transOut = { type: 'crossDissolve', duration: Math.min(layer.transOut, end - start) };
