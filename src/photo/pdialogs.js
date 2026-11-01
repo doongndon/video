@@ -1029,10 +1029,13 @@ function liveLayerDialog(P, { title, defs, params, compute, label, slow = false,
       const [dx, dy] = [Math.cos(a), Math.sin(a)];
       const [cx, cy] = pinAt(pins.at(-1));
       const L = Math.hypot(base.width, H) * 2;
+      // drawn over the picture area only
+      const r = document.querySelector('.ph-stage')?.getBoundingClientRect() || { left: 0, top: 0, width: innerWidth, height: innerHeight };
+      Object.assign(band.style, { left: `${r.left}px`, top: `${r.top}px`, width: `${r.width}px`, height: `${r.height}px` });
       const line = (d) => {
         const p1 = toClient(cx - dy * d - dx * L, cy + dx * d - dy * L);
         const p2 = toClient(cx - dy * d + dx * L, cy + dx * d + dy * L);
-        return `M${p1[0]},${p1[1]}L${p2[0]},${p2[1]}`;
+        return `M${p1[0] - r.left},${p1[1] - r.top}L${p2[0] - r.left},${p2[1] - r.top}`;
       };
       const f = (params.focus / 100) * (H / 2);
       const fd = f + (params.fade / 100) * H;
