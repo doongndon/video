@@ -1298,6 +1298,14 @@ export function createTimeline() {
           toggleKeyBezier(c.id, hit.band, hit.kfIndex);
           return;
         }
+        // 시간 다시 매핑 ▸ 속도: dragging a speed keyframe splits it into a gradual ramp (Premiere);
+        // Alt+drag moves the whole keyframe
+        const kfs = hit.band.p.kf;
+        const stepKey = hit.kfIndex > 0 && kfInterp(kfs[hit.kfIndex - 1]) === 'hold' && kfs[hit.kfIndex - 1].v !== k.v;
+        if (hit.band.fx.type === 'timeRemap' && !e.altKey && stepKey) {
+          beginRampKey(x, y, hit);
+          return;
+        }
         beginBandKey(x, y, hit);
         return;
       }
@@ -1550,6 +1558,49 @@ export function createTimeline() {
       type: 'bandKey', clipId: hit.clip.id, fxId: hit.band.fx.id, key: hit.band.key, idx: hit.kfIndex, x0: x, y0: y, t0: k.t, moved: false,
       band: { db: hit.band.db, log: hit.band.log, lo: hit.band.lo, hi: hit.band.hi, def: hit.band.def }, bodyY: hit.geo.bodyY, bodyH: hit.geo.bodyH, tipX: x, tipY: y,
     };
+  }
+
+  /** Drag one half of a speed keyframe (시간 다시 매핑) sideways: the speed change becomes a ramp. */
+  function beginRampKey(x, y, hit) {
+    store.begin('속도 램프 전환');
+    drag = {
+      type: 'rampKey', clipId: hit.clip.id, fxId: hit.band.fx.id, key: hit.band.key, idx: hit.kfIndex, x0: x, y0: y, moved: false,
+      st: edit.remapRetimeState(hit.clip.id), tipX: x, tipY: y,
+    };
+  }
+
+  /**
+   * Raw: rebuild the speed keys of a ramp drag. The step at key idx (speed vb before, va after) becomes
+   * a straight ramp over d seconds after it (right half dragged) or before it (left half); the keys
+   * after the ramp move so they keep their source frames, and the clip and the clips after it follow.
+   */
+  function applyRampKey(d, dt) {
+    const st = d.st;
+    const r = bandParam(d.clipId, d.fxId, d.key);
+    if (!st?.kf || !r) return null;
+    const old = st.kf;
+    const i = d.idx;
+    const k = old[i];
+    const vb = old[i - 1]?.v;
+    const va = k?.v;
+    if (vb == null || va == null) return null;
+    const f = 1 / fps();
+    const right = dt >= 0;
+    const room = right ? (i + 1 < old.length ? old[i + 1].t : st.dur) - k.t - f : k.t - old[i - 1].t - f;
+    const len = clamp(snapFrame(Math.abs(dt), fps()), 0, Math.max(0, room));
+    const shift = va > 0.01 ? ((right ? 1 : -1) * len * (va - vb)) / (2 * va) : 0;
+    const a = { ...k, t: right ? k.t : k.t - len, v: vb, ease: 'linear', interp: 'linear' };
+    delete a.inSpeed; delete a.outSpeed; delete a.inInf; delete a.outInf;
+    const b = { ...k, t: right ? k.t + len : k.t };
+    const kf = len > 0 ? [...old.slice(0, i), a, b] : [...old.slice(0, i), { ...k }];
+    for (const o of old.slice(i + 1)) kf.push({ ...o, t: o.t + shift });
+    r.p.kf = kf;
+    const dur = Math.max(f, snapFrame(st.dur + (len > 0 ? shift : 0), fps()));
+    const s = store.seq;
+    for (const id of st.mates) if (s.clips[id]) s.clips[id].duration = dur;
+    edit.rawSyncLinkedRemap(d.clipId);
+    for (const o of st.after) if (s.clips[o.id]) s.clips[o.id].start = o.start + (dur - st.dur);
+    return { len, vb, va };
   }
 
   /** Drag the rubber band: a still value changes; with keyframes, the two keys around the pointer move. */
@@ -1818,6 +1869,16 @@ export function createTimeline() {
         autoScroll(x);
         break;
       }
+      case 'rampKey': {
+        if (!drag.moved && Math.abs(x - drag.x0) < 3) break;
+        drag.moved = true;
+        const res = applyRampKey(drag, (x - drag.x0) / view.pps);
+        if (res) drag.tooltip = `속도 ${Math.round(res.vb)}% → ${Math.round(res.va)}% · 전환 ${formatTimecode(res.len, fps())}`;
+        drag.tipX = x;
+        drag.tipY = y;
+        store.changed();
+        break;
+      }
       case 'bandKey': {
         const r = bandParam(drag.clipId, drag.fxId, drag.key);
         const k = r?.p.kf?.[drag.idx];
@@ -1944,6 +2005,7 @@ export function createTimeline() {
       case 'rate':
       case 'band':
       case 'bandKey':
+      case 'rampKey':
       case 'marker':
         // trims and slips preview the edit frame in the Program monitor; put the playhead back
         if (d.restorePlayhead != null) store.setPlayhead(d.restorePlayhead);
