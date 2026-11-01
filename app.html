@@ -13,6 +13,29 @@
   <link rel="stylesheet" href="styles/photo.css" />
   <link rel="stylesheet" href="styles/photo-dialogs.css" />
   <link rel="stylesheet" href="styles/docs.css" />
+  <script>
+    // Right after a new version is published, the browser can mix new script files with old ones it
+    // still keeps ("does not provide an export named …"). Fetch every script and style this page
+    // loaded again from the server, then reload (at most once a minute, so it can never loop).
+    window.montageRefreshCache = async function () {
+      try {
+        if (Date.now() - (+sessionStorage.getItem('montage.cacheRefresh') || 0) < 60000) return false;
+        sessionStorage.setItem('montage.cacheRefresh', String(Date.now()));
+      } catch (e) { return false; }
+      var urls = performance.getEntriesByType('resource').map(function (r) { return r.name; })
+        .filter(function (u) { return u.indexOf(location.origin) === 0 && /\.(m?js|css)(\?|#|$)/.test(u); });
+      urls.push(location.href);
+      await Promise.all(urls.map(function (u) { return fetch(u, { cache: 'reload' }).catch(function () {}); }));
+      location.reload();
+      return true;
+    };
+    window.montageStaleModule = function (msg) {
+      return /does not provide an export named|Failed to fetch dynamically imported module|Importing a module script failed|error loading dynamically imported module/i.test(String(msg || ''));
+    };
+    window.addEventListener('error', function (e) {
+      if (window.montageStaleModule(e.message)) window.montageRefreshCache();
+    });
+  </script>
 </head>
 <body>
   <div id="app">

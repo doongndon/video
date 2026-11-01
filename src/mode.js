@@ -44,7 +44,12 @@ export async function setMode(mode) {
       P = await photoEditor();
     } catch (err) {
       console.error(err);
-      toast(`사진 편집기를 불러오지 못했습니다: ${err.message || err}`);
+      // a mix of new and old cached files after an update: fetch them again and reload once
+      if (window.montageStaleModule?.(err.message) && await window.montageRefreshCache?.()) {
+        toast('새 버전을 불러오는 중입니다…');
+        return;
+      }
+      toast(`사진 편집기를 불러오지 못했습니다: ${err.message || err}. 잠시 뒤 새로고침(Ctrl+Shift+R)해 보세요.`);
       return;
     }
     // the photo editor loads once, which takes a moment: a later choice (영상) wins
