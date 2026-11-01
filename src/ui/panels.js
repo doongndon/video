@@ -256,7 +256,7 @@ export function createEffectsPanel() {
   function presetProps(p) {
     const name = h('input', { type: 'text', value: p.name, style: { width: '100%' } });
     const desc = h('textarea', { rows: 3, style: { width: '100%' } }, p.desc || '');
-    desc.addEventListener('keydown', (ev) => ev.stopPropagation());
+    desc.addEventListener('keydown', (ev) => { if (ev.key !== 'Escape' && ev.key !== 'Tab') ev.stopPropagation(); });
     openModal({
       title: '사전 설정 속성',
       body: h('div', h('div.form-row', h('label', '이름'), name), h('div.form-row', h('label', '설명'), desc)),

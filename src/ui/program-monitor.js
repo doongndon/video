@@ -1729,6 +1729,9 @@ export function createProgramMonitor() {
     store.setFocus('program');
     if (viewPointerDown(e, px, py)) return;
     if (store.ui.tool === 'type') {
+      // keep the press from moving the keyboard focus back to the page: what the person types next
+      // goes into the new title's text box, not to the editor's single-key shortcuts
+      e.preventDefault();
       const [sx, sy] = screenToSeq(px, py);
       edit.addTextClip({ x: sx, y: sy });
       store.setTool('select');

@@ -113,7 +113,7 @@ export function installCore2(P, ui) {
     let tops;
     let box;
     if (what.canvas) {
-      const l = newLayer('raster', { name: `레이어 ${dst.layers.length + 1}`, canvas: what.canvas, x: what.x, y: what.y });
+      const l = newLayer('raster', { name: dst.nextLayerName(), canvas: what.canvas, x: what.x, y: what.y });
       tops = [[l]];
       box = { x: what.x, y: what.y, w: what.canvas.width, h: what.canvas.height };
     } else {
@@ -565,7 +565,7 @@ export function installCore2(P, ui) {
         g.fillStyle = o.neutral;
         g.fillRect(0, 0, c.width, c.height);
       }
-      const l = newLayer('raster', { name: o.name || `레이어 ${d.layers.length + 1}`, canvas: c, blend: o.blend || 'normal', opacity: clamp((o.opacity ?? 100) / 100, 0, 1), color: o.color || 'none' });
+      const l = newLayer('raster', { name: o.name || d.nextLayerName(), canvas: c, blend: o.blend || 'normal', opacity: clamp((o.opacity ?? 100) / 100, 0, 1), color: o.color || 'none' });
       P.addLayer(l);
       // Use Previous Layer to Create Clipping Mask
       if (o.clip && d.index(l.id) > 0) l.clip = true;
@@ -576,7 +576,7 @@ export function installCore2(P, ui) {
   C.newLayerDialog = () => {
     const d = P.doc;
     if (!d) return toast('먼저 문서를 열거나 새로 만드세요');
-    const name = h('input', { type: 'text', value: `레이어 ${d.layers.length + 1}`, style: { width: '240px' } });
+    const name = h('input', { type: 'text', value: d.nextLayerName(), style: { width: '240px' } });
     const clip = h('input', { type: 'checkbox' });
     const color = h('select', LAYER_COLORS.map(([id, n]) => h('option', { value: id }, n)));
     const mode = blendSelect(false);
@@ -864,6 +864,19 @@ export function arrangeMenus(P) {
     const nw = items.find((x) => starts(x, '새로 만들기') && Array.isArray(x.submenu));
     const it = nw?.submenu.find((x) => x && x.label === '레이어');
     if (it && P.cmd.newLayerDialog) Object.assign(it, { label: '레이어…', action: () => P.cmd.newLayerDialog() });
+    // Photoshop keeps Create Layer and Hide All Effects in Layer ▸ Layer Style, the Background
+    // conversions in Layer ▸ New and Reverse in Layer ▸ Arrange
+    const sub = (label) => items.find((x) => x && x.label === label && Array.isArray(x.submenu));
+    const ls = sub('레이어 스타일');
+    if (ls) {
+      const fx = take(items, ['레이어 스타일로 레이어 만들기', '모든 효과 숨기기', '모든 효과 보이기']);
+      const at = ls.submenu.findIndex((x) => starts(x, '효과 비율 조정'));
+      ls.submenu.splice(at >= 0 ? at : ls.submenu.length, 0, ...fx.map((x) => (starts(x, '레이어 스타일로') ? { ...x, label: '레이어 만들기' } : x)));
+    }
+    if (nw) nw.submenu.splice(1, 0, ...take(items, ['배경에서 레이어', '레이어에서 배경으로']));
+    const ar = sub('정돈');
+    const rev = ar ? take(items, ['레이어 순서 반전']) : [];
+    if (rev.length) ar.submenu.push('-', ...rev.map((x) => ({ ...x, label: '반전 (고른 레이어)' })));
     return items;
   });
   wrap('창', (items) => {

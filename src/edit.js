@@ -1780,12 +1780,13 @@ export function autoDuck(musicIds, intervals, { duckDb = -15, fadeIn = 0.3, fade
 /** Duplicate the active sequence at a new frame size; visual clips are re-scaled to fill (centre crop). */
 export function autoReframe(width, height, name) {
   const srcId = seq().id;
-  const newId = duplicateSequence(srcId);
-  if (!newId) return null;
-  store.openSequence(newId);
-  updateSequenceSettings({ width, height, fps: seq().fps, name: name || `${seq().name} (${width}×${height})` });
-  const s = seq();
-  store.transact('자동 리프레임', () => {
+  // one undo step: the copy, its new frame size and the reframed clips
+  return store.transact('자동 리프레임', () => {
+    const newId = duplicateSequence(srcId);
+    if (!newId) return null;
+    store.openSequence(newId);
+    updateSequenceSettings({ width, height, fps: seq().fps, name: name || `${seq().name} (${width}×${height})` });
+    const s = seq();
     for (const c of Object.values(s.clips)) {
       const motion = c.effects.find((e) => e.type === 'motion');
       if (!motion) continue;
@@ -1797,8 +1798,8 @@ export function autoReframe(width, height, name) {
         scaleParamValues(motion.params.scale, factor);
       }
     }
+    return newId;
   });
-  return newId;
 }
 
 // ---------------------------------------------------------------- groups

@@ -45,6 +45,9 @@ class Store extends Emitter {
       return r;
     }
     const before = this.snapshot();
+    // a transact inside another one belongs to the outer step (no history entry of its own)
+    const nested = !!this.inTransact;
+    this.inTransact = true;
     let result;
     try {
       result = fn();
@@ -53,8 +56,10 @@ class Store extends Emitter {
       this.pruneSelection();
       this.changed('restore');
       throw err;
+    } finally {
+      this.inTransact = nested;
     }
-    this.pushUndo(label, before);
+    if (!nested) this.pushUndo(label, before);
     this.changed();
     return result;
   }

@@ -762,8 +762,9 @@ export function installBrushTools(P) {
         if (a > 0) {
           const cv = [r / a, g2 / a, b / a];
           pick = wet * Math.min(1, a / 16 / 255);
-          // an emptier brush lays down more of what it picked up
-          const k = Math.min(1, mixK * pick + (1 - res.amt) * pick);
+          // the canvas share of the new paint: 혼합 while the brush is full; an emptier brush lays down
+          // more of what it picked up, and a clean (empty) one only moves the paint already there
+          const k = pick > 0 ? Math.min(1, 1 - res.amt * (1 - mixK * pick)) : 0;
           col = res.c.map((v, i) => v + (cv[i] - v) * k);
           // the brush gets dirty with what it touches
           res.c = res.c.map((v, i) => v + (cv[i] - v) * pick * 0.12);

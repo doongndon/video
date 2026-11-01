@@ -785,18 +785,33 @@ export function createTimeline() {
       lo = a;
       hi = b > a ? b : a + 1;
     }
-    return { fx: ch.fx, key: ch.key, p, def: ch.def, db, lo, hi, label: `${ch.fxName} ▸ ${ch.def.label}` };
+    // 시간 다시 매핑 ▸ 속도 as in Premiere: 100 % across the middle of the clip, 10 % at the bottom
+    // and 1000 % at the top (a logarithmic scale, so slow and fast stretches are equally easy to drag)
+    const log = ch.fx.type === 'timeRemap' && ch.key === 'speed';
+    if (log) {
+      lo = 10;
+      hi = 1000;
+    }
+    return { fx: ch.fx, key: ch.key, p, def: ch.def, db, log, lo, hi, label: `${ch.fxName} ▸ ${ch.def.label}` };
   }
+
+  const bandNorm = (b, v) => (b.log
+    ? (Math.log10(Math.max(v, 1e-3)) - Math.log10(b.lo)) / (Math.log10(b.hi) - Math.log10(b.lo))
+    : (v - b.lo) / (b.hi - b.lo));
 
   function bandY(b, v, bodyY, bodyH) {
     if (b.db) return volumeY(v, bodyY, bodyH);
-    const n = 1 - clamp((v - b.lo) / (b.hi - b.lo), 0, 1);
+    const n = 1 - clamp(bandNorm(b, v), 0, 1);
     return bodyY + 2 + n * (bodyH - 4);
   }
 
   function bandValue(b, y, bodyY, bodyH) {
     if (b.db) return clamp(Math.round(dbFromY(y, bodyY, bodyH) * 10) / 10, -60, 15);
     const n = clamp((y - bodyY - 2) / Math.max(1, bodyH - 4), 0, 1);
+    if (b.log) {
+      const lg = Math.log10(b.hi) - n * (Math.log10(b.hi) - Math.log10(b.lo));
+      return clamp(Math.round(10 ** lg), b.def.min ?? -Infinity, b.def.max ?? Infinity);
+    }
     const v = b.hi - n * (b.hi - b.lo);
     const step = b.hi - b.lo > 60 ? 1 : 0.1;
     return clamp(Math.round(v / step) * step, b.def.min ?? -Infinity, b.def.max ?? Infinity);
@@ -1533,7 +1548,7 @@ export function createTimeline() {
     store.begin('키프레임 이동');
     drag = {
       type: 'bandKey', clipId: hit.clip.id, fxId: hit.band.fx.id, key: hit.band.key, idx: hit.kfIndex, x0: x, y0: y, t0: k.t, moved: false,
-      band: { db: hit.band.db, lo: hit.band.lo, hi: hit.band.hi, def: hit.band.def }, bodyY: hit.geo.bodyY, bodyH: hit.geo.bodyH, tipX: x, tipY: y,
+      band: { db: hit.band.db, log: hit.band.log, lo: hit.band.lo, hi: hit.band.hi, def: hit.band.def }, bodyY: hit.geo.bodyY, bodyH: hit.geo.bodyH, tipX: x, tipY: y,
     };
   }
 
@@ -1553,7 +1568,7 @@ export function createTimeline() {
     drag = {
       type: 'band', clipId: hit.clip.id, fxId: hit.band.fx.id, key: hit.band.key, y0: y, x0: x, tl, pair,
       base: pair ? pair.map((i) => p.kf[i].v) : [p.value], v0: evalParam(p, tl),
-      band: { db: hit.band.db, lo: hit.band.lo, hi: hit.band.hi, def: hit.band.def }, bodyY: hit.geo.bodyY, bodyH: hit.geo.bodyH, tipX: x, tipY: y,
+      band: { db: hit.band.db, log: hit.band.log, lo: hit.band.lo, hi: hit.band.hi, def: hit.band.def }, bodyY: hit.geo.bodyY, bodyH: hit.geo.bodyH, tipX: x, tipY: y,
       // a speed band (시간 다시 매핑) keeps the content and changes the clip's length, as in Premiere
       remap: hit.band.fx.type === 'timeRemap' ? edit.remapRetimeState(hit.clip.id) : null,
     };
@@ -2174,10 +2189,18 @@ export function createTimeline() {
         { label: '프레임 크기로 비율 조정', disabled: !visual, action: () => edit.setClipsToFrameSize(ids, '프레임 크기로 비율 조정') },
         { label: '프레임 크기로 설정', disabled: !visual, action: () => edit.setClipsToFrameSize(ids, '프레임 크기로 설정') },
         { label: '화면 채우기 (비율 맞춰 확대)', disabled: !(c.kind === 'video' || c.kind === 'image' || c.kind === 'nest'), action: () => scaleToFill(sel) },
-        { label: '클립 키프레임 표시', submenu: () => bandChoices(c).map((ch) => ({
-          label: `${ch.fxName} ▸ ${ch.def.label}`, checked: !!curBand && curBand.fx.id === ch.fx.id && curBand.key === ch.key,
-          action: () => showBandFor(c.id, ch.fx.type, ch.key),
-        })) },
+        // Premiere's nesting: 클립 키프레임 표시 ▸ 시간 다시 매핑 ▸ 속도 (one submenu per effect)
+        { label: '클립 키프레임 표시', submenu: () => {
+          const groups = new Map();
+          for (const ch of bandChoices(c)) {
+            if (!groups.has(ch.fx.id)) groups.set(ch.fx.id, { name: ch.fxName, items: [] });
+            groups.get(ch.fx.id).items.push({
+              label: ch.def.label, checked: !!curBand && curBand.fx.id === ch.fx.id && curBand.key === ch.key,
+              action: () => showBandFor(c.id, ch.fx.type, ch.key),
+            });
+          }
+          return [...groups.values()].map((g) => ({ label: g.name, checked: g.items.some((it) => it.checked) || undefined, submenu: () => g.items }));
+        } },
         { label: '모션 초기화', disabled: !c.effects.some((fx) => fx.type === 'motion'), action: () => { for (const id of ids) { const fx = store.seq.clips[id]?.effects.find((f) => f.type === 'motion'); if (fx) edit.resetEffect(id, fx.id); } } },
         '-',
         // 프로젝트에서 표시 (Premiere's Reveal in Project): a clip from a subclip shows the subclip

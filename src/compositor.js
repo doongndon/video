@@ -966,10 +966,14 @@ export class Compositor {
       switch (type) {
         case 'mosaic': {
           const bx = clamp(Math.round(v.blocks), 1, w);
-          const by = Math.max(1, Math.round((bx * h) / w));
+          // 세로 블록 0 (older projects): square blocks
+          const by = v.vblocks >= 1 ? clamp(Math.round(v.vblocks), 1, h) : Math.max(1, Math.round((bx * h) / w));
           const sctx = sizeCanvas(this.small, bx, by);
-          sctx.imageSmoothingEnabled = true;
+          sctx.clearRect(0, 0, bx, by);
+          // 선명한 색상: each block takes the colour of its centre pixel (nearest sampling)
+          sctx.imageSmoothingEnabled = !v.sharp;
           sctx.drawImage(cur, 0, 0, bx, by);
+          sctx.imageSmoothingEnabled = true;
           cctx.clearRect(0, 0, w, h);
           cctx.imageSmoothingEnabled = false;
           cctx.drawImage(this.small, 0, 0, w, h);

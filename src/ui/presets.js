@@ -243,7 +243,7 @@ export function openSavePresetDialog(clip, effects) {
     return h('label', { style: { display: 'flex', gap: '8px', alignItems: 'center', margin: '3px 0' }, title: hint }, r, h('span', label), h('span.note', `— ${hint}`));
   });
   const desc = h('textarea', { rows: 2, style: { width: '100%' }, placeholder: '이 사전 설정에 대한 메모 (선택)' });
-  desc.addEventListener('keydown', (e) => e.stopPropagation());
+  desc.addEventListener('keydown', (e) => { if (e.key !== 'Escape' && e.key !== 'Tab') e.stopPropagation(); });
   openModal({
     title: '사전 설정 저장',
     width: '460px',

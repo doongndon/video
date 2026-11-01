@@ -267,10 +267,10 @@ export function initMobile() {
     listSheet('더보기', [
       { label: '마커', action: () => openSheet('markers') },
       { label: '작업 내역 (실행 취소 목록)', action: () => openSheet('history') },
-      { label: '오디오 믹서', action: () => openSheet('mixer') },
-      { label: '멀티캠', action: () => openSheet('multicam') },
+      { label: '오디오 트랙 믹서', action: () => openSheet('mixer') },
+      { label: '멀티 카메라', action: () => openSheet('multicam') },
       { label: '소스 모니터', action: () => openSheet('source') },
-      { label: '스코프', action: () => openSheet('scopes') },
+      { label: 'Lumetri 범위', action: () => openSheet('scopes') },
       '-',
       { label: '화면 비율 바꾸기', action: () => openQuick('frame') },
       { label: '시퀀스 설정…', action: () => c.sequenceSettings() },

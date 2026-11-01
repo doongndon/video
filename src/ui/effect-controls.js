@@ -2860,8 +2860,16 @@ export function createEffectControls({ only = null } = {}) {
     showPanel('effectControls');
     rebuild();
     if (opts?.focusText && textArea) {
-      textArea.focus();
-      textArea.select();
+      const ta = textArea;
+      ta.focus();
+      ta.select();
+      // a press that created the title (문자 도구) may still move the focus when it ends: take it back
+      setTimeout(() => {
+        if (ta.isConnected && document.activeElement !== ta) {
+          ta.focus();
+          ta.select();
+        }
+      }, 0);
     }
   });
   rebuild();

@@ -961,8 +961,10 @@ export function installBrushPanels(P) {
   window.addEventListener('keydown', (e) => {
     if (e.key !== 'F5' || e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
     if (!document.body.classList.contains('photo-mode') || document.querySelector('.modal-backdrop')) return;
+    // the editor's own key map (Window ▸ Brush Settings) may already have answered this key
+    if (e.defaultPrevented) return;
     e.preventDefault();
-    e.stopPropagation();
+    e.stopImmediatePropagation();
     P.showPanel('brushSettings');
   }, true);
 

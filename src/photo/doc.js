@@ -155,6 +155,16 @@ export class PhotoDoc {
     return this.layers.findIndex((l) => l.id === id);
   }
 
+  /** Photoshop's name for a new layer: 레이어 1, 레이어 2… (one more than the highest number in use). */
+  nextLayerName() {
+    let n = 0;
+    for (const l of this.layers) {
+      const m = /^레이어 (\d+)$/.exec(l.name || '');
+      if (m) n = Math.max(n, +m[1]);
+    }
+    return `레이어 ${n + 1}`;
+  }
+
   /**
    * Mark a change. `rect` (doc coords) says only that area changed, so the next redraw can redo just
    * that part; changes without one (or a bare rev++) redraw everything.

@@ -19,7 +19,7 @@ import { insertTemplate } from './templates.js';
 import { toggleVoiceover } from './recorder.js';
 import {
   openSpeedDialog, openSequenceSettings, openExportDialog, openShortcutsDialog, openAboutDialog,
-  openColorMatteDialog, importSrt, exportSrt, openMarkerDialog, openSceneDetectDialog,
+  openColorMatteDialog, importSrt, exportSrt, openSceneDetectDialog,
   openDuckingDialog, openReframeDialog, openMulticamDialog, openAutoCaptionDialog, openGuideDialog, openExtractAudioDialog,
   openSilenceCutDialog, openBeatDialog, openSlideshowDialog,
 } from './ui/dialogs.js';
@@ -102,7 +102,7 @@ async function openProject() {
     setAutosave(true);
     saveProjectNow();
     const offline = store.project.mediaOrder.filter((id) => mediaStatus(id) === 'offline').length;
-    toast(offline ? `프로젝트를 열었습니다. 미디어 ${offline}개가 오프라인입니다 — 파일 ▸ 미디어 다시 연결로 연결하세요.` : '프로젝트를 열었습니다');
+    toast(offline ? `프로젝트를 열었습니다. 미디어 ${offline}개가 오프라인입니다 — 파일 ▸ 미디어 연결로 연결하세요.` : '프로젝트를 열었습니다');
   } catch (err) {
     setAutosave(true);
     toast(`프로젝트를 열 수 없습니다: ${err.message}`);
@@ -239,6 +239,7 @@ export const commands = {
     const s = sel();
     if (!s.length) return;
     if (s.some((c) => c.linkId)) edit.unlinkClips(selIds());
+    else if (s.length < 2) toast('연결할 클립을 두 개 이상 선택하세요 (예: 영상 클립과 오디오 클립)');
     else edit.linkClips(selIds());
   },
   frameHold: () => {
@@ -275,12 +276,16 @@ export const commands = {
   setToFrameSize: () => {
     const ids = sel().filter((c) => c.effects.some((e) => e.type === 'motion')).map((c) => c.id);
     if (!ids.length) return toast('영상·이미지 클립을 선택하세요');
+    const depth = store.undoStack.length;
     edit.setClipsToFrameSize(ids, '프레임 크기로 설정');
+    if (store.undoStack.length === depth) toast('선택한 클립은 이미 프레임 크기에 맞춰져 있습니다');
   },
   scaleToFrameSize: () => {
     const ids = sel().filter((c) => c.effects.some((e) => e.type === 'motion')).map((c) => c.id);
     if (!ids.length) return toast('영상·이미지 클립을 선택하세요');
+    const depth = store.undoStack.length;
     edit.setClipsToFrameSize(ids, '프레임 크기로 비율 조정');
+    if (store.undoStack.length === depth) toast('선택한 클립은 이미 프레임 크기에 맞춰져 있습니다');
   },
   reverse: () => edit.toggleReverse(selIds()),
   insert: () => sourceApi.insert?.(),

@@ -303,7 +303,7 @@ function videoMenus() {
         label: '내보내기',
         submenu: () => base([
           { label: '미디어…', key: `${mod}M`, action: c.exportMedia },
-          { label: '프레임', key: `${mod}Shift+E`, hint: 'PNG', action: c.exportFrame },
+          { label: '프레임…', key: `${mod}Shift+E`, hint: 'PNG · JPEG', action: c.exportFrame },
           { label: '캡션 (.srt)', action: c.exportCaptions },
           '-',
           { label: '프레임을 사진 편집에서 열기', action: c.frameToPhoto },
@@ -385,7 +385,7 @@ function videoMenus() {
       } : null,
       '-',
       { label: '활성화', key: 'Shift+E', checked: has() && sel()[0].enabled !== false, disabled: !has(), action: c.toggleEnable },
-      { label: linkedSel() ? '연결 해제' : '연결', key: `${mod}L`, disabled: !has(), action: c.linkToggle },
+      { label: linkedSel() ? '연결 해제' : '연결', key: `${mod}L`, disabled: !has() || (!linkedSel() && sel().length < 2), action: c.linkToggle },
       c.group ? { label: '그룹', key: `${mod}G`, disabled: sel().length < 2, action: c.group } : null,
       c.ungroup ? { label: '그룹 해제', key: `${mod}Shift+G`, disabled: !sel().some((x) => x.groupId), action: c.ungroup } : null,
       { label: '중첩…', disabled: !has(), action: c.nest },
@@ -508,7 +508,8 @@ function videoMenus() {
           { label: '레이아웃 초기화', hint: '새로 고침', action: c.resetLayout },
         ],
       },
-      { label: '프레임 최대화', key: 'Shift+`', action: () => toggleMaximize({ active: true }) },
+      // the phone layout shows one panel at a time (no frames to maximize)
+      { label: '프레임 최대화', key: 'Shift+`', disabled: document.body.classList.contains('mobile'), action: () => toggleMaximize({ active: true }) },
       '-',
       // Premiere's order (its English names, alphabetically); panels other modules add follow
       panelIds().includes('clipMixer') ? panel('clipMixer', '오디오 클립 믹서') : null,

@@ -76,13 +76,15 @@ export function applyAudioGain(clipIds, mode, value, peaks = new Map()) {
       if (!Number.isFinite(max)) return;
       const d = value - max;
       for (const c of clips) {
+        const was = c.gain || 0;
         c.gain = clampGain((c.gain || 0) + d);
         if (!c.gain) delete c.gain;
-        n++;
+        if ((c.gain || 0) !== was) n++;
       }
       return;
     }
     for (const c of clips) {
+      const was = c.gain || 0;
       if (mode === 'set') c.gain = clampGain(value);
       else if (mode === 'adjust') c.gain = clampGain((c.gain || 0) + value);
       else if (mode === 'normalizeAll') {
@@ -91,7 +93,8 @@ export function applyAudioGain(clipIds, mode, value, peaks = new Map()) {
         c.gain = clampGain(value - 20 * Math.log10(p));
       }
       if (!c.gain) delete c.gain;
-      n++;
+      // only clips whose gain really changed count (the dialog reports them)
+      if ((c.gain || 0) !== was) n++;
     }
   });
   return n;

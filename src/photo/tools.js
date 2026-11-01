@@ -2091,7 +2091,7 @@ export const TOOLS = [
     id: 'eyedropper', name: '스포이드', key: 'I', icon: 'eyedropper', group: 'crop', cursor: 'crosshair',
     options: [
       ['sample', '샘플 크기', 'select', null, null, 1, [[1, '포인트 샘플'], [3, '3 x 3 평균'], [5, '5 x 5 평균'], [11, '11 x 11 평균'], [31, '31 x 31 평균'], [51, '51 x 51 평균'], [101, '101 x 101 평균']]],
-      ['layers', '샘플', 'select', null, null, 'all', [['current', '현재 레이어'], ['below', '현재 및 아래'], ['all', '모든 레이어']]],
+      ['layers', '샘플', 'select', null, null, 'all', [['current', '현재 레이어'], ['below', '현재 이하'], ['all', '모든 레이어']]],
       ['ring', '샘플링 링 표시', 'bool', null, null, true],
     ],
     // Alt+click picks the background colour; dragging keeps picking the same one
@@ -2761,7 +2761,7 @@ function viewButtons(E) {
   };
   return [
     h('button.small', { onclick: () => E.doc && E.setZoom(1), title: '실제 픽셀 크기로 보기' }, '100%'),
-    h('button.small', { onclick: () => E.doc && E.fit(), title: '화면에 맞게 보기 (Ctrl+0)' }, '화면 맞추기'),
+    h('button.small', { onclick: () => E.doc && E.fit(true), title: '화면에 맞게 보기 (Ctrl+0)' }, '화면 맞추기'),
     h('button.small', { onclick: fill, title: '화면을 가득 채우게 보기' }, '화면 채우기'),
   ];
 }

@@ -87,6 +87,7 @@ const P = {
   export: '<path d="M8 10.5v-8M5 5.5l3-3 3 3M2.5 11v2.5h11V11"/>',
   film: '<rect x="2" y="3" width="12" height="10" rx="1"/><path d="M5 3v10M11 3v10M2 6h3M2 10h3M11 6h3M11 10h3"/>',
   audio: '<path d="M2.5 6v4h2.5l3.5 3V3L5 6zM11 5.5a3.5 3.5 0 0 1 0 5M12.8 3.8a6 6 0 0 1 0 8.4"/>',
+  music: '<path d="M6 12V3.5l7-1.5V10.5"/><circle cx="4.3" cy="12" r="1.7"/><circle cx="11.3" cy="10.5" r="1.7"/>',
   text: '<path d="M3 3.5h10M8 3.5v9M6 12.5h4"/>',
   image: '<rect x="2" y="3" width="12" height="10" rx="1"/><circle cx="6" cy="6.5" r="1.3"/><path d="M2.5 12l3.5-3.5 2.5 2.5 2-2 3 3"/>',
   sequence: '<rect x="2" y="3" width="12" height="10" rx="1"/><path d="M2 7h12M5.5 7v6M10 3v4"/>',

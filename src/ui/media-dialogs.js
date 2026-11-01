@@ -3,7 +3,7 @@
 import { store } from '../store.js';
 import { h } from '../util.js';
 import { openModal, formRow, toast } from './common.js';
-import { setInterpretation, importFiles, mediaStatus, guessKind } from '../media.js';
+import { setInterpretation, importFiles, mediaStatus, guessKind, removeMedia } from '../media.js';
 import { pickFiles } from './project-panel.js';
 
 const COMMON_RATES = [23.976, 24, 25, 29.97, 30, 48, 50, 59.94, 60, 120];
@@ -23,7 +23,7 @@ export function openInterpretFootageDialog(ids) {
   const rates = h('datalist', { id: 'interp-rates' }, COMMON_RATES.map((r) => h('option', { value: r })));
   fps.addEventListener('focus', () => { assume.checked = true; });
   fps.addEventListener('input', () => { assume.checked = true; update(); });
-  fps.addEventListener('keydown', (e) => e.stopPropagation());
+  fps.addEventListener('keydown', (e) => { if (e.key !== 'Escape' && e.key !== 'Tab') e.stopPropagation(); });
   const info = h('div.note');
   const update = () => {
     const f = parseFloat(fps.value);
@@ -92,6 +92,10 @@ export async function replaceFootage(id) {
   const fresh = store.project.media[nid];
   if (old.kind === 'video' && fresh.kind !== 'video' && Object.values(store.project.sequences).some((s) => Object.values(s.clips).some((c) => c.mediaId === id && c.kind === 'video'))) {
     toast('영상 클립이 쓰는 항목은 영상 파일로만 바꿀 수 있습니다');
+    // nothing is replaced: take the file back out (no step is left in the history)
+    removeMedia([nid]);
+    store.squashSince(mark, '미디어 교체');
+    return;
   }
   store.transact('미디어 교체', () => {
     const p = store.project;
@@ -108,9 +112,11 @@ export async function replaceFootage(id) {
         c.mediaId = nid;
       }
     }
-    // subclips of the old file follow it to the new one
-    for (const sm of Object.values(p.media)) if (sm.subclipOf === id) sm.subclipOf = nid;
-    const stillUsed = Object.values(p.sequences).some((s) => Object.values(s.clips).some((c) => c.mediaId === id));
+    // subclips of the old file follow it to the new one (a file of another kind keeps them on the old one)
+    const subsStay = m.kind !== prev.kind;
+    if (!subsStay) for (const sm of Object.values(p.media)) if (sm.subclipOf === id) sm.subclipOf = nid;
+    const stillUsed = Object.values(p.sequences).some((s) => Object.values(s.clips).some((c) => c.mediaId === id))
+      || (subsStay && Object.values(p.media).some((sm) => sm.subclipOf === id));
     p.mediaOrder = p.mediaOrder.filter((x) => x !== nid);
     const at = p.mediaOrder.indexOf(id);
     if (stillUsed) p.mediaOrder.splice(at + 1, 0, nid);

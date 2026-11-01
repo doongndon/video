@@ -19,13 +19,20 @@ const SKIES = [
 
 const lumOf = (r, g, b) => 0.299 * r + 0.587 * g + 0.114 * b;
 
-function skyCanvas(id, w, hh, img) {
+function skyCanvas(id, w, hh, img, { scale = 100, flip = false, dx = 0, dy = 0 } = {}) {
   const c = makeCanvas(w, hh);
   const g = c.getContext('2d');
+  if (flip) {
+    g.translate(w, 0);
+    g.scale(-1, 1);
+  }
   if (img) {
-    // cover the canvas, keep the top of the photo
-    const k = Math.max(w / img.width, hh / img.height);
-    g.drawImage(img, (w - img.width * k) / 2, 0, img.width * k, img.height * k);
+    // cover the canvas, keep the top of the photo; 비율 enlarges it and dragging moves it (it keeps
+    // covering the canvas)
+    const k = Math.max(w / img.width, hh / img.height) * Math.max(1, scale / 100);
+    const iw = img.width * k;
+    const ih = img.height * k;
+    g.drawImage(img, clamp((w - iw) / 2 + (flip ? -dx : dx), w - iw, 0), clamp(dy, hh - ih, 0), iw, ih);
     return c;
   }
   const sky = SKIES.find((s) => s[0] === id) || SKIES[0];
@@ -83,15 +90,42 @@ function skyReplacement(P) {
     let img = null;
     const pick = h('select', SKIES.map(([v, t]) => h('option', { value: v }, t)), h('option', { value: 'file' }, '사진 파일…'));
     const file = h('input', { type: 'file', accept: 'image/*', hidden: true });
-    const shift = h('input', { type: 'range', min: -40, max: 40, value: 0 });
-    const fade = h('input', { type: 'range', min: 0, max: 100, value: 30 });
-    const bright = h('input', { type: 'range', min: -100, max: 100, value: 0 });
-    const light = h('input', { type: 'range', min: 0, max: 100, value: 35 });
+    const range = (min, max, value) => h('input', { type: 'range', min, max, value });
+    const shift = range(-100, 100, 0);
+    const fade = range(0, 100, 30);
+    const bright = range(-100, 100, 0);
+    const temp = range(-100, 100, 0);
+    const scale = range(100, 400, 100);
+    const flip = h('input', { type: 'checkbox' });
+    const mode = h('select', [['soft light', '소프트 라이트'], ['multiply', '곱하기'], ['screen', '스크린']].map(([v, t]) => h('option', { value: v }, t)));
+    const light = range(0, 100, 35);
+    const colorAdj = range(0, 100, 0);
+    // where the sky photo sits (dragging on the picture moves it, like the sky move tool)
+    let dx = 0;
+    let dy = 0;
     const before = doc.capture();
     let made = null;
+    const makeSky = () => {
+      const sky = skyCanvas(pick.value, W, H, img, { scale: +scale.value, flip: flip.checked, dx, dy });
+      const kb = 1 + +bright.value / 150;
+      const t = +temp.value;
+      if (kb !== 1 || t) {
+        // 명도 and 온도 (warmer: more red, less blue)
+        const g = sky.getContext('2d');
+        const im = g.getImageData(0, 0, W, H);
+        const d = im.data;
+        for (let i = 0; i < d.length; i += 4) {
+          d[i] = d[i] * kb + t * 0.4;
+          d[i + 1] = d[i + 1] * kb + t * 0.08;
+          d[i + 2] = d[i + 2] * kb - t * 0.4;
+        }
+        g.putImageData(im, 0, 0);
+      }
+      return sky;
+    };
     const build = () => {
       if (made) doc.restore(before);
-      const shiftPx = Math.round((+shift.value / 100) * Math.min(W, H) * 0.1);
+      const shiftPx = Math.round((+shift.value / 100) * Math.min(W, H) * 0.04);
       let m = mask0;
       if (shiftPx) {
         const tmpDoc = { width: W, height: H, selection: { canvas: m } };
@@ -102,20 +136,14 @@ function skyReplacement(P) {
       const mg = mk.getContext('2d');
       if (feather > 0.5) mg.filter = `blur(${feather}px)`;
       mg.drawImage(m, 0, 0);
-      const sky = skyCanvas(pick.value, W, H, img);
-      if (+bright.value) {
-        const t = makeCanvas(W, H);
-        const tg = t.getContext('2d');
-        tg.filter = `brightness(${100 + +bright.value / 1.5}%)`;
-        tg.drawImage(sky, 0, 0);
-        sky.getContext('2d').drawImage(t, 0, 0);
-      }
+      const sky = makeSky();
       const skyL = newLayer('raster', { name: '하늘', canvas: sky });
       // the layer mask is white where the sky shows (mask alpha = amount shown)
       skyL.mask = { canvas: mk, x: 0, y: 0, enabled: true, linked: true };
-      const amt = +light.value / 100;
       const layers = [skyL];
-      if (amt > 0) {
+      // the foreground (everything but the sky) gets the sky's colour: 전경 조명 in the 조명 모드,
+      // and 색상 조정 in the colour mode
+      const foreground = (name, blend, opacity) => {
         const tint = makeCanvas(W, H);
         const tg = tint.getContext('2d');
         tg.fillStyle = avgColor(sky);
@@ -125,8 +153,10 @@ function skyReplacement(P) {
         ig.fillRect(0, 0, W, H);
         ig.globalCompositeOperation = 'destination-out';
         ig.drawImage(mk, 0, 0);
-        layers.push(newLayer('raster', { name: '전경 조명', canvas: tint, blend: 'soft light', opacity: amt, mask: { canvas: inv, x: 0, y: 0, enabled: true, linked: true } }));
-      }
+        layers.push(newLayer('raster', { name, canvas: tint, blend, opacity, mask: { canvas: inv, x: 0, y: 0, enabled: true, linked: true } }));
+      };
+      if (+light.value > 0) foreground('전경 조명', mode.value, +light.value / 100);
+      if (+colorAdj.value > 0) foreground('하늘 대체 색상 조정', 'color', (+colorAdj.value / 100) * 0.6);
       // like Photoshop: a "Sky Replacement Group" on top of the layer stack (never inside an open
       // group); a pass-through group, so the lighting layer still blends with the photo below
       const group = newLayer('group', { name: '하늘 대체 그룹', collapsed: false });
@@ -138,7 +168,7 @@ function skyReplacement(P) {
       made = layers;
       P.redraw();
     };
-    for (const e of [shift, fade, bright, light]) e.addEventListener('change', build);
+    for (const e of [shift, fade, bright, temp, scale, flip, mode, light, colorAdj]) e.addEventListener('change', build);
     pick.addEventListener('change', () => {
       if (pick.value === 'file') {
         file.click();
@@ -154,12 +184,14 @@ function skyReplacement(P) {
       build();
     });
     let ok = false;
-    openModal({
+    const dlg = openModal({
       title: '하늘 대체',
-      width: '420px',
-      body: [formRow('하늘', pick, file), formRow('가장자리 이동', shift), formRow('가장자리 흐리게', fade), formRow('하늘 밝기', bright), formRow('전경 조명 맞추기', light),
+      width: '440px',
+      body: [formRow('하늘', pick, file), formRow('가장자리 이동', shift), formRow('가장자리 페이드', fade),
+        h('h4', '하늘 조정'), formRow('명도', bright), formRow('온도', temp), formRow('비율 (사진 하늘)', scale), formRow('뒤집기', flip),
+        h('h4', '전경 조정'), formRow('조명 모드', mode), formRow('전경 조명', light), formRow('색상 조정', colorAdj),
         h('div.note', doc.selection ? '지금 선택 영역을 하늘로 씁니다.' : '하늘은 색으로 추정해 찾았어요. 잘못 잡히면 취소하고 하늘을 직접 선택한 뒤 다시 하세요.'),
-        h('div.note', '결과는 레이어 마스크가 있는 새 레이어로 들어가서, 마스크를 칠해 다듬을 수 있어요.')],
+        h('div.note', '사진 하늘은 창 밖의 그림을 끌어 옮길 수 있어요(하늘 이동). 결과는 "하늘 대체 그룹" 안의 레이어 마스크가 있는 새 레이어로 들어가서, 마스크를 칠해 다듬을 수 있어요.')],
       buttons: [{ label: '취소' }, { label: '확인', primary: true, action: () => { ok = true; P.commit('하늘 대체', before); } }],
       onClose: () => {
         if (ok) return;
@@ -167,6 +199,33 @@ function skyReplacement(P) {
         P.afterHistory();
       },
     });
+    // the sky move tool: drag on the picture around the window
+    const bd = dlg.modal.parentElement;
+    let drag = null;
+    bd.addEventListener('pointerdown', (e) => {
+      if (e.target !== bd || !made || !img) return;
+      drag = { x: e.clientX, y: e.clientY, dx, dy };
+      bd.setPointerCapture(e.pointerId);
+      bd.style.cursor = 'move';
+    });
+    bd.addEventListener('pointermove', (e) => {
+      if (!drag) return;
+      const z = doc.view?.zoom || 1;
+      dx = drag.dx + (e.clientX - drag.x) / z;
+      dy = drag.dy + (e.clientY - drag.y) / z;
+      // only the sky follows while dragging; the rest is rebuilt when the button is let go
+      made[0].canvas = makeSky();
+      doc.touch(made[0]);
+      P.redraw();
+    });
+    const dropSky = () => {
+      if (!drag) return;
+      drag = null;
+      bd.style.cursor = '';
+      build();
+    };
+    bd.addEventListener('pointerup', dropSky);
+    bd.addEventListener('pointercancel', dropSky);
     build();
     return undefined;
   }, 30);

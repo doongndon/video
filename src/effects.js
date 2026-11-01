@@ -238,8 +238,13 @@ export const EFFECTS = {
     ],
   },
   mosaic: {
-    name: '모자이크 (전체)', kind: 'video', category: '스타일화',
-    params: [num('blocks', '가로 블록 수', 40, { min: 1, max: 400 })],
+    // Premiere's 모자이크: 가로 블록 / 세로 블록 / 선명한 색상; a mask limits it to a face
+    name: '모자이크', kind: 'video', category: '스타일화',
+    params: [
+      num('blocks', '가로 블록', 40, { min: 1, max: 400 }),
+      num('vblocks', '세로 블록', 0, { min: 0, max: 400, hint: '0이면 정사각형 블록 (가로 블록에 맞춤)' }),
+      { key: 'sharp', label: '선명한 색상', type: 'bool', default: false, hint: '블록 평균 대신 블록 가운데 픽셀의 색' },
+    ],
   },
   vignette: {
     name: '비네팅', kind: 'video', category: '스타일화',

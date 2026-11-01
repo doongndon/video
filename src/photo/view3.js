@@ -230,7 +230,8 @@ export function installView3(P) {
   }];
   /** View ▸ Screen Mode (view2.js puts it in the View menu). */
   P.screenModeMenu = () => ({ label: '화면 모드', submenu: [
-    ...SCREEN_MODES.map(([k, n]) => ({ label: n, key: k === 'standard' ? 'F' : undefined, checked: mode === k, action: () => C.screenMode(k) })),
+    // (F cycles through the modes, like Photoshop; no mode item has a key of its own)
+    ...SCREEN_MODES.map(([k, n]) => ({ label: n, checked: mode === k, action: () => C.screenMode(k) })),
     '-',
     { label: '도구·패널 숨기기 / 보이기', key: 'Tab', action: () => C.togglePanels() },
     { label: '오른쪽 패널만 숨기기 / 보이기', key: 'Shift+Tab', action: () => C.toggleSidePanels() },

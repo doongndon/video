@@ -94,13 +94,21 @@ function sad(a, b, w, h, cx, cy, dx, dy, B, limit) {
 
 /** Best integer displacement of a patch within ±R around (gx, gy), then sub-pixel by a parabola fit. */
 function matchPatch(a, b, w, h, cx, cy, gx, gy, R, B) {
+  // a slight pull towards the guess: on repeating textures (tiles, checks, stripes) several shifts
+  // match equally well, and the one nearest the expected motion is the right one (without it the
+  // first of them in scan order won and a mask over a tiled wall drifted away up and left)
+  const pull = B * B * 0.05;
   let best = Infinity;
+  let score = Infinity;
   let bx = gx;
   let by = gy;
   for (let dy = gy - R; dy <= gy + R; dy++) {
     for (let dx = gx - R; dx <= gx + R; dx++) {
-      const v = sad(a, b, w, h, cx, cy, dx, dy, B, best);
-      if (v < best) {
+      const pen = pull * Math.hypot(dx - gx, dy - gy);
+      if (pen >= score) continue;
+      const v = sad(a, b, w, h, cx, cy, dx, dy, B, score - pen);
+      if (v + pen < score) {
+        score = v + pen;
         best = v;
         bx = dx;
         by = dy;

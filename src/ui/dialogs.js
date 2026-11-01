@@ -85,51 +85,6 @@ export function openSpeedDialog(ids) {
   });
 }
 
-// ---------------------------------------------------------------- markers
-
-const MARKER_COLORS = [['#4ade80', '초록'], ['#f87171', '빨강'], ['#a78bfa', '보라'], ['#fb923c', '주황'], ['#facc15', '노랑'], ['#ffffff', '흰색'], ['#60a5fa', '파랑'], ['#22d3ee', '청록']];
-
-export function openMarkerDialog(id) {
-  const s = store.seq;
-  const mk = s.markers.find((m) => m.id === id);
-  if (!mk) return;
-  const name = h('input', { type: 'text', value: mk.name, style: { width: '100%' } });
-  const time = h('input', { type: 'text', value: formatTimecode(mk.time, s.fps) });
-  const comment = h('textarea', { rows: 3, style: { width: '100%' } }, mk.comment || '');
-  let color = mk.color;
-  const swatches = h('div.inline.swatches', MARKER_COLORS.map(([c, label]) => {
-    const b = h('button.swatch-btn', { title: label, 'aria-label': label, style: { background: c }, 'aria-pressed': String(c === color) });
-    b.addEventListener('click', () => {
-      color = c;
-      swatches.querySelectorAll('button').forEach((x) => x.setAttribute('aria-pressed', 'false'));
-      b.setAttribute('aria-pressed', 'true');
-    });
-    return b;
-  }));
-  openModal({
-    title: '마커',
-    body: [formRow('이름', name), formRow('시간', time), formRow('색상', swatches), formRow('메모', comment)],
-    buttons: [
-      { label: '삭제', action: () => edit.removeMarker(id) },
-      { label: '취소' },
-      {
-        label: '확인', primary: true, action: () => {
-          store.transact('마커 편집', () => {
-            const m = store.seq.markers.find((x) => x.id === id);
-            if (!m) return;
-            m.name = name.value;
-            m.comment = comment.value;
-            m.color = color;
-            const t = parseTimecode(time.value, s.fps);
-            if (t != null) m.time = Math.max(0, t);
-            store.seq.markers.sort((a, b) => a.time - b.time);
-          });
-        },
-      },
-    ],
-  });
-}
-
 // ---------------------------------------------------------------- sequence settings
 
 const FRAME_PRESETS = [
@@ -243,6 +198,8 @@ function generateWithProgress(modal, run) {
     }
     modal.close();
   }).catch((err) => {
+    // closing the dialog (취소 / Esc) stops the job: not an error
+    if (modal.token?.cancelled) return;
     console.error(err);
     modal.status.textContent = `만들지 못했습니다: ${err.message || err}`;
     btn.disabled = false;
@@ -1221,7 +1178,7 @@ export const SHORTCUTS = [
   ['보기·파일', [
     ['타임라인 확대 / 축소', '= / -'], ['시퀀스 전체 보기', '\\'], ['스냅 켜기/끄기', 'S'], ['패널 크게 보기', '`'],
     ['가져오기', 'Ctrl+I'], ['프로젝트 열기', 'Ctrl+O'], ['내보내기', 'Ctrl+M'], ['현재 프레임 저장', 'Ctrl+Shift+E'], ['프로젝트 파일로 저장', 'Ctrl+S'],
-    ['타임라인: 시간 이동 / 트랙 이동 / 확대', '휠 / Shift+휠 / Alt 또는 Ctrl+휠'], ['키보드 단축키', 'F1 / ? · 편집 ▸ 키보드 단축키(Ctrl+Alt+K)에서 바꾸기'],
+    ['타임라인: 시간 이동 / 트랙 이동 / 확대', '휠 / Shift+휠 / Alt 또는 Ctrl+휠'], ['키보드 단축키', 'F1 / ?'],
   ]],
   ['모니터', [
     ['하위 클립 만들기 (소스 모니터 · 프로젝트)', 'Ctrl+U'], ['포스터 프레임 설정 (소스 모니터)', 'Shift+P'],

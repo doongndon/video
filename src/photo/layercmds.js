@@ -109,7 +109,7 @@ export function installLayerCommands(P) {
 
   // ---------------------------------------------------------------- create
 
-  C.newLayer = (name) => need() && P.run('새 레이어', () => P.addLayer(newLayer('raster', { name: name || `레이어 ${doc().layers.length + 1}`, canvas: makeCanvas(doc().width, doc().height) })));
+  C.newLayer = (name) => need() && P.run('새 레이어', () => P.addLayer(newLayer('raster', { name: name || doc().nextLayerName(), canvas: makeCanvas(doc().width, doc().height) })));
   C.newAdjustLayer = (type) => {
     if (!need()) return;
     P.run(`새 조정 레이어: ${ADJUSTMENTS[type].name}`, () => {
@@ -174,6 +174,15 @@ export function installLayerCommands(P) {
     out.push(c);
     return out;
   };
+  // Photoshop's names for copies: "X 복사", then "X 복사 2", "X 복사 3"… (a copy of a copy too)
+  const copyName = (d, name, extra = []) => {
+    const base = String(name).replace(/ 복사( \d+)?$/, '');
+    const taken = new Set([...d.layers.map((x) => x.name), ...extra]);
+    if (!taken.has(`${base} 복사`)) return `${base} 복사`;
+    let n = 2;
+    while (taken.has(`${base} 복사 ${n}`)) n++;
+    return `${base} 복사 ${n}`;
+  };
   C.duplicateLayer = ({ noSelection = false } = {}) => {
     if (!need()) return;
     const d = doc();
@@ -184,7 +193,8 @@ export function installLayerCommands(P) {
       const newIds = [];
       for (const it of items) {
         const blk = cloneBlock(it, it.parent || null);
-        blk[blk.length - 1].name = `${it.name} 복사`;
+        // Photoshop calls a copy of the background 레이어 N (Ctrl+J), other copies '… 복사'
+        blk[blk.length - 1].name = items.length === 1 && it.name === '배경' && d.layers[0] === it ? d.nextLayerName() : copyName(d, it.name);
         d.layers.splice(d.index(it.id) + 1, 0, ...blk);
         newIds.push(blk[blk.length - 1].id);
       }
@@ -200,6 +210,7 @@ export function installLayerCommands(P) {
     const l = d.active;
     if (!l || l.kind !== 'raster') return toast('이미지 레이어에서 씁니다 (레이어 ▸ 래스터화)');
     if (!d.selection) return C.duplicateLayer();
+    // Photoshop names what is copied or cut from a selection 레이어 N
     P.run(cut ? '잘라낸 레이어' : '복사한 레이어', () => {
       const c = makeCanvas(d.width, d.height);
       const g = c.getContext('2d');
@@ -212,7 +223,7 @@ export function installLayerCommands(P) {
         lg.drawImage(d.selection.canvas, -l.x, -l.y);
       }
       d.selection = null;
-      P.addLayer(newLayer('raster', { name: `${l.name} ${cut ? '잘라냄' : '복사'}`, canvas: c }), { above: l.id });
+      P.addLayer(newLayer('raster', { name: d.nextLayerName(), canvas: c }), { above: l.id });
     });
     return undefined;
   };
@@ -383,12 +394,8 @@ export function installLayerCommands(P) {
   /** Ctrl+Alt+Shift+E: a new layer with everything visible merged, the others kept. */
   C.stampVisible = () => {
     if (!need()) return;
-    P.run('보이는 레이어 도장 찍기', () => {
-      const l = newLayer('raster', { name: '병합 (도장)', canvas: doc().flatten({ fg: P.fg, bg: P.bg }) });
-      doc().layers.push(l);
-      doc().activeId = l.id;
-      doc().selectedIds = [l.id];
-    });
+    // Photoshop: a new 레이어 N right above the active layer
+    P.run('보이는 레이어 도장 찍기', () => P.addLayer(newLayer('raster', { name: doc().nextLayerName(), canvas: doc().flatten({ fg: P.fg, bg: P.bg }) })));
   };
   C.flatten = () => {
     if (!need()) return;
@@ -545,7 +552,7 @@ export function installLayerCommands(P) {
     const { openModal } = await import('../ui/common.js');
     const { h } = await import('../util.js');
     const one = items.length === 1 ? items[0] : null;
-    const name = h('input', { type: 'text', value: one ? `${one.name} 복사` : '', style: { width: '100%' }, disabled: !one });
+    const name = h('input', { type: 'text', value: one ? copyName(d, one.name) : '', style: { width: '100%' }, disabled: !one });
     const docs = P.docs.filter((x) => x !== d);
     const dest = h('select', { style: { width: '100%' } },
       h('option', { value: 'self' }, `${d.name} (지금 문서)`),
@@ -609,7 +616,8 @@ export function installLayerCommands(P) {
       const blocks = copyBlocks(items, parent || null);
       const ids2 = new Set(blocks.map((b) => b.id));
       const tops = blocks.filter((b) => !ids2.has(b.parent));
-      for (const b of tops) b.name = `${b.name} 복사`;
+      const used = [];
+      for (const b of tops) used.push(b.name = copyName(d, b.name, used));
       d.layers.splice(Math.max(0, Math.min(d.layers.length, index)), 0, ...blocks);
       d.activeId = tops[tops.length - 1].id;
       d.selectedIds = tops.map((b) => b.id);
@@ -1270,7 +1278,8 @@ export function layerMenuItems(P, mod) {
     '-',
     { label: '레이어 그룹화', key: `${mod}G`, disabled: no, action: () => C.groupLayers() },
     { label: '레이어 그룹 해제', key: `${mod}Shift+G`, disabled: kind !== 'group', action: () => C.ungroup() },
-    { label: '레이어 숨기기 / 보이기', key: `${mod},`, disabled: no, action: () => P.run('레이어 숨기기', () => { for (const x of d.selectedLayers) { x.visible = !x.visible; d.touch(x); } }) },
+    // the same command as its key (Ctrl+,): all picked layers hidden, or all shown again
+    { label: '레이어 숨기기 / 보이기', key: `${mod},`, disabled: no, action: () => (C.toggleLayerVisibility ? C.toggleLayerVisibility() : P.run('레이어 숨기기', () => { for (const x of d.selectedLayers) { x.visible = !x.visible; d.touch(x); } })) },
     { label: '정돈', disabled: no, submenu: [
       { label: '맨 앞으로', key: `${mod}Shift+]`, action: () => C.arrange('top') },
       { label: '앞으로', key: `${mod}]`, action: () => C.arrange(1) },

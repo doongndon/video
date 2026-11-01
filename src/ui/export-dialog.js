@@ -204,7 +204,8 @@ export function openExportSettings() {
   for (const el of [format, range, scale, quality, fps, encoding, sampleRate, channels, audioBitrate, loudTarget, truePeak]) el.addEventListener('change', () => { if (el !== loudTarget && el !== truePeak) presetId = null; update(); });
   for (const el of [target, maxRate, kfFrames, customStart, customEnd]) el.addEventListener('input', update);
   for (const c of [kfOn, maxQ, audio, loudOn, importAfter]) c.box.addEventListener('change', update);
-  for (const el of [fileName, customStart, customEnd]) el.addEventListener('keydown', (e) => e.stopPropagation());
+  // Esc (close) and Tab (move inside the dialog) still reach the dialog
+  for (const el of [fileName, customStart, customEnd]) el.addEventListener('keydown', (e) => { if (e.key !== 'Escape' && e.key !== 'Tab') e.stopPropagation(); });
   encoding.addEventListener('change', () => {
     // a sensible starting bitrate for the chosen size and quality
     if (encoding.value !== 'quality') {
@@ -361,7 +362,7 @@ export function openExportFrameDialog() {
   const saved = loadPref('exportFrame', {});
   const base = `${s.name || 'frame'}_${formatTimecode(t, s.fps).replace(/:/g, '-')}`.replace(/[\\/:*?"<>|]+/g, '_');
   const name = h('input', { type: 'text', value: base, style: { width: '100%' } });
-  name.addEventListener('keydown', (e) => e.stopPropagation());
+  name.addEventListener('keydown', (e) => { if (e.key !== 'Escape' && e.key !== 'Tab') e.stopPropagation(); });
   const type = select([['image/png', 'PNG (무손실)'], ['image/jpeg', 'JPEG (작은 파일)']], saved.type || 'image/png');
   const quality = numberInput(saved.quality ?? 92, { min: 10, max: 100, step: 1, width: '72px' });
   const qRow = formRow('JPEG 품질', quality, h('span', '%'));

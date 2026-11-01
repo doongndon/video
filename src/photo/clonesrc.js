@@ -10,7 +10,7 @@ import { injectStyle } from '../ui/style-inject.js';
 import { TOOL_BY_ID, Stroke, brushOpts, needRaster } from './tools.js';
 import { BRUSH_BAR } from './brushpanel.js';
 
-export const SAMPLE_OPT = ['sample', '샘플', 'select', null, null, 'current', [['current', '현재 레이어'], ['below', '현재 및 아래'], ['all', '모든 레이어']]];
+export const SAMPLE_OPT = ['sample', '샘플', 'select', null, null, 'current', [['current', '현재 레이어'], ['below', '현재 이하'], ['all', '모든 레이어']]];
 export const IGNORE_ADJ_OPT = ['ignoreAdj', '조정 레이어 무시', 'bool', null, null, false];
 export const ALIGNED_OPT = ['aligned', '정렬', 'bool', null, null, true];
 

@@ -14,6 +14,14 @@ const PEAK_RATE = 100; // waveform buckets per second
 const FILMSTRIP_FRAMES = 24;
 const THUMB_W = 160;
 
+// a frame rate measured from packet times lands a little off a standard one (a 30 fps recording
+// reads 30.05): snap it so the clip matches 30 fps sequences (no false 클립 불일치 경고)
+const STANDARD_RATES = [23.976, 24, 25, 29.97, 30, 47.952, 48, 50, 59.94, 60, 100, 119.88, 120, 240];
+function snapFrameRate(r) {
+  const near = STANDARD_RATES.reduce((a, b) => (Math.abs(b - r) < Math.abs(a - r) ? b : a));
+  return Math.abs(near - r) / near < 0.003 ? near : Math.round(r * 100) / 100;
+}
+
 // ---------------------------------------------------------------- kinds
 
 const VIDEO_EXT = /\.(mp4|m4v|mov|webm|mkv|ogv|avi|3gp|ts|mts|m2ts)$/i;
@@ -274,7 +282,7 @@ async function probeMedia(id) {
       info.hasVideo = !!vt && (info.kind || media.kind) !== 'audio';
       if (vt) {
         const stats = await vt.computePacketStats(120);
-        if (stats.averagePacketRate > 1 && stats.averagePacketRate < 300) info.fps = Math.round(stats.averagePacketRate * 100) / 100;
+        if (stats.averagePacketRate > 1 && stats.averagePacketRate < 300) info.fps = snapFrameRate(stats.averagePacketRate);
       }
       if (!info.duration) info.duration = await input.computeDuration();
       if (info.fps) info.nativeFps = info.fps;

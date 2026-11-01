@@ -274,7 +274,7 @@ export function createPhotoEditor(root) {
     return list('더보기', [
       { label: '새 문서…', action: () => D.newDocDialog(P) },
       { label: '열기…', action: () => P.cmd.open() },
-      { label: '내보내기 (PNG·JPG)…', action: () => D.exportDialog(P) },
+      { label: '내보내기 형식…', action: () => P.exportDialog() },
       { label: 'PSD로 저장', action: () => P.cmd.savePsd() },
       { label: '영상 편집으로 보내기…', action: () => D.sendToVideoDialog(P) },
       '-',
@@ -288,7 +288,7 @@ export function createPhotoEditor(root) {
       { label: '자유 변형', action: () => P.cmd.freeTransform() },
       { label: '모두 선택', action: () => P.cmd.selectAll() },
       { label: '선택 해제', action: () => P.cmd.deselect() },
-      { label: '화면에 맞추기', action: () => P.fit() },
+      { label: '화면에 맞추기', action: () => P.fit(true) },
       '-',
       { label: '전체 메뉴…', action: () => list('메뉴', Object.keys(menus).map((name) => ({ label: name, submenu: () => menus[name]() }))) },
     ]);
@@ -836,7 +836,9 @@ export function createPhotoEditor(root) {
     const [lx, ly] = logical(clientX, clientY);
     return { x: (lx - P.view.x) / P.view.zoom, y: (ly - P.view.y) / P.view.zoom };
   };
-  P.fit = () => {
+  // `enlarge`: View ▸ Fit on Screen (Ctrl+0) also zooms a small picture (a pattern tile) up to
+  // fill the window, like Photoshop; opening a document never goes above 100%
+  P.fit = (enlarge = !!P.doc?.view?.enlarge) => {
     const doc = P.doc;
     if (!doc) return;
     const r = stage.getBoundingClientRect();
@@ -848,9 +850,9 @@ export function createPhotoEditor(root) {
     const a = (rot * Math.PI) / 180;
     const bw = Math.abs(doc.width * Math.cos(a)) + Math.abs(doc.height * Math.sin(a));
     const bh = Math.abs(doc.width * Math.sin(a)) + Math.abs(doc.height * Math.cos(a));
-    const z = Math.max(0.01, Math.min(1, (r.width - pad) / bw, (r.height - pad) / bh));
+    const z = Math.max(0.01, Math.min(enlarge ? 64 : 1, (r.width - pad) / bw, (r.height - pad) / bh));
     // auto: the view follows the window (rotating the phone) until the user zooms or pans
-    doc.view = { zoom: z, x: (r.width - doc.width * z) / 2, y: (r.height - doc.height * z) / 2, fitted: true, auto: true, rot, flip: !!doc.view?.flip };
+    doc.view = { zoom: z, x: (r.width - doc.width * z) / 2, y: (r.height - doc.height * z) / 2, fitted: true, auto: true, rot, flip: !!doc.view?.flip, enlarge: enlarge || undefined };
     P.viewChanged();
   };
   /** Called when the photo editor comes on screen. */
@@ -1527,7 +1529,7 @@ export function createPhotoEditor(root) {
       F8: () => (mod || sh ? null : P.showPanel('info')),
       F9: () => (mod || sh ? null : P.showPanel('actions')),
       F12: () => (mod || sh || alt ? null : C.revert()),
-      Digit0: () => (mod ? (alt ? P.setZoom(1) : P.fit()) : null),
+      Digit0: () => (mod ? (alt ? P.setZoom(1) : P.fit(true)) : null),
       Digit1: () => (mod ? P.setZoom(1) : null),
       Digit2: () => (mod && alt ? (C.selectLuminosity || C.luminositySelection)() : null),
       Equal: () => (mod ? P.zoomStep(1) : null),
@@ -2006,7 +2008,7 @@ function installCommands(P) {
     const cb = P.clipboard;
     if (!cb) return toast('붙여 넣을 내용이 없습니다 (다른 프로그램의 이미지는 Ctrl+V로 바로 붙여 넣을 수 있습니다)');
     P.run('붙여넣기', () => {
-      const l = newLayer('raster', { name: '붙여넣은 레이어', canvas: cloneCanvas(cb.canvas) });
+      const l = newLayer('raster', { name: P.doc.nextLayerName(), canvas: cloneCanvas(cb.canvas) });
       l.x = cb.x;
       l.y = cb.y;
       P.addLayer(l);
@@ -2498,7 +2500,8 @@ function buildMenus(P) {
       { label: '포함 가져오기 (고급 개체)…', disabled: no(), action: () => C.placeEmbedded() },
       { label: '가져오기 (새 픽셀 레이어로)…', disabled: no(), action: () => C.place() },
       '-',
-      { label: '자동화', submenu: [{ label: '일괄 처리… (여러 사진에 액션)', action: () => C.batch() }, { label: '액션 패널 열기', key: 'Alt+F9', action: () => P.showPanel('actions') }] },
+      // (the Actions panel itself is under Window ▸ 액션, Alt+F9)
+      { label: '자동화', submenu: [{ label: '일괄 처리… (여러 사진에 액션)', action: () => C.batch() }] },
       '-',
       { label: '영상 편집으로 보내기…', disabled: no(), action: () => D.sendToVideoDialog(P) },
     ],
@@ -2644,7 +2647,7 @@ function buildMenus(P) {
     '보기': () => [
       { label: '확대', key: `${mod}+`, disabled: no(), action: () => P.zoomStep(1) },
       { label: '축소', key: `${mod}-`, disabled: no(), action: () => P.zoomStep(-1) },
-      { label: '화면 크기에 맞게 조정', key: `${mod}0`, disabled: no(), action: () => P.fit() },
+      { label: '화면 크기에 맞게 조정', key: `${mod}0`, disabled: no(), action: () => P.fit(true) },
       { label: '100%', key: `${mod}1`, disabled: no(), action: () => P.setZoom(1) },
       { label: '200%', disabled: no(), action: () => P.setZoom(2) },
       ...(P.viewMenuItems ? P.viewMenuItems(mod, no) : []),

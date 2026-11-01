@@ -348,55 +348,137 @@ export function installImage2(P) {
     P.fit();
   };
 
-  // ---- Image ▸ Apply Image
+  // ---- Image ▸ Apply Image (Photoshop's dialog: 더하기 / 빼기 use 비율 and 오프셋; live preview)
   C.applyImage = () => {
     if (!need() || !activeRaster('이미지 적용')) return;
+    const doc = P.doc;
+    const l = doc.active;
+    const base = l.canvas;
     const src = sel(sourceOptions(P), 'merged');
     const ch = sel([['rgb', 'RGB'], ['r', '빨강'], ['g', '녹색'], ['b', '파랑'], ['a', '투명도']], 'rgb');
     const inv = h('input', { type: 'checkbox' });
-    const mode = sel(BLEND_MODES.map(([id, name]) => [id, name]), 'multiply');
+    const mode = sel([...BLEND_MODES.filter(([id]) => id !== 'dissolve').map(([id, name]) => [id, name]), ['add', '더하기']], 'multiply');
     const op = num(100, 0, 100);
     const keep = h('input', { type: 'checkbox', checked: true });
+    const scale = num(1, 1, 2, 0.001);
+    const offset = num(0, -255, 255);
+    const pv = h('input', { type: 'checkbox', checked: true });
+    const arith = () => mode.value === 'add' || mode.value === 'subtract';
+    let srcKey = null;
+    let srcCanvas = null;
+    const source = () => {
+      const key = `${src.value}|${ch.value}|${inv.checked}`;
+      if (key === srcKey) return srcCanvas;
+      let s = sourceCanvas(P, src.value);
+      if (ch.value !== 'rgb' || inv.checked) {
+        const a = ch.value === 'rgb' ? null : channelOf(s, ch.value);
+        const img = read(s);
+        for (let i = 0; i < img.width * img.height; i++) {
+          for (let k = 0; k < 3; k++) {
+            let v = a ? a[i] : img.data[i * 4 + k];
+            if (inv.checked) v = 255 - v;
+            img.data[i * 4 + k] = v;
+          }
+          if (a) img.data[i * 4 + 3] = 255;
+        }
+        s = toCanvas(img);
+      }
+      srcKey = key;
+      srcCanvas = s;
+      return s;
+    };
+    const compute = (c) => {
+      const t = makeCanvas(c.width, c.height);
+      t.getContext('2d').drawImage(source(), -l.x, -l.y);
+      const k = clamp(+op.value || 0, 0, 100) / 100;
+      if (arith()) {
+        // (target ± source) ÷ scale + offset, per channel (frequency separation: 빼기, 2, 128)
+        const sc = clamp(+scale.value || 1, 1, 2);
+        const off = clamp(Math.round(+offset.value || 0), -255, 255);
+        const sign = mode.value === 'add' ? 1 : -1;
+        const img = read(c);
+        const d = img.data;
+        const sd = read(t).data;
+        for (let o = 0; o < d.length; o += 4) {
+          const a = (sd[o + 3] / 255) * k;
+          if (a <= 0 || (keep.checked && !d[o + 3])) continue;
+          for (let j = 0; j < 3; j++) {
+            const v = cl(Math.round((d[o + j] + sign * sd[o + j]) / sc + off));
+            d[o + j] = Math.round(d[o + j] + (v - d[o + j]) * a);
+          }
+          if (!keep.checked) d[o + 3] = Math.max(d[o + 3], sd[o + 3]);
+        }
+        return toCanvas(img);
+      }
+      const out = cloneCanvas(c);
+      if (keep.checked) {
+        // only where the layer already has pixels
+        const tg = t.getContext('2d');
+        tg.globalCompositeOperation = 'destination-in';
+        tg.drawImage(c, 0, 0);
+      }
+      compositeOnto(out.getContext('2d'), t, 0, 0, mode.value, k);
+      return out;
+    };
+    let applied = false;
+    let timer = 0;
+    const show = () => {
+      l.canvas = base;
+      if (pv.checked) applyToLayer(P, compute);
+      else {
+        l._styled = null;
+        doc.touch(l);
+      }
+      P.redraw();
+    };
+    const sync = () => {
+      scale.disabled = !arith();
+      offset.disabled = !arith();
+    };
+    for (const c of [src, ch, inv, mode, op, keep, scale, offset, pv]) {
+      c.addEventListener('change', () => {
+        sync();
+        clearTimeout(timer);
+        timer = setTimeout(show, 30);
+      });
+    }
+    sync();
+    let held = null;
     openModal({
       title: '이미지 적용',
-      body: [formRow('원본 레이어', src), formRow('채널', ch), formRow('반전', inv), formRow('혼합', mode), formRow('불투명도 (%)', op), formRow('투명도 유지', keep), h('div.note', '고른 레이어(또는 보이는 모습)의 채널을 지금 레이어 위에 혼합 모드로 섞습니다.')],
+      peek: true,
+      compare: (on) => {
+        if (on && !held) {
+          held = l.canvas;
+          l.canvas = base;
+        } else if (!on && held) {
+          l.canvas = held;
+          held = null;
+        } else return;
+        l._styled = null;
+        doc.touch(l);
+        P.redraw();
+      },
+      body: [formRow('레이어', src), formRow('채널', ch), formRow('반전', inv), h('div.note', `대상: ${doc.name || '문서'} (${l.name}, RGB)`), formRow('혼합', mode), formRow('불투명도 (%)', op), formRow('투명도 유지', keep), formRow('비율', scale), formRow('오프셋', offset), formRow('미리 보기', pv),
+        h('div.note', '고른 레이어(또는 보이는 모습)의 채널을 지금 레이어에 섞습니다. 더하기·빼기는 (대상 ± 원본) ÷ 비율 + 오프셋입니다. 주파수 분리: 레이어는 흐리게 한 레이어, 혼합 빼기, 비율 2, 오프셋 128.')],
       buttons: [{ label: '취소' }, {
         label: '확인', primary: true, action: () => {
-          const doc = P.doc;
-          const l = doc.active;
-          let s = sourceCanvas(P, src.value);
-          if (ch.value !== 'rgb' || inv.checked) {
-            const a = ch.value === 'rgb' ? null : channelOf(s, ch.value);
-            const img = read(s);
-            for (let i = 0; i < img.width * img.height; i++) {
-              for (let k = 0; k < 3; k++) {
-                let v = a ? a[i] : img.data[i * 4 + k];
-                if (inv.checked) v = 255 - v;
-                img.data[i * 4 + k] = v;
-              }
-              if (a) img.data[i * 4 + 3] = 255;
-            }
-            s = toCanvas(img);
-          }
-          P.run('이미지 적용', () => applyToLayer(P, (c) => {
-            const out = cloneCanvas(c);
-            const g = out.getContext('2d');
-            g.save();
-            if (keep.checked) {
-              // only where the layer already has pixels
-              const t = makeCanvas(c.width, c.height);
-              const tg = t.getContext('2d');
-              tg.drawImage(s, -l.x, -l.y);
-              tg.globalCompositeOperation = 'destination-in';
-              tg.drawImage(c, 0, 0);
-              compositeOnto(g, t, 0, 0, mode.value, +op.value / 100);
-            } else compositeOnto(g, (() => { const t = makeCanvas(c.width, c.height); t.getContext('2d').drawImage(s, -l.x, -l.y); return t; })(), 0, 0, mode.value, +op.value / 100);
-            g.restore();
-            return out;
-          }));
+          clearTimeout(timer);
+          applied = true;
+          l.canvas = base;
+          P.run('이미지 적용', () => applyToLayer(P, compute));
         },
       }],
+      onClose: () => {
+        clearTimeout(timer);
+        if (applied) return;
+        l.canvas = base;
+        l._styled = null;
+        doc.touch(l);
+        P.redraw();
+      },
     });
+    show();
   };
 
   // ---- Image ▸ Calculations
@@ -454,7 +536,7 @@ export function installImage2(P) {
     if (!cb) return toast('붙여 넣을 내용이 없습니다');
     if (!doc.selection) return toast('먼저 붙여 넣을 곳을 선택하세요');
     P.run(outside ? '바깥쪽에 붙여넣기' : '안쪽에 붙여넣기', () => {
-      const l = newLayer('raster', { name: '붙여넣은 레이어', canvas: cloneCanvas(cb.canvas) });
+      const l = newLayer('raster', { name: doc.nextLayerName(), canvas: cloneCanvas(cb.canvas) });
       // centre the pasted picture on the selection, like Photoshop
       const b = selectionBounds(doc);
       l.x = Math.round(b.x + b.w / 2 - cb.canvas.width / 2);

@@ -1272,8 +1272,10 @@ export function installType2(P) {
         items.splice(pi + 1, 0, m.aa, m.dir);
         const ri = at('문자 레이어 래스터화');
         items.splice(ri >= 0 ? ri + 1 : items.length, 0, m.convert, m.flip);
+        // Find and Replace Text stays in the Edit menu only, as in Photoshop
         const fi = at('텍스트 찾기 / 바꾸기…');
-        items.splice(fi >= 0 ? fi : items.length, 0, m.update, m.lorem, '-');
+        if (fi >= 0) items.splice(fi, 1, m.update, m.lorem);
+        else items.push('-', m.update, m.lorem);
         return items;
       };
     }
