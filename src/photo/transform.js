@@ -1708,13 +1708,11 @@ export function liftLinkedMasks(doc, l, sel) {
   }
   return out.length ? { sel, list: out } : null;
 }
-export function placeLinkedMasks(doc, l, lifted, dx, dy, live = false) {
+export function placeLinkedMasks(doc, l, lifted, dx, dy) {
   if (!lifted || !l) return;
   for (const c of lifted.list) {
-    // while dragging, one buffer is redrawn; the final masks get their own canvas
-    const out = live ? (c.buf ||= makeCanvas(doc.width, doc.height)) : makeCanvas(doc.width, doc.height);
     if (!dx && !dy) l[c.key] = c.m0;
-    else l[c.key] = { ...c.m0, canvas: landMaskPart(out, c.base, { canvas: lifted.sel, x: dx, y: dy }, { canvas: c.part, x: dx, y: dy }), x: 0, y: 0 };
+    else l[c.key] = { ...c.m0, canvas: landMaskPart(makeCanvas(doc.width, doc.height), c.base, { canvas: lifted.sel, x: dx, y: dy }, { canvas: c.part, x: dx, y: dy }), x: 0, y: 0 };
   }
   l._styled = null;
   doc.touch(l);

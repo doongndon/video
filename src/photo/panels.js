@@ -1701,7 +1701,7 @@ export function buildPropertiesPanel(P) {
           h('button.small', { onclick: () => P.cmd.maskToSelection?.() }, '선택 영역으로'),
           l.kind === 'raster' ? h('button.small', { onclick: () => P.cmd.applyMask() }, '적용') : null,
           h('button.small', { onclick: () => P.cmd.deleteMask() }, '삭제'),
-          h('button.small', { title: '연결하면 레이어를 옮길 때 마스크도 같이 움직입니다', onclick: () => P.run('마스크 연결', () => { l.mask = { ...l.mask, linked: l.mask.linked === false }; doc.touch(l); }) }, l.mask.linked === false ? '연결' : '연결 해제')));
+          h('button.small', { title: l.mask.linked === false ? '연결 끊김 (누르면 연결): 연결하면 옮기거나 크기를 바꿀 때 마스크도 같이 움직입니다' : '레이어와 마스크 연결됨 (누르면 연결 해제)', onclick: () => P.run('마스크 연결', () => { l.mask = { ...l.mask, linked: l.mask.linked === false }; doc.touch(l); }) }, l.mask.linked === false ? '연결' : '연결 해제')));
     }
     if (l.vmask) {
       rows.push(h('div.ph-sub', '벡터 마스크'), h('div.ph-prow',

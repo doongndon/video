@@ -1469,8 +1469,8 @@ export const TOOLS = [
       dx = Math.round(dx);
       dy = Math.round(dy);
       if (d.float) {
+        // (the float shows through its own mask already; the masks themselves move on release)
         E.float = { ...d.float, x: d.float.x + dx, y: d.float.y + dy };
-        if (d.float.masks) placeLinkedMasks(E.doc, E.doc.layer(d.float.layerId), d.float.masks, dx, dy, true);
         d.offset = { dx, dy };
       } else if (d.maskOnly) {
         const m = d.maskOnly.mask;
