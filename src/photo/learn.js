@@ -10,6 +10,7 @@ import { icon } from '../ui/icons.js';
 import { PhotoDoc, newLayer, restrictsChannels } from './doc.js';
 import { TOOL_BY_ID, TOOL_GROUPS } from './tools.js';
 import { listPatterns } from './resources.js';
+import * as PANELS from './panels.js';
 import { LESSONS, LESSON_GROUPS, practiceFile } from './lessons.js';
 
 const CSS = `
@@ -47,10 +48,9 @@ const CSS = `
 .lrn-ring { position: fixed; z-index: 2000; pointer-events: none; border: 2px solid var(--accent, #4aa3ff); border-radius: 6px; box-shadow: 0 0 0 4px rgba(74,163,255,.35), 0 0 18px rgba(74,163,255,.6); animation: lrn-pulse 1s ease-in-out infinite; }
 .lrn-tip { position: fixed; z-index: 2001; max-width: 260px; background: #1d4f86; color: #fff; border-radius: 8px; padding: 7px 10px; font-size: 13px; line-height: 1.45; box-shadow: 0 6px 20px rgba(0,0,0,.45); display: flex; flex-direction: column; gap: 6px; }
 .lrn-tip button { align-self: flex-end; background: rgba(255,255,255,.18); color: #fff; border: none; min-height: 0; padding: 3px 8px; border-radius: 5px; }
-.lrn-coach { position: fixed; z-index: 800; left: 50%; transform: translateX(-50%); bottom: 34px; display: flex; align-items: center; gap: 8px; max-width: min(560px, calc(100vw - 24px)); background: #23272e; border: 1px solid var(--accent, #4aa3ff); border-radius: 10px; padding: 6px 8px 6px 12px; box-shadow: 0 8px 24px rgba(0,0,0,.5); font-size: 13px; }
-.lrn-coach span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lrn-coach { position: fixed; z-index: 800; left: 50%; top: 110px; transform: translateX(-50%); width: max-content; display: flex; align-items: center; gap: 8px; max-width: min(560px, calc(100vw - 24px)); background: #23272e; border: 1px solid var(--accent, #4aa3ff); border-radius: 10px; padding: 6px 8px 6px 12px; box-shadow: 0 8px 24px rgba(0,0,0,.5); font-size: 13px; }
+.lrn-coach span { flex: 1 1 auto; min-width: 0; max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .lrn-coach button { min-height: 0; padding: 4px 8px; white-space: nowrap; }
-body.mobile .lrn-coach { bottom: calc(var(--m-nav-h, 56px) + 10px); }
 @keyframes lrn-pulse { 50% { box-shadow: 0 0 0 7px rgba(74,163,255,.15), 0 0 26px rgba(74,163,255,.75); } }
 @keyframes lrn-flash { 0% { background: rgba(92,200,122,.35); } 100% { background: transparent; } }
 `;
@@ -58,7 +58,6 @@ body.mobile .lrn-coach { bottom: calc(var(--m-nav-h, 56px) + 10px); }
 const isMobile = () => document.body.classList.contains('mobile');
 const visible = (el) => !!el && el.isConnected && el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden';
 const frame = () => new Promise((r) => requestAnimationFrame(() => r()));
-const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 const pathText = (path) => path.join(' ▸ ');
 
 export function installLearn(P) {
@@ -272,16 +271,24 @@ export function installLearn(P) {
     if (!row) toast(`메뉴에서 '${last}'을(를) 찾으세요`);
   }
 
+  /** The tool box button that holds tool `id` (its slot may show another tool of the same family). */
   function toolButton(id) {
-    const g = TOOL_GROUPS.find((x) => x.includes(id)) || [id];
-    const names = new Set(g.map((t) => TOOL_BY_ID[t]?.name).filter(Boolean));
     const strip = [...document.querySelectorAll('.ph-stool')].find((b) => visible(b) && b.getAttribute('aria-label') === TOOL_BY_ID[id]?.name);
-    return strip || [...document.querySelectorAll('.ph-tools .ph-tool')].find((b) => visible(b) && names.has(b.getAttribute('aria-label'))) || null;
+    if (strip) return strip;
+    const btns = [...document.querySelectorAll('.ph-tools .ph-tool')].filter(visible);
+    const slots = PANELS.toolbarLayout?.().slots || TOOL_GROUPS;
+    const slot = slots.find((x) => x.includes(id)) || [id];
+    const name = TOOL_BY_ID[id]?.name || id;
+    return btns.find((b) => b.dataset.tool === id) || btns.find((b) => slot.includes(b.dataset.tool))
+      || btns.find((b) => (b.getAttribute('aria-label') || '').startsWith(name))
+      || document.querySelector('.ph-tools .ph-etb') || null;
   }
 
   function closeSheetIfLearn() {
     const sheet = document.querySelector('.ph-sheet.open');
-    if (sheet && el.isConnected && sheet.contains(el)) sheet.querySelector('.ph-sheet-head button')?.click();
+    if (!sheet || !sheet.contains(el)) return;
+    const btns = [...sheet.querySelectorAll('.ph-sheet-head button')];
+    (btns.find((b) => b.getAttribute('aria-label') === '닫기') || btns[btns.length - 1])?.click();
   }
 
   async function show(st) {
@@ -297,7 +304,7 @@ export function installLearn(P) {
       await frame();
       const t = TOOL_BY_ID[sh.tool];
       const btn = toolButton(sh.tool);
-      const same = btn && btn.getAttribute('aria-label') !== t?.name;
+      const same = btn && !btn.classList.contains('ph-stool') && btn.dataset.tool !== sh.tool;
       return pointAt(btn, `${t?.name || sh.tool}${t?.key ? ` (${t.key})` : ''}${same ? ' · 이 칸을 오른쪽 클릭(길게 누르기)해서 고르세요' : ''}`, { back: isMobile() });
     }
     if (sh.panel) P.showPanel(sh.panel);
@@ -327,7 +334,11 @@ export function installLearn(P) {
     const L = lesson();
     const on = !!L && cur.step < L.steps.length && !!P.doc && !visible(el) && document.body.contains(document.querySelector('.ph')) && visible(document.querySelector('.ph'));
     coach.hidden = !on;
-    if (on) coachText.textContent = `${cur.step + 1}/${L.steps.length} · ${L.steps[cur.step].t}`;
+    if (!on) return;
+    coachText.textContent = `${cur.step + 1}/${L.steps.length} · ${L.steps[cur.step].t}`;
+    // at the top of the picture area, clear of the contextual task bar below
+    const r = document.querySelector('.ph-stage')?.getBoundingClientRect();
+    if (r) Object.assign(coach.style, { top: `${Math.round(r.top + 8)}px`, left: `${Math.round(r.left + r.width / 2)}px` });
   }
 
   // ---------------------------------------------------------------- the panel

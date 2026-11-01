@@ -321,7 +321,7 @@ export const LESSONS = [
     intro: '1080×1080 인스타그램 카드를 만듭니다. 모양 안에 사진을 넣는 클리핑 마스크와 정렬을 익힙니다.',
     steps: [
       { t: '둥근 사각형 그리기', d: '사각형 도구(U)를 고르고, 옵션 막대에서 모서리 반경을 40쯤 넣은 뒤 가운데에 상자를 그리세요.', why: '모양 레이어는 벡터라서 크기를 바꿔도 깨지지 않습니다.', key: 'U', show: { tool: 'shape' }, done: (s) => s.kind('shape') },
-      { t: '사진을 모양 위로', d: '\'사진\' 레이어가 모양 레이어 바로 위에 오게 레이어 패널에서 끌어 놓으세요.', show: { panel: 'layers', sel: '.ph-layers' }, done: (s) => { const i = s.layers.findIndex((l) => l.name === '사진'); return i > 0 && s.layers[i - 1].kind === 'shape'; } },
+      { t: '사진을 모양 위로', d: '레이어 패널에서 \'사진\'을 모양 레이어 바로 위로 끌어 놓거나, \'사진\'을 고르고 레이어 ▸ 정돈 ▸ 앞으로(Ctrl+])를 누르세요.', path: ['레이어', '정돈', '앞으로'], key: 'Ctrl+]', show: { panel: 'layers', sel: '.ph-layers' }, done: (s) => { const i = s.layers.findIndex((l) => l.name === '사진'); return i > 0 && s.layers[i - 1].kind === 'shape'; } },
       { t: '클리핑 마스크', d: '\'사진\'을 고른 채 레이어 ▸ 클리핑 마스크 만들기(Ctrl+Alt+G)를 누르세요. 사진이 모양 안에만 보입니다.', why: '레이어 패널에서 두 레이어 사이 경계를 Alt+클릭해도 됩니다.', path: ['레이어', '클리핑 마스크 만들기'], key: 'Ctrl+Alt+G', done: (s) => s.layers.some((l) => l.clip) },
       { t: '제목 넣기', d: '수평 문자 도구(T)로 카드 위나 아래에 제목을 쓰세요.', key: 'T', show: { tool: 'text' }, done: (s) => s.kind('text') },
       { t: '가운데 정렬', d: '레이어 패널에서 Shift를 누른 채 모양과 문자 레이어를 함께 고르고 레이어 ▸ 정렬 ▸ 가로 가운데를 누르세요.', why: '이동 도구의 옵션 막대에도 같은 정렬 단추가 있습니다.', path: ['레이어', '정렬', '가로 가운데'], done: (s) => s.did(/정렬/) },

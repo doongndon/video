@@ -170,7 +170,7 @@ export function forest(w, h, seed = 21) {
       const r = rng(seed + k);
       for (let x = -20; x < w + 20; x += 34 + r() * 60) pine(g, x, h * base, h * (0.3 + r() * 0.25 + k * 0.08), col);
       g.fillStyle = col;
-      g.fillRect(0, h * base - h * 0.06, w, h);
+      g.fillRect(0, h * base - h * 0.16, w, h);
       if (k < rows.length - 1) {
         g.fillStyle = 'rgba(232,238,240,0.25)';
         g.fillRect(0, 0, w, h);
