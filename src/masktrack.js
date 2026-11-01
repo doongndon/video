@@ -128,32 +128,35 @@ function matchPatch(a, b, w, h, cx, cy, gx, gy, R, B) {
 function fitSimilarity(pairs, method) {
   const n = pairs.length;
   if (!n) return null;
+  // optional 5th element: the pair's weight (how much texture the patch had)
   let mx = 0;
   let my = 0;
   let nx = 0;
   let ny = 0;
-  for (const [x, y, u, v] of pairs) {
-    mx += x;
-    my += y;
-    nx += u;
-    ny += v;
+  let sw = 0;
+  for (const [x, y, u, v, w = 1] of pairs) {
+    mx += x * w;
+    my += y * w;
+    nx += u * w;
+    ny += v * w;
+    sw += w;
   }
-  mx /= n;
-  my /= n;
-  nx /= n;
-  ny /= n;
+  mx /= sw;
+  my /= sw;
+  nx /= sw;
+  ny /= sw;
   if (method === 'position' || n < 3) return { a: 1, b: 0, tx: nx - mx, ty: ny - my };
   let sxx = 0;
   let sab = 0;
   let sba = 0;
-  for (const [x, y, u, v] of pairs) {
+  for (const [x, y, u, v, w = 1] of pairs) {
     const px = x - mx;
     const py = y - my;
     const qx = u - nx;
     const qy = v - ny;
-    sxx += px * px + py * py;
-    sab += px * qx + py * qy;
-    sba += px * qy - py * qx;
+    sxx += (px * px + py * py) * w;
+    sab += (px * qx + py * qy) * w;
+    sba += (px * qy - py * qx) * w;
   }
   if (sxx < 1e-6) return { a: 1, b: 0, tx: nx - mx, ty: ny - my };
   let a = sab / sxx;
@@ -208,10 +211,34 @@ function estimateMotion(A, B, w, h, box, method, guess, inside = () => true) {
       const c = matchPatch(pa.img, pb.img, pa.w, pa.h, cx >> 1, cy >> 1, Math.round(g[0] / 2), Math.round(g[1] / 2), 10, Math.max(6, Bsz >> 1));
       const f = matchPatch(A, B, w, h, cx, cy, Math.round(c.dx * 2), Math.round(c.dy * 2), 2, Bsz);
       if (f.cost > 60) continue;
-      pairs.push([cx, cy, cx + f.dx, cy + f.dy]);
+      pairs.push([cx, cy, cx + f.dx, cy + f.dy, mxv - mn]);
     }
   }
   if (!pairs.length) return null;
+  // the motion most of the texture agrees on: a loose mask around a face also covers some faint
+  // static background, and the face (eyes, mouth, edges) has far more contrast, so each patch
+  // votes for its own shift with its contrast and the pairs near the winning shift start the fit
+  if (pairs.length > 3) {
+    let bestW = -1;
+    let best = null;
+    for (const [x, y, u, v] of pairs) {
+      const dx = u - x;
+      const dy = v - y;
+      let w = 0;
+      for (const q of pairs) if (Math.hypot(q[2] - q[0] - dx, q[3] - q[1] - dy) < 2) w += q[4];
+      if (w > bestW) {
+        bestW = w;
+        best = [dx, dy];
+      }
+    }
+    // a scale or rotation change spreads the shifts out: only narrow down when the winner holds
+    // a real share of the texture, and keep everything within a few pixels of it
+    const keep = pairs.filter((q) => Math.hypot(q[2] - q[0] - best[0], q[3] - q[1] - best[1]) < 4);
+    if (keep.length >= 2 && keep.length < pairs.length) {
+      pairs.length = 0;
+      pairs.push(...keep);
+    }
+  }
   let tr = fitSimilarity(pairs, method);
   const found = pairs.length;
   // drop outliers (other things moving inside the mask) and refit
