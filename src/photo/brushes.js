@@ -693,26 +693,58 @@ export function installBrushTools(P) {
   });
 
   // ---- mixer brush: picks up and mixes with the paint already on the canvas
+  // Photoshop's 유용한 혼합 브러시 조합: [name, wet, load, mix]
+  const MIX_COMBOS = [
+    ['dry', '건조', 0, 50, 0], ['dryLight', '건조, 밝게 불러오기', 0, 1, 0], ['dryHeavy', '건조, 많이 불러오기', 0, 100, 0],
+    ['moist', '축축함', 10, 10, 50], ['moistLight', '축축함, 밝게 불러오기', 10, 5, 50], ['moistLightMix', '축축함, 밝게 혼합', 10, 10, 20], ['moistHeavyMix', '축축함, 많이 혼합', 10, 10, 80],
+    ['wet', '젖음', 50, 50, 50], ['wetLight', '젖음, 밝게 불러오기', 50, 5, 50], ['wetLightMix', '젖음, 밝게 혼합', 50, 50, 20], ['wetHeavyMix', '젖음, 많이 혼합', 50, 50, 90],
+    ['veryWet', '매우 젖음', 100, 50, 50], ['veryWetLight', '매우 젖음, 밝게 불러오기', 100, 5, 50], ['veryWetLightMix', '매우 젖음, 밝게 혼합', 100, 50, 20], ['veryWetHeavyMix', '매우 젖음, 많이 혼합', 100, 50, 90],
+  ];
   const mixer = strokeLike({
     id: 'mixer', name: '혼합 브러시', key: 'B', icon: 'mixer', group: 'paint', mode: 'paint',
-    options: [['size', '크기', 'range', 1, 1000, 40, 'px'], ['hardness', '경도', 'range', 0, 100, 60, '%'], ['wet', '젖음', 'range', 0, 100, 50, '%'], ['load', '물감 양', 'range', 1, 100, 50, '%'], ['mix', '섞기', 'range', 0, 100, 50, '%'], ['flow', '흐름', 'range', 1, 100, 100, '%'], ['clean', '획마다 붓 씻기', 'bool', null, null, true], ['smoothing', '보정', 'range', 0, 100, 10, '%']],
+    options: [['size', '크기', 'range', 1, 1000, 40, 'px'], ['hardness', '경도', 'range', 0, 100, 60, '%'],
+      ['loadEach', '각 획 후 브러시 불러오기', 'bool', null, null, true], ['clean', '각 획 후 브러시 청소', 'bool', null, null, true],
+      ['wet', '축축함', 'range', 0, 100, 50, '%'], ['load', '불러오기', 'range', 1, 100, 50, '%'], ['mix', '혼합', 'range', 0, 100, 50, '%'], ['flow', '흐름', 'range', 1, 100, 100, '%'],
+      ['smoothing', '보정', 'range', 0, 100, 10, '%'], ['sampleAll', '모든 레이어 샘플링', 'bool', null, null, false]],
     leadButtons() {
-      return P.brushOptionButtons('mixer');
+      // the useful combinations set 축축함, 불러오기 and 혼합 together
+      const o = P.opts('mixer');
+      const cur = MIX_COMBOS.find((c) => c[2] === o.wet && c[3] === o.load && c[4] === o.mix)?.[0] || '';
+      const sel = h('select', { title: '유용한 혼합 브러시 조합', 'aria-label': '유용한 혼합 브러시 조합' },
+        h('option', { value: '' }, '사용자 정의'), MIX_COMBOS.map(([id, name]) => h('option', { value: id }, name)));
+      sel.value = cur;
+      sel.addEventListener('change', () => {
+        const c = MIX_COMBOS.find((x) => x[0] === sel.value);
+        if (!c) return;
+        P.setOpt('mixer', 'wet', c[2]);
+        P.setOpt('mixer', 'load', c[3]);
+        P.setOpt('mixer', 'mix', c[4]);
+      });
+      const clean = h('button.small', { title: '브러시 청소 (묻은 물감을 닦아 냄)', onclick: () => { this.res = { c: hexRgb(P.fg).map(Number), amt: 0 }; toast('브러시를 청소했습니다'); } }, '청소');
+      const load = h('button.small', { title: '브러시 불러오기 (전경색 물감을 채움)', onclick: () => { this.res = { c: hexRgb(P.fg).map(Number), amt: 1 }; toast('전경색으로 브러시를 채웠습니다'); } }, '불러오기');
+      return [...P.brushOptionButtons('mixer'), load, clean, sel];
     },
     prepare(E, p, e, o, bo) {
       if (E.maskTarget?.()) {
         toast('혼합 브러시는 레이어 내용에만 칠합니다');
         return false;
       }
-      if (o.clean || !this.res) this.res = { c: hexRgb(E.fg).map(Number), amt: 1 };
+      // the reservoir: its colour and how much paint is left (0..1)
+      const fg = hexRgb(E.fg).map(Number);
+      if (!this.res) this.res = { c: fg, amt: 1 };
+      else if (o.loadEach !== false) this.res = { c: o.clean !== false ? fg : this.res.c.map((v, k) => v * 0.3 + fg[k] * 0.7), amt: 1 };
+      else if (o.clean !== false) this.res = { c: fg, amt: 0 };
       const res = this.res;
       const tmp = makeCanvas(4, 4);
       const tg = tmp.getContext('2d', { willReadFrequently: true });
       const wet = o.wet / 100;
       const mixK = o.mix / 100;
       const load = o.load / 100;
+      // 모든 레이어 샘플링: the picture under the brush, with this stroke's own paint on top
+      const all = o.sampleAll ? sampleCanvas(P, E.doc, { sample: 'all' }) : null;
       bo.mixer = (st, x, y, s) => {
         tg.clearRect(0, 0, 4, 4);
+        if (all) tg.drawImage(all, x + st.ox - s / 2, y + st.oy - s / 2, s, s, 0, 0, 4, 4);
         tg.drawImage(st.g.canvas, x - s / 2, y - s / 2, s, s, 0, 0, 4, 4);
         const d = tg.getImageData(0, 0, 4, 4).data;
         let r = 0;
@@ -726,14 +758,17 @@ export function installBrushTools(P) {
           a += d[i + 3];
         }
         let col = res.c;
+        let pick = 0;
         if (a > 0) {
           const cv = [r / a, g2 / a, b / a];
-          const pick = wet * Math.min(1, a / 16 / 255);
-          col = res.c.map((v, k) => v + (cv[k] - v) * mixK * pick);
+          pick = wet * Math.min(1, a / 16 / 255);
+          // an emptier brush lays down more of what it picked up
+          const k = Math.min(1, mixK * pick + (1 - res.amt) * pick);
+          col = res.c.map((v, i) => v + (cv[i] - v) * k);
           // the brush gets dirty with what it touches
-          res.c = res.c.map((v, k) => v + (cv[k] - v) * pick * 0.12);
+          res.c = res.c.map((v, i) => v + (cv[i] - v) * pick * 0.12);
         }
-        const alpha = mixK >= 1 ? 1 : res.amt;
+        const alpha = Math.max(mixK >= 1 && res.amt > 0 ? 1 : res.amt, pick * 0.9);
         res.amt = Math.max(0, res.amt * (1 - (1 - load) * 0.04));
         return { color: rgbHex(...col), alpha };
       };

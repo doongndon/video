@@ -16,7 +16,7 @@ export const PANEL_KEYS = { project: '1', source: '2', timeline: '3', program: '
 // menu commands whose keys only this module handles (shortcuts.js does not know them)
 // (Ctrl+; / Ctrl+Shift+; are 보기 ▸ 안내선 표시 / 프로그램 모니터에서 스냅 wherever the focus is;
 // shortcuts.js would read them as ; 들어 올리기)
-const MENU_ONLY_KEYS = ['Ctrl+Alt+K', 'Ctrl+Alt+N', 'Ctrl+Shift+S', 'Ctrl+Alt+R', 'Ctrl+Alt+E', 'Ctrl+Shift+/', 'Ctrl+;', 'Ctrl+Shift+;'];
+const MENU_ONLY_KEYS = ['Ctrl+Alt+K', 'Ctrl+Alt+N', 'Ctrl+Shift+S', 'Ctrl+Alt+R', 'Ctrl+Alt+E', 'Ctrl+Shift+/', 'Ctrl+/', 'Ctrl+;', 'Ctrl+Shift+;'];
 // the browser keeps these for itself
 const RESERVED = ['Ctrl+N', 'Ctrl+T', 'Ctrl+W', 'Ctrl+Q', 'Ctrl+Shift+N', 'Ctrl+Shift+T', 'Ctrl+Shift+W', 'Ctrl+Tab', 'Ctrl+Shift+Tab', 'F11', 'F12', 'Ctrl+Shift+I', 'Ctrl+Shift+J', 'Ctrl+Shift+Q'];
 

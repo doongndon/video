@@ -33,7 +33,8 @@ export function ensureAdjStyle() {
 .adj-nums .ph-num { width: calc(58px * var(--ui-scale)); }
 .adj-picks { display: inline-flex; gap: 4px; }
 .adj-picks button { width: 30px; height: 26px; min-height: 0; padding: 0; display: grid; place-items: center; }
-.adj-picks button.on { background: var(--accent); border-color: var(--accent); }
+.adj-picks button.on, .adj-onimg.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.adj-onimg { width: 30px; height: 26px; min-height: 0; padding: 0; display: inline-grid; place-items: center; }
 .adj-drop { width: 14px; height: 14px; border-radius: 50%; border: 1px solid #999; }
 .adj-hue { position: relative; width: 100%; height: 40px; touch-action: none; }
 .adj-hue .bar { position: absolute; left: 0; right: 0; height: 10px; border-radius: 2px; }
@@ -67,6 +68,13 @@ details.lq-group > summary { cursor: pointer; font-weight: 600; }
 .lq-side .lq-row .ph-num { width: 52px; }
 .lq-side .lq-row > span { font-size: var(--fs-s); color: var(--text-dim); }
 body.mobile .lq-side { max-height: none; }
+.lq-vp { position: relative; display: block; height: min(640px, 70vh); }
+.lq-vp .lq-canvas { position: absolute; inset: 0; display: block; }
+.lq-vp .lq-view { position: absolute; left: 0; top: 0; width: 100%; height: 100%; max-width: none; max-height: none; }
+.lq-zoombar { position: absolute; left: 8px; bottom: 8px; display: flex; align-items: center; gap: 4px; padding: 3px 6px; border-radius: 6px; background: rgba(20, 22, 26, .82); font-size: var(--fs-s); }
+.lq-zoombar button { min-height: 0; height: 24px; padding: 0 8px; }
+.lq-zoombar .mono { min-width: 52px; text-align: center; }
+@media (max-width: 760px) { .lq-vp { height: 52vh; } }
 `;
   document.head.append(h('style', { id: STYLE_ID }, css));
 }
@@ -107,6 +115,36 @@ function slider(label, min, max, value, onInput, { step = 1, bg = null } = {}) {
 }
 const grad = (a, b) => `linear-gradient(90deg, ${a}, ${b})`;
 const SPECTRUM = 'linear-gradient(90deg,#f00,#ff0,#0f0,#0ff,#00f,#f0f,#f00)';
+
+/**
+ * The on-image adjustment tool's button (a hand): while on, pressing on the picture and dragging
+ * changes the setting under the pointer. handlers: { start(rgb), move(dx, dy, e), end() }.
+ */
+function onImageTool(env, title, handlers) {
+  const b = h('button.small.adj-onimg', { type: 'button', title, 'aria-label': title }, svgHand());
+  let on = null;
+  b.addEventListener('click', () => {
+    if (on) return on.cancel();
+    if (!env?.drag) return toast('문서가 열려 있을 때 쓸 수 있습니다');
+    b.classList.add('on');
+    on = env.drag({ ...handlers, off: () => { on = null; b.classList.remove('on'); } });
+    return undefined;
+  });
+  return b;
+}
+const svgHand = () => {
+  const s = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  s.setAttribute('viewBox', '0 0 16 16');
+  s.setAttribute('width', '16');
+  s.setAttribute('height', '16');
+  s.setAttribute('fill', 'none');
+  s.setAttribute('stroke', 'currentColor');
+  s.setAttribute('stroke-width', '1.3');
+  s.setAttribute('stroke-linecap', 'round');
+  s.setAttribute('stroke-linejoin', 'round');
+  s.innerHTML = '<path d="M5.5 8V4a1 1 0 0 1 2 0v3.5M7.5 7V3a1 1 0 0 1 2 0v4.5M9.5 7.2V4.5a1 1 0 0 1 2 0v5c0 2.4-1.5 4-3.7 4-1.7 0-2.6-.8-3.5-2.2L2.6 9a1 1 0 0 1 1.6-1.2l1.3 1.6"/><path d="M1.5 3.5h2M2.5 2.5v2M12.5 1.5l1.5 1.5-1.5 1.5"/>';
+  return s;
+};
 
 /** Eyedropper buttons: black / grey / white point; each picks once on the picture. */
 function pointPickers(env, onPick) {
@@ -597,24 +635,30 @@ export function curvesEditor(p, onChange, env) {
     setCh(ch);
     onChange(p, true);
   });
-  // on-image adjustment: click a spot of the picture to put a point at its brightness
-  const onImage = h('button.small', { type: 'button', title: '이미지에서 클릭하여 그 밝기에 점 추가' }, '이미지에서 점 추가');
-  onImage.addEventListener('click', () => {
-    if (!env?.sample) return;
-    onImage.classList.add('on');
-    env.sample((rgb) => {
-      onImage.classList.remove('on');
-      if (!rgb) return;
-      const v = ch === 'points' ? lum(rgb[0], rgb[1], rgb[2]) : rgb[{ r: 0, g: 1, b: 2 }[ch]];
-      const lut = curveLut(cur());
-      graph.addAt(v, lut[Math.round(clamp(v, 0, 255))]);
-    });
+  // on-image adjustment: press a spot of the picture to put a point at its brightness, drag up or
+  // down to lighten or darken that tone
+  let held = null;
+  const onImage = onImageTool(env, '이미지를 클릭하고 끌어서 곡선 수정 (위: 밝게, 아래: 어둡게)', {
+    start: (rgb) => {
+      const v = Math.round(clamp(ch === 'points' ? lum(rgb[0], rgb[1], rgb[2]) : rgb[{ r: 0, g: 1, b: 2 }[ch]], 0, 255));
+      held = { v, y: curveLut(cur())[v] };
+      graph.addAt(v, held.y, false);
+    },
+    move: (dx, dy) => {
+      if (held) graph.addAt(held.v, clamp(Math.round(held.y - dy * 0.5), 0, 255), false);
+    },
+    end: () => {
+      if (!held) return;
+      const pt = graph.selected();
+      graph.addAt(held.v, pt ? pt[1] : held.y, true);
+      held = null;
+    },
   });
   return [
     h('div.adj-row', h('span', '사전 설정'), preset),
     h('div.adj-row', h('span', '채널'), chSel, auto, picks),
     graph,
-    h('div.adj-row', h('span', '입력'), inN, h('span', '출력'), outN, onImage),
+    h('div.adj-row', onImage, h('span', '입력'), inN, h('span', '출력'), outN),
     h('div.note', '누르면 점 추가 · 끌어서 이동 · 상자 밖으로 끌거나 두 번 눌러 삭제 · Alt+클릭: 격자'),
   ];
 }
@@ -780,6 +824,46 @@ export function hueSatEditor(p, onChange, env) {
     edit = v;
     syncAll();
   }, '편집');
+  // on-image tool: press a colour, drag left / right for less / more saturation (Ctrl: hue)
+  let held = null;
+  const onImage = onImageTool(env, '이미지를 클릭하고 끌어서 채도 수정 (Ctrl: 색조)', {
+    start: (rgb) => {
+      const [r, g, b] = rgb.map((v) => v / 255);
+      const mx = Math.max(r, g, b);
+      const mn = Math.min(r, g, b);
+      if (mx - mn >= 0.03 && !p.colorize) {
+        let hh = mx === r ? (g - b) / (mx - mn) : mx === g ? (b - r) / (mx - mn) + 2 : (r - g) / (mx - mn) + 4;
+        hh = ((hh * 60) + 360) % 360;
+        // the named range whose middle is nearest
+        edit = HUE_RANGES.map((x) => {
+          const c = (x[2][1] + ((x[2][2] - x[2][1] + 360) % 360) / 2) % 360;
+          const dist = Math.abs(c - hh);
+          return [x[0], Math.min(dist, 360 - dist)];
+        }).sort((a, b2) => a[1] - b2[1])[0][0];
+      } else edit = 'master';
+      editSel.value = edit;
+      syncAll();
+      const v = edit === 'master' ? { h: p.hue || 0, s: p.saturation || 0 } : rv();
+      held = { h: v.h || 0, s: v.s || 0 };
+    },
+    move: (dx, dy, e) => {
+      if (!held) return;
+      const hueMode = e.ctrlKey || e.metaKey;
+      const val = hueMode ? clamp(Math.round(held.h + dx * 0.5), -180, 180) : clamp(Math.round(held.s + dx * 0.5), -100, 100);
+      if (edit === 'master') {
+        if (hueMode) p.hue = val;
+        else p.saturation = val;
+        onChange(p, false);
+      } else setRange(hueMode ? { h: val } : { s: val }, false);
+      (hueMode ? hue : sat).set(val);
+      if (hueMode) syncRange();
+    },
+    end: () => {
+      if (!held) return;
+      held = null;
+      onChange(p, true);
+    },
+  });
   const syncAll = () => {
     const m = edit === 'master';
     const v = m ? { h: p.hue, s: p.saturation, l: p.lightness } : rv();
@@ -829,7 +913,7 @@ export function hueSatEditor(p, onChange, env) {
   syncAll();
   return [
     h('div.adj-row', h('span', '사전 설정'), preset),
-    h('div.adj-row', h('span', '편집'), editSel, pick),
+    h('div.adj-row', onImage, h('span', '편집'), editSel, pick),
     hue.el, sat.el, lig.el,
     rangeRow,
     h('label.ph-prow', colorize, '색상화'),
@@ -988,7 +1072,38 @@ export function bwEditor(p, onChange, env) {
     onChange(p, true);
   });
   sync();
-  return [h('div.adj-row', h('span', '사전 설정'), preset, auto), ...sl.map((x) => x.el), h('label.ph-prow', tint, '색조', swatch), tintRows];
+  // on-image tool: press a colour, drag left / right to darken / lighten its family's grey
+  let held = null;
+  const onImage = onImageTool(env, '이미지를 클릭하고 끌어서 그 색의 밝기 수정 (왼쪽: 어둡게, 오른쪽: 밝게)', {
+    start: (rgb) => {
+      const [r, g, b] = rgb.map((v) => v / 255);
+      const mx = Math.max(r, g, b);
+      const mn = Math.min(r, g, b);
+      if (mx - mn < 0.03) {
+        held = null;
+        toast('회색에 가까운 곳은 색 계열이 없습니다. 색이 있는 곳을 누르세요');
+        return;
+      }
+      let hh = mx === r ? (g - b) / (mx - mn) : mx === g ? (b - r) / (mx - mn) + 2 : (r - g) / (mx - mn) + 4;
+      hh = ((hh * 60) + 360) % 360;
+      // reds 0°, yellows 60°, greens 120°, cyans 180°, blues 240°, magentas 300°
+      const i = Math.round(hh / 60) % 6;
+      held = { i, v: p[BW_KEYS[i][0]] };
+    },
+    move: (dx) => {
+      if (!held) return;
+      const [k] = BW_KEYS[held.i];
+      p[k] = clamp(Math.round(held.v + dx * 0.5), -200, 300);
+      sl[held.i].set(p[k]);
+      onChange(p, false);
+    },
+    end: () => {
+      if (!held) return;
+      held = null;
+      onChange(p, true);
+    },
+  });
+  return [h('div.adj-row', onImage, h('span', '사전 설정'), preset, auto), ...sl.map((x) => x.el), h('label.ph-prow', tint, '색조', swatch), tintRows];
 }
 
 // ---------------------------------------------------------------- Photo Filter

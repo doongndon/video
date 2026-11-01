@@ -2180,7 +2180,8 @@ export function createTimeline() {
         })) },
         { label: '모션 초기화', disabled: !c.effects.some((fx) => fx.type === 'motion'), action: () => { for (const id of ids) { const fx = store.seq.clips[id]?.effects.find((f) => f.type === 'motion'); if (fx) edit.resetEffect(id, fx.id); } } },
         '-',
-        { label: '프로젝트 패널에서 보기', disabled: !c.mediaId, action: () => { store.ui.selectedMedia = new Set([c.mediaId]); store.emit('reveal-media', c.mediaId); } },
+        // 프로젝트에서 표시 (Premiere's Reveal in Project): a clip from a subclip shows the subclip
+        { label: '프로젝트에서 표시', disabled: !c.mediaId, action: () => { const id = store.project.media[c.subclip?.id] ? c.subclip.id : c.mediaId; store.ui.selectedMedia = new Set([id]); store.emit('reveal-media', id); } },
       ], e.clientX, e.clientY);
       return;
     }

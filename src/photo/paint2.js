@@ -14,62 +14,67 @@ import { BRUSH_BAR } from './brushpanel.js';
 const patternList = () => listPatterns().map((p) => [p.id, p.name]);
 
 /**
- * The pattern stamp's 인상파 효과: a pattern tile repainted as short daubs, each the colour of the
- * tile where it starts, laid at a random slant (a quick painterly look, like Photoshop's). The daubs
- * are laid over the tile repeated 3×3 and the middle is kept, so the result still tiles.
+ * The pattern stamp's 인상파 효과: the pattern repainted as short daubs, each the colour of the
+ * pattern where it starts, laid at a random slant (a quick painterly look, like Photoshop's). The
+ * daubs are laid block by block, only where the brush goes; returns the source canvas and the
+ * function that prepares a document area of it.
  */
-const daubCache = new Map();
-function impressionistTile(id, scale, r) {
-  const key = `${id}|${scale}|${r}`;
-  if (daubCache.has(key)) return daubCache.get(key);
-  const p = patternCanvas(id);
-  const k = Math.max(0.01, scale / 100);
-  const tw = Math.max(1, Math.round(p.width * k));
-  const th = Math.max(1, Math.round(p.height * k));
-  const big = makeCanvas(tw * 3, th * 3);
-  const bg = big.getContext('2d', { willReadFrequently: true });
-  for (let y = 0; y < 3; y++) for (let x = 0; x < 3; x++) bg.drawImage(p, x * tw, y * th, tw, th);
-  const daubs = impressionist(big, r);
-  const tile = makeCanvas(tw, th);
-  tile.getContext('2d').drawImage(daubs, tw, th, tw, th, 0, 0, tw, th);
-  if (daubCache.size > 16) daubCache.delete(daubCache.keys().next().value);
-  daubCache.set(key, tile);
-  return tile;
-}
-
-function impressionist(src, r) {
-  const W = src.width;
-  const H = src.height;
-  const d = src.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, W, H).data;
+function impressionistSource(plain, r) {
+  const W = plain.width;
+  const H = plain.height;
   const out = makeCanvas(W, H);
   const g = out.getContext('2d');
-  // the tile's own colours under the daubs, so no gaps show
-  g.drawImage(src, 0, 0);
-  g.lineCap = 'round';
+  // the pattern's own colours under the daubs, so no gaps show
+  g.drawImage(plain, 0, 0);
+  const pg = plain.getContext('2d', { willReadFrequently: true });
+  const B = 192;
+  const done = new Set();
   let seed = 9;
   const rnd = () => {
     seed = (seed * 16807) % 2147483647;
     return seed / 2147483647;
   };
-  const step = Math.max(2, Math.round(r * 0.8));
-  for (let y = 0; y < H + step; y += step) {
-    for (let x = 0; x < W + step; x += step) {
-      const px = Math.min(W - 1, Math.max(0, Math.round(x + (rnd() - 0.5) * step)));
-      const py = Math.min(H - 1, Math.max(0, Math.round(y + (rnd() - 0.5) * step)));
-      const i = (py * W + px) * 4;
-      if (!d[i + 3]) continue;
-      const a = rnd() * Math.PI;
-      const len = r * (1 + rnd() * 1.5);
-      g.strokeStyle = `rgba(${d[i]},${d[i + 1]},${d[i + 2]},${d[i + 3] / 255})`;
-      g.lineWidth = r * (0.8 + rnd() * 0.6);
-      g.beginPath();
-      g.moveTo(px - Math.cos(a) * len, py - Math.sin(a) * len);
-      g.lineTo(px + Math.cos(a) * len, py + Math.sin(a) * len);
-      g.stroke();
+  g.lineCap = 'round';
+  const block = (bx, by) => {
+    const x0 = bx * B;
+    const y0 = by * B;
+    const w = Math.min(B, W - x0);
+    const hh = Math.min(B, H - y0);
+    if (w <= 0 || hh <= 0) return;
+    const d = pg.getImageData(x0, y0, w, hh).data;
+    const step = Math.max(2, Math.round(r * 0.8));
+    for (let y = 0; y < hh; y += step) {
+      for (let x = 0; x < w; x += step) {
+        const px = Math.min(w - 1, Math.max(0, Math.round(x + (rnd() - 0.5) * step)));
+        const py = Math.min(hh - 1, Math.max(0, Math.round(y + (rnd() - 0.5) * step)));
+        const i = (py * w + px) * 4;
+        if (!d[i + 3]) continue;
+        const a = rnd() * Math.PI;
+        const len = r * (1 + rnd() * 1.5);
+        g.strokeStyle = `rgba(${d[i]},${d[i + 1]},${d[i + 2]},${d[i + 3] / 255})`;
+        g.lineWidth = r * (0.8 + rnd() * 0.6);
+        g.beginPath();
+        g.moveTo(x0 + px - Math.cos(a) * len, y0 + py - Math.sin(a) * len);
+        g.lineTo(x0 + px + Math.cos(a) * len, y0 + py + Math.sin(a) * len);
+        g.stroke();
+      }
     }
-  }
-  return out;
+  };
+  const prepare = (rc) => {
+    // daubs reach about 3r past their block
+    const m = r * 3;
+    for (let by = Math.max(0, Math.floor((rc.y - m) / B)); by <= Math.floor((rc.y + rc.h + m) / B); by++) {
+      for (let bx = Math.max(0, Math.floor((rc.x - m) / B)); bx <= Math.floor((rc.x + rc.w + m) / B); bx++) {
+        const k = `${bx},${by}`;
+        if (done.has(k)) continue;
+        done.add(k);
+        block(bx, by);
+      }
+    }
+  };
+  return { canvas: out, prepare };
 }
+
 
 export function installPaint2(P) {
   const C = P.cmd;
@@ -298,16 +303,12 @@ export function installPaint2(P) {
       const at = o.aligned === false ? p : { x: 0, y: 0 };
       const ox = Math.round(at.x);
       const oy = Math.round(at.y);
+      bo.srcCanvas = paintPattern(E.doc.width, E.doc.height, o.pattern, o.scale, ox, oy);
       if (o.impressionist) {
-        // the painterly tile, laid like paintPattern lays the plain one
-        const tile = impressionistTile(o.pattern, o.scale ?? 100, clamp(Math.round((o.size || 60) / 12), 2, 24));
-        const c = makeCanvas(E.doc.width, E.doc.height);
-        const cg = c.getContext('2d');
-        cg.translate(ox, oy);
-        cg.fillStyle = cg.createPattern(tile, 'repeat');
-        cg.fillRect(-ox, -oy, c.width, c.height);
-        bo.srcCanvas = c;
-      } else bo.srcCanvas = paintPattern(E.doc.width, E.doc.height, o.pattern, o.scale, ox, oy);
+        const src = impressionistSource(bo.srcCanvas, clamp(Math.round((o.size || 60) / 12), 2, 24));
+        bo.srcCanvas = src.canvas;
+        bo.cloneSrcPrepare = src.prepare;
+      }
       bo.cloneOffset = { x: 0, y: 0 };
       // brush tips and brush settings (brushengine.js) paint the pattern through
       bo.cloneSrc = bo.srcCanvas;

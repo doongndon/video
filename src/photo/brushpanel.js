@@ -718,7 +718,6 @@ export function installBrushPanels(P) {
     window.addEventListener('pointercancel', up, true);
   }, true);
 
-
   // ---- Brushes panel
   const brushesEl = h('div.ph-panel.bp-brushes');
   let brushesQ = '';

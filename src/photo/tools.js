@@ -445,10 +445,21 @@ class Retouch {
             d[o + c] = src[o + c] + (v - src[o + c]) * wgt * (this.kind === 'sharpen' ? 0.6 : 1);
           }
         } else if (this.kind === 'dodge' || this.kind === 'burn') {
-          const tw = tone((src[o] * 0.299 + src[o + 1] * 0.587 + src[o + 2] * 0.114) / 255) * wgt * 0.35;
-          for (let c = 0; c < 3; c++) {
-            const v = src[o + c];
-            d[o + c] = this.kind === 'dodge' ? v + (255 - v) * tw : v - v * tw;
+          const L = src[o] * 0.299 + src[o + 1] * 0.587 + src[o + 2] * 0.114;
+          const tw = tone(L / 255) * wgt * 0.35;
+          if (this.o.protectTones) {
+            // 톤 보호: only the brightness moves; the colour keeps its hue and strength, shrunk just
+            // enough not to clip
+            const L2 = this.kind === 'dodge' ? L + (255 - L) * tw : L - L * tw;
+            const hi = Math.max(src[o], src[o + 1], src[o + 2]) - L;
+            const lo = L - Math.min(src[o], src[o + 1], src[o + 2]);
+            const s = Math.min(1, hi > 0 ? (255 - L2) / hi : 1, lo > 0 ? L2 / lo : 1);
+            for (let c = 0; c < 3; c++) d[o + c] = L2 + (src[o + c] - L) * s;
+          } else {
+            for (let c = 0; c < 3; c++) {
+              const v = src[o + c];
+              d[o + c] = this.kind === 'dodge' ? v + (255 - v) * tw : v - v * tw;
+            }
           }
         } else if (this.kind === 'sponge') {
           // sponge: push the colour away from (saturate) or towards (desaturate) its own grey
@@ -2483,13 +2494,14 @@ export const TOOLS = [
     },
   },
   // ---- retouch
-  retouchTool('blur', '흐림 효과 브러시', null, 'drop', 'blur'),
-  retouchTool('sharpen', '선명 효과 브러시', null, 'sharpenTool', 'sharpen'),
-  retouchTool('smudge', '손가락 (문지르기)', null, 'smudge', 'smudge'),
+  // Photoshop's names (흐림 효과 도구, 손가락 도구, 닷지 도구, 스폰지 도구…)
+  retouchTool('blur', '흐림 효과', null, 'drop', 'blur'),
+  retouchTool('sharpen', '선명 효과', null, 'sharpenTool', 'sharpen'),
+  retouchTool('smudge', '손가락', null, 'smudge', 'smudge'),
   retouchTool('push', '픽셀 유동화 (밀기)', null, 'push', 'push'),
-  retouchTool('dodge', '닷지 (밝게)', 'O', 'dodge', 'dodge', [TONE_RANGE], '노출'),
-  retouchTool('burn', '번 (어둡게)', 'O', 'burn', 'burn', [TONE_RANGE], '노출'),
-  retouchTool('sponge', '스펀지 (채도)', 'O', 'sponge', 'sponge', [['mode', '모드', 'select', null, null, 'desaturate', [['desaturate', '채도 감소'], ['saturate', '채도 증가']]], ['vibrance', '활기 (강한 색은 덜)', 'bool', null, null, true]], '흐름'),
+  retouchTool('dodge', '닷지', 'O', 'dodge', 'dodge', [TONE_RANGE, ['protectTones', '톤 보호', 'bool', null, null, true]], '노출'),
+  retouchTool('burn', '번', 'O', 'burn', 'burn', [TONE_RANGE, ['protectTones', '톤 보호', 'bool', null, null, true]], '노출'),
+  retouchTool('sponge', '스폰지', 'O', 'sponge', 'sponge', [['mode', '모드', 'select', null, null, 'desaturate', [['desaturate', '채도 감소'], ['saturate', '채도 증가']]], ['vibrance', '활기 (강한 색은 덜)', 'bool', null, null, true]], '흐름'),
   // ---- text
   typeTool('text', '수평 문자', 'T', 'text', { vertical: false, mask: false }),
   typeTool('verticalText', '세로 문자', 'T', 'verticalText', { vertical: true, mask: false }),

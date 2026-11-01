@@ -3,11 +3,11 @@
 // scrub and poster frames, search, subclips, new items (새 항목) and drag to the timeline.
 
 import { store } from '../store.js';
-import { runtime, mediaEvents, importFiles, createSyntheticMedia, removeMedia, attachFile, mediaStatus, mediaUrl } from '../media.js';
+import { runtime, mediaEvents, importFiles, createSyntheticMedia, removeMedia, attachFile, mediaStatus, mediaUrl, fileTime } from '../media.js';
 import * as edit from '../edit.js';
 import { relinkFromFiles } from '../persist.js';
 import { LABEL_COLORS, DEFAULT_STILL_DURATION } from '../model.js';
-import { h, uid, clamp, once, formatTimecode, formatShort, formatBytes, modKey } from '../util.js';
+import { h, uid, clamp, once, formatTimecode, formatShort, formatBytes, modKey, isMac } from '../util.js';
 import { showMenu, openModal, promptDialog, confirmDialog, loadPref, savePref, toast, dnd, showPanel } from './common.js';
 import { icon, iconButton } from './icons.js';
 import { extendMenu } from './menubar.js';
@@ -533,7 +533,8 @@ export function createProjectPanel() {
     let still = null;
     if (m.kind === 'video' && st === 'ready') {
       const t = m.posterTime ?? (isSubclip(m) ? m.subIn : null);
-      if (t != null) still = frameThumb(file, t);
+      // 푸티지 해석: the file is read at the interpreted time's file position
+      if (t != null) still = frameThumb(file, fileTime(store.project.media[file], t));
     }
     const base = still || rt?.thumb;
     if (base) {
@@ -870,7 +871,7 @@ const newRank = (it) => {
 };
 const fileNewItems = () => [
   { label: '시퀀스…', action: openNewSequenceDialog },
-  { label: '저장소', action: () => projectApi.newBin?.() },
+  { label: '저장소', key: `${isMac ? '⌘' : 'Ctrl+'}/`, action: () => projectApi.newBin?.() },
   { label: '조정 레이어', action: () => projectApi.reveal?.(createSyntheticMedia('adjustment', { name: '조정 레이어' })) },
   { label: '바 및 톤…', action: openBarsToneDialog },
   { label: '블랙 비디오', action: () => projectApi.reveal?.(createSyntheticMedia('color', { name: '블랙 비디오', color: '#000000' })) },

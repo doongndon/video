@@ -454,6 +454,86 @@ export function pickOnPicture(P, sampleAt, cb) {
   return undefined;
 }
 
+/**
+ * Photoshop's on-image adjustment tool: while on, a press on the picture samples it (start(rgb)) and
+ * dragging reports how far the pointer went (move(dx, dy, e) in screen pixels, end() on release).
+ * The dialogs stay usable; Esc or a press outside the picture and the dialogs turns it off.
+ * Returns { cancel }.
+ */
+let dragging = null;
+export function dragOnPicture(P, sampleAt, { start, move, end, off }) {
+  dragging?.cancel();
+  picking?.cancel();
+  const stage = document.querySelector('.ph-stage');
+  if (!P?.doc || !stage) return null;
+  const backs = [...document.querySelectorAll('.modal-backdrop')];
+  const saved = backs.map((b) => [b.style.pointerEvents, [...b.querySelectorAll(':scope > .modal')].map((m) => m.style.pointerEvents)]);
+  for (const b of backs) {
+    b.style.pointerEvents = 'none';
+    b.querySelectorAll(':scope > .modal').forEach((m) => { m.style.pointerEvents = 'auto'; });
+  }
+  document.body.classList.add('ph-picking');
+  let held = null;
+  const onDown = (e) => {
+    if (e.target.closest?.('.modal')) return;
+    e.preventDefault();
+    e.stopPropagation();
+    e.stopImmediatePropagation?.();
+    if (!stage.contains(e.target)) return finish();
+    const pt = P.toDoc(e.clientX, e.clientY);
+    let rgb = null;
+    try {
+      rgb = sampleAt(Math.floor(pt.x), Math.floor(pt.y));
+    } catch {
+      rgb = null;
+    }
+    if (!rgb) return undefined;
+    held = { x: e.clientX, y: e.clientY };
+    start(rgb, e);
+    return undefined;
+  };
+  const onMove = (e) => {
+    if (!held) return;
+    e.preventDefault();
+    e.stopPropagation();
+    move(e.clientX - held.x, e.clientY - held.y, e);
+  };
+  const onUp = (e) => {
+    if (!held) return;
+    e.stopPropagation();
+    held = null;
+    end?.();
+  };
+  const onKey = (e) => {
+    if (e.key !== 'Escape') return;
+    e.preventDefault();
+    e.stopPropagation();
+    finish();
+  };
+  function finish() {
+    window.removeEventListener('pointerdown', onDown, true);
+    window.removeEventListener('pointermove', onMove, true);
+    window.removeEventListener('pointerup', onUp, true);
+    window.removeEventListener('keydown', onKey, true);
+    backs.forEach((b, i) => {
+      b.style.pointerEvents = saved[i][0];
+      b.querySelectorAll(':scope > .modal').forEach((m, j) => { m.style.pointerEvents = saved[i][1][j] || ''; });
+    });
+    document.body.classList.remove('ph-picking');
+    if (held) end?.();
+    held = null;
+    dragging = null;
+    off?.();
+  }
+  window.addEventListener('pointerdown', onDown, true);
+  window.addEventListener('pointermove', onMove, true);
+  window.addEventListener('pointerup', onUp, true);
+  window.addEventListener('keydown', onKey, true);
+  dragging = { cancel: finish };
+  toast('그림을 누른 채 끌어서 조정하세요 (Esc: 끝내기)');
+  return dragging;
+}
+
 /** Average colour of a 3×3 spot of a canvas at (x, y) in its own pixels. */
 function spot(c, x, y) {
   if (!c || x < 0 || y < 0 || x >= c.width || y >= c.height) return null;
@@ -506,6 +586,7 @@ function makeEnv(P, { source = null, sampleAt = null, ctls = {} } = {}) {
     histSource: src,
     hist: () => histOf(src()),
     sample: doc ? (cb) => pickOnPicture(api, at, cb) : null,
+    drag: doc ? (handlers) => dragOnPicture(api, at, handlers) : null,
     ctl: (key) => ctls[key],
     ctls,
   };
@@ -887,6 +968,7 @@ function liveLayerDialog(P, { title, defs, params, compute, label, slow = false,
     onClose: () => {
       clearTimeout(timer);
       picking?.cancel();
+      dragging?.cancel();
       if (!applied) {
         doc.restore(before);
         P.afterHistory();
@@ -1195,6 +1277,7 @@ function maskDialog(P, kind, id) {
     onClose: () => {
       clearTimeout(timer);
       picking?.cancel();
+      dragging?.cancel();
       if (!ok) {
         doc.restore(before);
         P.afterHistory();
@@ -1348,6 +1431,7 @@ export function smartFilterDialog(P, id, params, index = null) {
     onClose: () => {
       clearTimeout(timer);
       picking?.cancel();
+      dragging?.cancel();
       if (!ok) {
         doc.restore(before);
         P.afterHistory();

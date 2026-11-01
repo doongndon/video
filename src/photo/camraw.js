@@ -651,6 +651,8 @@ function ensureStyle() {
 .cr-tabs button { padding: 2px 8px; min-height: 0; font-size: var(--fs-xs); }
 .cr-tabs button.on { background: var(--accent-soft); border-color: var(--accent); color: var(--value); }
 .cr-line { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: var(--fs-s); color: var(--text-dim); }
+.cr-wheelwrap { display: grid; place-items: center; padding: 4px 0; }
+.cr-wheel { width: 132px; height: 132px; cursor: crosshair; touch-action: none; }
 body.mobile .cr { grid-template-columns: 1fr; height: auto; }
 body.mobile .cr-view { height: 46vh; }
 body.mobile .cr-side { max-height: 40vh; }
@@ -983,11 +985,81 @@ export function cameraRawDialog(P, { params = null, onApply = null, smartIndex =
   const cgTabs = h('div.cr-tabs');
   const cgBox = h('div');
   let cgTab = 'Mid';
+  /** A colour wheel: the angle is the hue, the distance from the middle the saturation. */
+  const wheel = (hKey, sKey) => {
+    const S = 132;
+    const c = h('canvas.cr-wheel', { width: S, height: S, 'aria-label': '색상 휠 (끌어서 색조·채도)' });
+    const g = c.getContext('2d');
+    const R = S / 2 - 6;
+    const draw = () => {
+      g.clearRect(0, 0, S, S);
+      const cg = g.createConicGradient(-Math.PI / 2, S / 2, S / 2);
+      for (let i = 0; i <= 6; i++) cg.addColorStop(i / 6, `hsl(${i * 60},90%,50%)`);
+      g.fillStyle = cg;
+      g.beginPath();
+      g.arc(S / 2, S / 2, R, 0, Math.PI * 2);
+      g.fill();
+      const rg = g.createRadialGradient(S / 2, S / 2, 0, S / 2, S / 2, R);
+      rg.addColorStop(0, 'rgba(128,128,128,1)');
+      rg.addColorStop(1, 'rgba(128,128,128,0)');
+      g.fillStyle = rg;
+      g.fill();
+      g.strokeStyle = 'rgba(0,0,0,.5)';
+      g.stroke();
+      // the puck: hue 0 at the top, clockwise
+      const a = (((p[hKey] || 0) - 90) * Math.PI) / 180;
+      const r = ((p[sKey] || 0) / 100) * R;
+      const x = S / 2 + Math.cos(a) * r;
+      const y = S / 2 + Math.sin(a) * r;
+      g.lineWidth = 2;
+      g.strokeStyle = '#fff';
+      g.beginPath();
+      g.arc(x, y, 6, 0, Math.PI * 2);
+      g.stroke();
+      g.lineWidth = 1;
+      g.strokeStyle = '#000';
+      g.beginPath();
+      g.arc(x, y, 7.5, 0, Math.PI * 2);
+      g.stroke();
+    };
+    const at = (e) => {
+      const rc = c.getBoundingClientRect();
+      const x = ((e.clientX - rc.left) / rc.width) * S - S / 2;
+      const y = ((e.clientY - rc.top) / rc.height) * S - S / 2;
+      const hue = Math.round(((Math.atan2(y, x) * 180) / Math.PI + 90 + 360) % 360);
+      set(hKey, hue);
+      set(sKey, Math.round(clamp(Math.hypot(x, y) / R, 0, 1) * 100));
+      draw();
+    };
+    c.addEventListener('pointerdown', (e) => {
+      c.setPointerCapture(e.pointerId);
+      at(e);
+      const mv = (ev) => at(ev);
+      const up = () => {
+        c.removeEventListener('pointermove', mv);
+        c.removeEventListener('pointerup', up);
+      };
+      c.addEventListener('pointermove', mv);
+      c.addEventListener('pointerup', up);
+    });
+    // double-click: no colour
+    c.addEventListener('dblclick', () => {
+      set(sKey, 0);
+      draw();
+    });
+    draw();
+    c.redraw = draw;
+    return c;
+  };
   const renderCg = () => {
     cgTabs.replaceChildren(...[['Shadow', '어두운 영역'], ['Mid', '중간 영역'], ['High', '밝은 영역'], ['Global', '전역']].map(([id, t]) => h(`button.small${cgTab === id ? '.on' : ''}`, { type: 'button', onclick: () => { cgTab = id; renderCg(); } }, t)));
+    const wh = wheel(`cg${cgTab}H`, `cg${cgTab}S`);
+    const hs = [slider(`cg${cgTab}H`, '색조', 0, 360, 0, 1, 'linear-gradient(90deg,#f00,#ff0,#0f0,#0ff,#00f,#f0f,#f00)'), slider(`cg${cgTab}S`, '채도', 0, 100)];
+    // the sliders move the wheel's puck too
+    for (const row of hs) row.addEventListener('input', () => wh.redraw());
     cgBox.replaceChildren(
-      slider(`cg${cgTab}H`, '색조', 0, 360, 0, 1, 'linear-gradient(90deg,#f00,#ff0,#0f0,#0ff,#00f,#f0f,#f00)'),
-      slider(`cg${cgTab}S`, '채도', 0, 100),
+      h('div.cr-wheelwrap', wh),
+      ...hs,
       slider(`cg${cgTab}L`, '광도', -100, 100),
       h('div.cr-sub', '모든 휠'),
       slider('cgBlend', '혼합', 0, 100, 50),

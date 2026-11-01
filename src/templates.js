@@ -31,6 +31,14 @@ const leftAt = (x, text) => x + textBox(text).w / 2;
 
 const fadeIn = (d = 0.4, ease = 'outSine') => [[0, 0, ease], [d, 100]];
 
+const SHAPE_NAMES = { rectangle: '사각형', ellipse: '타원', triangle: '삼각형', line: '선' };
+
+/** A text no wider than maxW (its size scaled down when the frame is narrow, e.g. 9:16). */
+const fit = (t, maxW = W(0.88)) => {
+  const w = textBox(t).w;
+  return w > maxW ? { ...t, size: Math.floor((t.size * maxW) / w) } : t;
+};
+
 export const TEMPLATE_CATEGORIES = ['하단 자막', '제목', '소셜 · 정보', '강조', '엔딩'];
 
 export const TEMPLATES = [
@@ -40,14 +48,21 @@ export const TEMPLATES = [
     category: '하단 자막',
     name: '하단 자막 1 · 그라데이션 바',
     duration: 5,
-    layers: () => [
-      { kind: 'shape', start: 0, shape: { shape: 'rectangle', width: W(0.36), height: H(0.11), radius: H(0.02), fill: '#1d4ed8', gradient: true, fill2: '#7c3aed', gradAngle: 0 },
-        motion: { posY: H(0.82) }, kf: { 'motion.posX': [[0, -W(0.2), 'outCubic'], [0.6, W(0.25)]] }, transOut: 0.5 },
-      { kind: 'text', start: 0.25, text: { content: '홍길동', size: H(0.05), bold: true, align: 'left' },
-        motion: { posY: H(0.805) }, kf: { 'motion.posX': [[0, -W(0.15), 'outCubic'], [0.6, W(0.2)]] }, transOut: 0.5 },
-      { kind: 'text', start: 0.45, text: { content: '영상 편집자 · Montage', size: H(0.028), bold: false, align: 'left', color: '#dbe4ff' },
-        motion: { posY: H(0.858) }, kf: { 'motion.posX': [[0, -W(0.15), 'outCubic'], [0.6, W(0.2)]] }, transOut: 0.5 },
-    ],
+    layers: () => {
+      const x0 = W(0.07);
+      const y = H(0.82);
+      const name = { content: '홍길동', size: U(0.05), bold: true, align: 'left' };
+      const title = { content: '영상 편집자 · Montage', size: U(0.028), bold: false, align: 'left', color: '#dbe4ff' };
+      const pad = U(0.04);
+      const bw = Math.min(W(0.86), Math.max(W(0.3), textBox(name).w, textBox(title).w) + pad * 2);
+      const slide = (x, d) => [[0, x - d, 'outCubic'], [0.6, x]];
+      return [
+        { kind: 'shape', start: 0, shape: { shape: 'rectangle', width: bw, height: U(0.11), radius: U(0.02), fill: '#1d4ed8', gradient: true, fill2: '#7c3aed', gradAngle: 0 },
+          motion: { posY: y }, kf: { 'motion.posX': slide(x0 + bw / 2, W(0.45)) }, transOut: 0.5 },
+        { kind: 'text', start: 0.25, text: name, motion: { posY: y - U(0.022) }, kf: { 'motion.posX': slide(leftAt(x0 + pad, name), W(0.35)) }, transOut: 0.5 },
+        { kind: 'text', start: 0.45, text: title, motion: { posY: y + U(0.03) }, kf: { 'motion.posX': slide(leftAt(x0 + pad, title), W(0.35)) }, transOut: 0.5 },
+      ];
+    },
   },
   {
     id: 'lowerThird2',
@@ -200,40 +215,55 @@ export const TEMPLATES = [
     category: '제목',
     name: '가운데 큰 제목',
     duration: 4,
-    layers: () => [
-      { kind: 'text', start: 0, text: { content: '제목을 입력하세요', size: H(0.11), bold: true, tracking: 4 },
-        motion: { posY: H(0.45) }, kf: { 'motion.scale': [[0, 85, 'outQuart'], [1.2, 100]] }, transIn: 0.6, transOut: 0.6 },
-      { kind: 'shape', start: 0.4, shape: { shape: 'line', width: W(0.2), strokeWidth: 6, fill: '#ffffff' },
-        motion: { posY: H(0.53) }, kf: { 'motion.scale': [[0, 0, 'outExpo'], [0.8, 100]] }, transOut: 0.6 },
-      { kind: 'text', start: 0.6, text: { content: '부제목', size: H(0.04), bold: false, color: '#cbd5e1' },
-        motion: { posY: H(0.6) }, transIn: 0.5, transOut: 0.6 },
-    ],
+    layers: () => {
+      const title = fit({ content: '제목을 입력하세요', size: U(0.11), bold: true, tracking: 4 });
+      return [
+        { kind: 'text', start: 0, text: title,
+          motion: { posY: H(0.5) - U(0.05) }, kf: { 'motion.scale': [[0, 85, 'outQuart'], [1.2, 100]] }, transIn: 0.6, transOut: 0.6 },
+        { kind: 'shape', start: 0.4, shape: { shape: 'line', width: Math.min(W(0.2), textBox(title).w), strokeWidth: 6, fill: '#ffffff' },
+          motion: { posY: H(0.5) + U(0.03) }, kf: { 'motion.scale': [[0, 0, 'outExpo'], [0.8, 100]] }, transOut: 0.6 },
+        { kind: 'text', start: 0.6, text: { content: '부제목', size: U(0.04), bold: false, color: '#cbd5e1' },
+          motion: { posY: H(0.5) + U(0.1) }, transIn: 0.5, transOut: 0.6 },
+      ];
+    },
   },
   {
     id: 'chapter',
     category: '제목',
     name: '챕터 제목',
     duration: 4,
-    layers: () => [
-      { kind: 'text', start: 0, text: { content: '01', size: H(0.16), bold: true, font: 'Black Han Sans', color: '#38bdf8', align: 'left' },
-        motion: { posX: W(0.2), posY: H(0.48) }, transIn: 0.5, transOut: 0.5 },
-      { kind: 'shape', start: 0.2, shape: { shape: 'rectangle', width: 8, height: H(0.16), fill: '#38bdf8' },
-        motion: { posX: W(0.3), posY: H(0.48) }, transIn: 0.4, transOut: 0.5 },
-      { kind: 'text', start: 0.35, text: { content: '챕터 제목', size: H(0.07), bold: true, align: 'left' },
-        motion: { posY: H(0.48) }, kf: { 'motion.posX': [[0, W(0.42), 'outQuart'], [0.6, W(0.46)]] }, transIn: 0.5, transOut: 0.5 },
-    ],
+    layers: () => {
+      // number | bar | title, centred as a group
+      const num = { content: '01', size: U(0.16), bold: true, font: 'Black Han Sans', color: '#38bdf8', align: 'left' };
+      const gap = U(0.035);
+      const nw = textBox(num).w;
+      const title = fit({ content: '챕터 제목', size: U(0.07), bold: true, align: 'left' }, W(0.9) - nw - gap * 2 - 8);
+      const x0 = (store.seq.width - (nw + gap * 2 + 8 + textBox(title).w)) / 2;
+      const y = H(0.48);
+      const tx = leftAt(x0 + nw + gap * 2 + 8, title);
+      return [
+        { kind: 'text', start: 0, text: num, motion: { posX: leftAt(x0, num), posY: y }, transIn: 0.5, transOut: 0.5 },
+        { kind: 'shape', start: 0.2, shape: { shape: 'rectangle', width: 8, height: U(0.16), fill: '#38bdf8' },
+          motion: { posX: x0 + nw + gap + 4, posY: y }, transIn: 0.4, transOut: 0.5 },
+        { kind: 'text', start: 0.35, text: title,
+          motion: { posY: y }, kf: { 'motion.posX': [[0, tx - U(0.07), 'outQuart'], [0.6, tx]] }, transIn: 0.5, transOut: 0.5 },
+      ];
+    },
   },
   {
     id: 'quote',
     category: '제목',
     name: '인용문',
     duration: 6,
-    layers: () => [
-      { kind: 'text', start: 0, text: { content: '“좋은 편집은\n눈에 띄지 않는다”', size: H(0.075), bold: false, italic: true, font: 'Noto Serif KR', lineHeight: 140 },
-        motion: { posY: H(0.45) }, transIn: 0.8, transOut: 0.8 },
-      { kind: 'text', start: 1, text: { content: '— 어느 편집자', size: H(0.035), bold: false, color: '#cbd5e1' },
-        motion: { posY: H(0.66) }, transIn: 0.6, transOut: 0.8 },
-    ],
+    layers: () => {
+      const quote = fit({ content: '“좋은 편집은\n눈에 띄지 않는다”', size: U(0.075), bold: false, italic: true, font: 'Noto Serif KR', lineHeight: 140 });
+      const qh = textBox(quote).h;
+      return [
+        { kind: 'text', start: 0, text: quote, motion: { posY: H(0.45) }, transIn: 0.8, transOut: 0.8 },
+        { kind: 'text', start: 1, text: { content: '— 어느 편집자', size: U(0.035), bold: false, color: '#cbd5e1' },
+          motion: { posY: H(0.45) + qh / 2 + U(0.06) }, transIn: 0.6, transOut: 0.8 },
+      ];
+    },
   },
 
   // ---------------------------------------------------------------- 소셜 · 정보
@@ -262,24 +292,33 @@ export const TEMPLATES = [
     category: '소셜 · 정보',
     name: '구독 버튼 팝업',
     duration: 4,
-    layers: () => [
-      { kind: 'shape', start: 0, shape: { shape: 'rectangle', width: W(0.15), height: H(0.075), radius: H(0.0375), fill: '#e1251b' },
-        motion: { posX: W(0.13), posY: H(0.86) }, kf: { 'motion.scale': [[0, 0, 'outElastic'], [0.9, 100]] }, transOut: 0.4 },
-      { kind: 'text', start: 0, text: { content: '구독', size: H(0.036), bold: true },
-        motion: { posX: W(0.13), posY: H(0.86) }, kf: { 'motion.scale': [[0, 0, 'outElastic'], [0.9, 100]] }, transOut: 0.4 },
-    ],
+    layers: () => {
+      const x = W(0.05) + U(0.135);
+      const y = H(0.86);
+      const pop = { 'motion.scale': [[0, 0, 'outElastic'], [0.9, 100]] };
+      return [
+        { kind: 'shape', start: 0, shape: { shape: 'rectangle', width: U(0.27), height: U(0.075), radius: U(0.0375), fill: '#e1251b' },
+          motion: { posX: x, posY: y }, kf: pop, transOut: 0.4 },
+        { kind: 'text', start: 0, text: { content: '구독', size: U(0.036), bold: true }, motion: { posX: x, posY: y }, kf: pop, transOut: 0.4 },
+      ];
+    },
   },
   {
     id: 'location',
     category: '소셜 · 정보',
     name: '장소 표시 (왼쪽 위)',
     duration: 5,
-    layers: () => [
-      { kind: 'shape', start: 0, shape: { shape: 'ellipse', width: H(0.03), height: H(0.03), fill: '#f97316' },
-        motion: { posX: W(0.06), posY: H(0.1) }, transIn: 0.3, transOut: 0.5 },
-      { kind: 'text', start: 0.2, text: { content: '서울특별시 종로구', size: H(0.035), bold: true, align: 'left', strokeWidth: 0, background: true, bgOpacity: 45, bgPadding: H(0.012) },
-        motion: { posY: H(0.1) }, kf: { 'motion.posX': [[0, W(0.12), 'outCubic'], [0.5, W(0.2)]] }, transIn: 0.4, transOut: 0.5 },
-    ],
+    layers: () => {
+      const x = W(0.06);
+      const y = H(0.1);
+      const place = { content: '서울특별시 종로구', size: U(0.035), bold: true, align: 'left', strokeWidth: 0, background: true, bgOpacity: 45, bgPadding: U(0.012) };
+      const tx = leftAt(x + U(0.03), place);
+      return [
+        { kind: 'shape', start: 0, shape: { shape: 'ellipse', width: U(0.03), height: U(0.03), fill: '#f97316' },
+          motion: { posX: x, posY: y }, transIn: 0.3, transOut: 0.5 },
+        { kind: 'text', start: 0.2, text: place, motion: { posY: y }, kf: { 'motion.posX': [[0, tx - U(0.08), 'outCubic'], [0.5, tx]] }, transIn: 0.4, transOut: 0.5 },
+      ];
+    },
   },
   {
     id: 'progressBar',
@@ -378,19 +417,20 @@ export const TEMPLATES = [
     category: '엔딩',
     name: '엔딩 카드 (시청 감사)',
     duration: 6,
-    layers: () => [
-      { kind: 'color', start: 0, color: '#0f172a', transIn: 0.8 },
-      { kind: 'text', start: 0.5, text: { content: '시청해 주셔서 감사합니다', size: H(0.07), bold: true },
-        motion: { posY: H(0.4) }, transIn: 0.6 },
-      { kind: 'shape', start: 1.2, shape: { shape: 'rectangle', width: W(0.16), height: H(0.08), radius: H(0.04), fill: '#dc2626' },
-        motion: { posX: W(0.4), posY: H(0.6) }, kf: { 'motion.scale': [[0, 0, 'outBack'], [0.55, 100]] } },
-      { kind: 'text', start: 1.2, text: { content: '구독', size: H(0.04), bold: true },
-        motion: { posX: W(0.4), posY: H(0.6) }, kf: { 'motion.scale': [[0, 0, 'outBack'], [0.55, 100]] } },
-      { kind: 'shape', start: 1.5, shape: { shape: 'rectangle', width: W(0.16), height: H(0.08), radius: H(0.04), fill: '#334155', strokeColor: '#94a3b8', strokeWidth: 3 },
-        motion: { posX: W(0.6), posY: H(0.6) }, kf: { 'motion.scale': [[0, 0, 'outBack'], [0.55, 100]] } },
-      { kind: 'text', start: 1.5, text: { content: '좋아요', size: H(0.04), bold: true },
-        motion: { posX: W(0.6), posY: H(0.6) }, kf: { 'motion.scale': [[0, 0, 'outBack'], [0.55, 100]] } },
-    ],
+    layers: () => {
+      const pop = { 'motion.scale': [[0, 0, 'outBack'], [0.55, 100]] };
+      const button = { width: U(0.285), height: U(0.08), radius: U(0.04) };
+      const y = H(0.5) + U(0.11);
+      const [xa, xb] = [W(0.5) - U(0.178), W(0.5) + U(0.178)];
+      return [
+        { kind: 'color', start: 0, color: '#0f172a', transIn: 0.8 },
+        { kind: 'text', start: 0.5, text: fit({ content: '시청해 주셔서 감사합니다', size: U(0.07), bold: true }), motion: { posY: H(0.5) - U(0.11) }, transIn: 0.6 },
+        { kind: 'shape', start: 1.2, shape: { shape: 'rectangle', ...button, fill: '#dc2626' }, motion: { posX: xa, posY: y }, kf: pop },
+        { kind: 'text', start: 1.2, text: { content: '구독', size: U(0.04), bold: true }, motion: { posX: xa, posY: y }, kf: pop },
+        { kind: 'shape', start: 1.5, shape: { shape: 'rectangle', ...button, fill: '#334155', strokeColor: '#94a3b8', strokeWidth: 3 }, motion: { posX: xb, posY: y }, kf: pop },
+        { kind: 'text', start: 1.5, text: { content: '좋아요', size: U(0.04), bold: true }, motion: { posX: xb, posY: y }, kf: pop },
+      ];
+    },
   },
   {
     id: 'creditsRoll',
@@ -450,7 +490,8 @@ export function buildTemplate(tpl, s, t0, { trackFor, add }) {
     if (end - start < 1 / s.fps) continue;
     const tr = trackFor(start, end);
     const kind = layer.kind;
-    const name = layer.name || (kind === 'text' ? String(layer.text.content).split('\n')[0].slice(0, 40) : tpl.name);
+    const name = layer.name || (kind === 'text' ? String(layer.text.content).split('\n')[0].slice(0, 40)
+      : kind === 'shape' ? `${SHAPE_NAMES[layer.shape?.shape] || '도형'} · ${tpl.name}` : tpl.name);
     const c = createClip(s, { kind, trackId: tr.id, name, start, duration: end - start, color: layer.color });
     if (kind === 'text') setValues(c, 'text', layer.text);
     if (kind === 'shape') setValues(c, 'shape', layer.shape);

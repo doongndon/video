@@ -773,6 +773,8 @@ export function createBrushRun({ o, bo, mode, fg, bg, isAlive = () => true }) {
     if (clone) {
       // clone stamp, healing, pattern stamp, history brush: the source picture shows through the tip
       const r = dabRect(x, y, dw, dh, round, ang);
+      // a source drawn as it is needed (the pattern stamp's impressionist daubs): document area
+      bo.cloneSrcPrepare?.({ x: r.x + st.ox, y: r.y + st.oy, w: r.w, h: r.h });
       const sg = scratchOf(r.w, r.h, false);
       sg.setTransform(new DOMMatrix().translate(-(r.x + st.ox), -(r.y + st.oy)).multiply(clone.xf));
       sg.drawImage(clone.src, 0, 0);

@@ -8,8 +8,8 @@ import { playback } from '../playback.js';
 import { Compositor } from '../compositor.js';
 import * as edit from '../edit.js';
 import { clipEnd } from '../model.js';
-import { h, clamp, formatTimecode, parseTimecode } from '../util.js';
-import { showPanel, dnd, loadPref, savePref, showMenu, toast } from './common.js';
+import { h, clamp, uid, formatTimecode, parseTimecode } from '../util.js';
+import { showPanel, dnd, loadPref, savePref, showMenu, toast, promptDialog, confirmDialog } from './common.js';
 import { icon, iconButton } from './icons.js';
 import { extendMenu } from './menubar.js';
 import { injectStyle } from './style-inject.js';
@@ -54,13 +54,19 @@ injectStyle('eg-style', `
 .eg-sec .row { display: flex; gap: 4px; align-items: center; flex-wrap: wrap; }
 .eg-sec .row + .row { margin-top: 6px; }
 .eg-sec label.check { white-space: nowrap; }
-.eg-sec input.tc { width: 104px; }
+.eg-sec input.tc { width: 13ch; }
 .eg-sel { font-weight: 600; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .eg-pane.eg-edit.on { display: block; overflow: auto; }
 .eg-ec .ec-panel { flex: none; min-height: 0; }
 .eg-ec .ec { flex: none; overflow: visible; }
 .eg-ec .ec-top, .eg-ec .ec-foot { display: none; }
 .eg-empty { padding: 16px; color: var(--text-dim); white-space: pre-line; text-align: center; }
+.eg-layers { display: flex; flex-direction: column; gap: 1px; margin-top: 6px; max-height: calc(132px * var(--ui-scale)); overflow: auto; }
+.eg-layer { display: flex; align-items: center; gap: 6px; padding: 3px 6px; border-radius: 4px; cursor: pointer; color: var(--text-dim); }
+.eg-layer:hover { background: var(--bg-4); }
+.eg-layer.sel { background: var(--sel); color: var(--text); }
+.eg-layer span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.eg-layers .note { margin: 0; padding: 2px 6px; }
 .eg-sec[aria-disabled=true] { opacity: 0.5; pointer-events: none; }
 `);
 
@@ -102,7 +108,7 @@ export function createEssentialGraphicsPanel() {
   browse.append(
     h('div.eg-bar', search, catSel),
     grid,
-    h('div.eg-foot', h('div.note', '두 번 클릭하거나 타임라인·프로그램 모니터로 끌어다 놓으면 들어갑니다.'), addBtn));
+    h('div.eg-foot', h('div.note', '두 번 클릭하거나 타임라인으로 끌어다 놓으세요'), addBtn));
 
   const cards = TEMPLATES.map((tpl) => {
     const canvas = h('canvas', { width: THUMB_W, height: THUMB_H });
@@ -255,6 +261,7 @@ export function createEssentialGraphicsPanel() {
   const ecWrap = h('div.eg-ec');
   const emptyHint = h('div.eg-empty', '타임라인에서 텍스트나 도형 클립을 선택하면\n여기에서 글꼴·크기·칠·선·그림자와 정렬을 바꿀 수 있습니다.\n\n새 레이어 버튼이나 문자 도구(T)로 그래픽을 만드세요.');
   const alignSec = h('div.eg-sec');
+  const styleSec = h('div.eg-sec');
   const rollSec = h('div.eg-sec');
 
   // 반응형 디자인 - 시간 ▸ 롤
@@ -298,7 +305,7 @@ export function createEssentialGraphicsPanel() {
     ecText = createEffectControls({ only: 'text' });
     ecShape = createEffectControls({ only: 'shape' });
     ecWrap.append(ecText, ecShape, emptyHint);
-    const layerBar = h('div.eg-sec', h('div.row', selName,
+    const layerBar = h('div.eg-sec', layerList, h('div.row', selName,
       iconButton('text', '새 레이어: 텍스트 (재생헤드 위치)', () => edit.addTextClip(), { label: '텍스트' }),
       iconButton('rectShape', '새 레이어: 사각형', () => edit.addShapeClip('rectangle')),
       iconButton('ellipseShape', '새 레이어: 타원', () => edit.addShapeClip('ellipse'))));
@@ -308,7 +315,8 @@ export function createEssentialGraphicsPanel() {
       h('div.row', startOff.el, endOff.el),
       h('div.row', h('span', '사전 롤'), preRoll, h('span', '사후 롤'), postRoll),
       h('div.row', h('span', '감속'), easeIn, h('span', '가속'), easeOut));
-    editPane.append(layerBar, alignSec, rollSec, ecWrap);
+    styleSec.append(h('h4', '마스터 스타일'), h('div.row', styleSel, iconButton('trash', '고른 마스터 스타일 지우기 (적용한 텍스트는 그대로)', deleteMasterStyle)));
+    editPane.append(layerBar, alignSec, styleSec, rollSec, ecWrap);
   }
 
   const alignComp = new Compositor();
@@ -349,8 +357,111 @@ export function createEssentialGraphicsPanel() {
     });
   }
 
+  // the graphics under the playhead, top track first, like the layer list of Premiere's 편집 tab
+  const layerList = h('div.eg-layers', { role: 'listbox', 'aria-label': '재생헤드 위치의 그래픽 레이어' });
+  let layerSig = '';
+  function renderLayers() {
+    const s = store.seq;
+    const t = store.ui.playhead;
+    const order = s.tracks.filter((tr) => tr.kind === 'video').map((tr) => tr.id);
+    const list = Object.values(s.clips)
+      .filter((c) => (c.kind === 'text' || c.kind === 'shape') && c.start <= t + 1e-6 && clipEnd(c) > t + 1e-6)
+      .sort((a, b) => order.indexOf(b.trackId) - order.indexOf(a.trackId) || a.start - b.start);
+    const sig = list.map((c) => `${c.id}:${c.name}:${store.selection.clips.has(c.id) ? 1 : 0}`).join('|');
+    if (sig === layerSig) return;
+    layerSig = sig;
+    layerList.replaceChildren(...(list.length ? list.map((c) => h(`div.eg-layer${store.selection.clips.has(c.id) ? '.sel' : ''}`, {
+      role: 'option', 'aria-selected': String(store.selection.clips.has(c.id)), title: '클릭해서 이 레이어 선택',
+      onclick: (e) => {
+        if (modKeyEvent(e)) store.selectClips([...new Set([...store.selection.clips, c.id])]);
+        else store.selectClips([c.id]);
+      },
+    }, icon(c.kind === 'text' ? 'text' : 'rectShape', 14), h('span', c.name || (c.kind === 'text' ? '텍스트' : '도형')))) : [h('div.note', '재생헤드 위치에 그래픽 레이어가 없습니다')]));
+  }
+  const modKeyEvent = (e) => e.ctrlKey || e.metaKey || e.shiftKey;
+
+  // ---- 마스터 스타일: a text look saved in the project and applied to other text clips
+  const styleSel = h('select', { 'aria-label': '마스터 스타일' });
+  const LOOK_SKIP = new Set(['content', 'reveal']);
+  const textFx = (c) => c?.effects.find((e) => e.type === 'text');
+  const masterStyles = () => store.project.textStyles || [];
+  const selectedTexts = () => store.selectedClips().filter((c) => textFx(c));
+
+  styleSel.addEventListener('change', async () => {
+    const v = styleSel.value;
+    if (v === '__new') await createMasterStyle();
+    else if (v) applyMasterStyle(v);
+    styleSig = '';
+    refreshEdit();
+  });
+
+  async function createMasterStyle() {
+    const c = selectedTexts()[0];
+    if (!c) return toast('스타일로 저장할 텍스트 클립을 선택하세요');
+    const name = await promptDialog('마스터 텍스트 스타일 만들기', '스타일 이름', `텍스트 스타일 ${masterStyles().length + 1}`);
+    if (!name?.trim()) return;
+    const look = {};
+    for (const [k, p] of Object.entries(textFx(c).params)) if (!LOOK_SKIP.has(k)) look[k] = structuredClone(p.kf?.length ? p.kf[0].v : p.value);
+    const id = uid('ts');
+    store.transact('마스터 텍스트 스타일 만들기', () => {
+      store.project.textStyles = [...masterStyles(), { id, name: name.trim(), look }];
+      const x = store.seq.clips[c.id];
+      if (x) x.textStyle = id;
+    });
+    toast(`마스터 스타일 "${name.trim()}"을(를) 만들었습니다. 다른 텍스트를 선택하고 목록에서 고르면 같은 모양이 됩니다.`);
+  }
+
+  function applyMasterStyle(id) {
+    const st = masterStyles().find((x) => x.id === id);
+    const clips = selectedTexts();
+    if (!st || !clips.length) return;
+    store.transact(`마스터 스타일: ${st.name}`, () => {
+      for (const c0 of clips) {
+        const c = store.seq.clips[c0.id];
+        const fx = textFx(c);
+        if (!fx) continue;
+        for (const [k, v] of Object.entries(st.look)) {
+          const p = fx.params[k];
+          if (!p) continue;
+          p.value = structuredClone(v);
+          p.kf = null;
+        }
+        c.textStyle = id;
+      }
+    });
+  }
+
+  async function deleteMasterStyle() {
+    const c = selectedTexts()[0];
+    const st = masterStyles().find((x) => x.id === (styleSel.value || c?.textStyle));
+    if (!st) return toast('지울 마스터 스타일을 목록에서 고르세요');
+    if (!(await confirmDialog('마스터 스타일 지우기', `"${st.name}" 스타일을 지울까요? 이 스타일을 쓴 텍스트의 모양은 그대로 남습니다.`))) return;
+    store.transact('마스터 스타일 지우기', () => {
+      store.project.textStyles = masterStyles().filter((x) => x.id !== st.id);
+      for (const seq of Object.values(store.project.sequences)) for (const x of Object.values(seq.clips)) if (x.textStyle === st.id) delete x.textStyle;
+    });
+  }
+
+  let styleSig = '';
+  function renderStyles(c) {
+    const list = masterStyles();
+    const cur = c?.textStyle && list.some((x) => x.id === c.textStyle) ? c.textStyle : '';
+    const sig = `${list.map((x) => `${x.id}:${x.name}`).join('|')}#${cur}`;
+    if (sig === styleSig) return;
+    styleSig = sig;
+    styleSel.replaceChildren(
+      h('option', { value: '' }, list.length ? '없음' : '저장한 스타일 없음'),
+      ...list.map((x) => h('option', { value: x.id }, x.name)),
+      h('option', { value: '__new' }, '마스터 텍스트 스타일 만들기…'));
+    styleSel.value = cur;
+  }
+
   function refreshEdit() {
     if (!built) return;
+    renderLayers();
+    const one = store.selectedClips().length === 1 ? store.selectedClips()[0] : null;
+    styleSec.hidden = !selectedTexts().length;
+    renderStyles(one);
     const sel = store.selectedClips();
     const c = sel.length === 1 ? sel[0] : null;
     const kind = c?.kind;
@@ -391,6 +502,8 @@ export function createEssentialGraphicsPanel() {
   store.on('selection', later);
   store.on('change', later);
   store.on('sequence', later);
+  // the layer list follows the playhead (cheap: it rebuilds only when its rows change)
+  store.on('playhead', () => { if (visible && tab === 'edit' && built) renderLayers(); });
 
   body.onShow = () => {
     visible = true;
