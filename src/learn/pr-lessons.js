@@ -46,11 +46,11 @@ const selectStep = (key, t, d, kind = 'video') => ({
   t, d: d || '타임라인에서 클립을 한 번 클릭해 선택하세요.', show: { clip: (s) => s.of(key, kind)[0] },
   done: (s) => s.sel.some((c) => c.mediaId === s.media(key) && (kind === 'audio' ? c.kind === 'audio' : c.kind !== 'audio')),
 });
-const effectStep = (type, name, where, key, kind = 'video') => ({
+const effectStep = (type, name, where, key, folder) => ({
   t: `'${name}' 효과 넣기`,
-  d: `효과 패널 위쪽 검색 칸에 '${name}'을(를) 입력하고, 나온 효과를 ${where} 클립 위로 끌어다 놓으세요. 클립을 선택한 채 효과를 두 번 클릭해도 됩니다.`,
+  d: `효과 패널(Shift+7)에서 비디오 효과 ▸ ${folder} ▸ ${name}을(를) 찾아 (위쪽 검색 칸에 '${name}' 입력) ${where} 클립 위로 끌어다 놓으세요. 클립을 선택한 채 효과를 두 번 클릭해도 됩니다.`,
   show: { panel: 'effects', sel: '.panel-body[data-panel="effects"] input[type="search"], .panel-body[data-panel="effects"] input' },
-  done: (s) => s.of(key, kind).some((c) => s.fx(c, type)),
+  done: (s) => s.of(key, 'video').some((c) => s.fx(c, type)),
 });
 
 // ---------------------------------------------------------------- lessons
@@ -274,7 +274,7 @@ export const LESSONS = [
       },
       {
         t: '소스 오디오 패치 끄기', d: '타임라인 왼쪽 트랙 머리글에서 A1 옆의 파란 소스 패치 단추를 눌러 끄세요. 그러면 B롤의 소리는 들어가지 않고 인터뷰 소리가 남습니다.',
-        why: '소스 패치는 소스의 영상·소리가 어느 트랙에 들어갈지 정합니다.', show: { sel: '.track-header button.src-patch.on' },
+        why: '소스 패치는 소스의 영상·소리가 어느 트랙에 들어갈지 정합니다.', show: { sel: '.track-header button.src-patch', text: 'A1' },
         done: (s) => !!s.seq.patchOff?.audio,
       },
       {
@@ -288,20 +288,22 @@ export const LESSONS = [
   {
     id: 'multicam', group: '편집 기술', title: '멀티캠 편집', min: 7, media: ['cam1', 'cam2', 'cam3'],
     intro: '세 대의 카메라로 찍은 같은 장면을 박수 소리로 맞추고, 재생하면서 카메라를 바꿔 편집합니다.',
-    panel: 'project',
+    async setup(L) {
+      L.sequence('연습 - 멀티캠');
+    },
     steps: [
       {
         t: '세 카메라 클립 선택', d: '프로젝트 패널에서 \'멀티캠 - 카메라 1\'을 클릭하고 Ctrl(맥: Cmd)을 누른 채 카메라 2, 3도 클릭하세요.',
         show: { panel: 'project', text: '멀티캠 - 카메라 1' }, done: (s) => ['cam1', 'cam2', 'cam3'].every((k) => s.selectedMedia.includes(s.media(k))),
       },
       {
-        t: '멀티 카메라 소스 시퀀스 만들기', d: '선택한 클립을 오른쪽 클릭하고 \'멀티 카메라 소스 시퀀스 만들기…\'를 고르세요. 동기화 지점을 \'오디오\'로 두고 확인을 누르면 박수 소리로 세 앵글이 맞춰집니다.',
+        t: '멀티 카메라 소스 시퀀스 만들기', d: '선택한 클립을 오른쪽 클릭하고 \'멀티 카메라 소스 시퀀스 만들기…\'를 고르세요. 동기화 지점을 \'오디오\'로 두고 \'만들기\'를 누르면 박수 소리로 세 앵글이 맞춰집니다.',
         why: '촬영을 시작한 때가 카메라마다 달라도 같은 소리를 찾아 맞춥니다. 슬레이트 박수가 그래서 필요합니다.',
         path: ['클립', '멀티 카메라 소스 시퀀스 만들기…'], done: (s) => Object.values(s.project.sequences).some((q) => q.multicam),
       },
       {
-        t: '멀티캠 시퀀스를 타임라인에', d: '프로젝트 패널에 생긴 멀티캠 시퀀스를 오른쪽 클릭하고 \'클립에서 새 시퀀스\'를 고르세요.',
-        path: ['파일', '새로 만들기', '클립에서 새 시퀀스'], done: (s) => s.clips.some((c) => c.kind === 'nest' && c.multicam),
+        t: '멀티캠 클립을 타임라인에', d: '대화 상자에서 \'현재 시퀀스의 재생헤드 위치에 넣기\'를 켜 두었다면 이미 들어가 있습니다. 아니면 프로젝트 패널의 \'멀티캠 1\'을 \'연습 - 멀티캠\' 타임라인으로 끌어다 놓으세요.',
+        show: { panel: 'project', text: '멀티캠 1' }, done: (s) => s.clips.some((c) => c.kind === 'nest' && c.multicam),
       },
       panelStep('multicam', '멀티 카메라', ['창', '멀티 카메라'], null, '창 ▸ 멀티 카메라를 누르면 왼쪽에 앵글이 나란히 보입니다.'),
       {
@@ -333,7 +335,7 @@ export const LESSONS = [
         show: { clip: (s) => s.clips.find((c) => c.kind === 'nest') }, done: (s) => s.seq.id !== s.base.seqId,
       },
       {
-        t: '원래 시퀀스로 돌아가기', d: '타임라인 위쪽의 \'연습 - 중첩\' 탭을 클릭하세요.', show: { sel: '.timeline .seq-tab, .timeline .tl-tabs button' },
+        t: '원래 시퀀스로 돌아가기', d: '타임라인 위쪽의 \'연습 - 중첩\' 탭을 클릭하세요.', show: { sel: '.timeline .seq-tabs > *', text: '연습 - 중첩' },
         done: (s) => s.clips.some((c) => c.kind === 'nest'),
       },
       {
@@ -351,13 +353,12 @@ export const LESSONS = [
       L.sequence('연습 - 부드러운 줌');
       L.place('interview', { inPoint: 0, outPoint: 8 });
     },
-    panel: 'effectControls',
     steps: [
       selectStep('interview', '클립 선택', '타임라인에서 인터뷰 클립을 클릭하세요.'),
       panelStep('effectControls', '효과 컨트롤', ['창', '효과 컨트롤'], 'Shift+5', '창 ▸ 효과 컨트롤(Shift+5)을 열면 모션 ▸ 위치·비율·회전이 보입니다.'),
       {
         t: '시작 키프레임', d: '재생 헤드를 클립 처음(0초)에 두고, 모션 ▸ 비율 왼쪽의 스톱워치를 누르세요. 지금 값(100)으로 키프레임이 생깁니다.',
-        why: '스톱워치를 켜면 그 뒤로 바꾸는 값마다 키프레임이 찍힙니다.', show: { panel: 'effectControls', text: '비율' },
+        why: '스톱워치를 켜면 그 뒤로 바꾸는 값마다 키프레임이 찍힙니다.', show: { panel: 'effectControls', sel: '[aria-label="비율 애니메이션 켜기/끄기"]' },
         done: (s) => s.of('interview', 'video').some((c) => kfs(c, 'motion', 'scale').length >= 1),
       },
       {
@@ -367,7 +368,7 @@ export const LESSONS = [
       },
       {
         t: '베지어로 부드럽게', d: '효과 컨트롤 오른쪽 타임라인의 키프레임(◇)을 오른쪽 클릭하고 시간 보간 ▸ 베지어 (또는 감속·가속)를 고르세요. 모래시계 모양이 되면서 시작과 끝이 부드러워집니다.',
-        why: '선형은 기계처럼 일정하게, 베지어는 카메라맨이 줌하듯 천천히 시작하고 멈춥니다.', show: { panel: 'effectControls', sel: '.panel-body[data-panel="effectControls"] .kf, .panel-body[data-panel="effectControls"] canvas' },
+        why: '선형은 기계처럼 일정하게, 베지어는 카메라맨이 줌하듯 천천히 시작하고 멈춥니다.', show: { panel: 'effectControls', sel: '.panel-body[data-panel="effectControls"] .kfd' },
         done: (s) => s.of('interview', 'video').some((c) => kfs(c, 'motion', 'scale').some((k) => k.interp && k.interp !== 'linear' && k.interp !== 'hold')),
       },
       playStep(),
@@ -387,7 +388,7 @@ export const LESSONS = [
       },
       {
         t: '속도 선 보이기', d: '클립을 오른쪽 클릭하고 클립 키프레임 표시 ▸ 시간 다시 매핑 ▸ 속도를 고르세요. 선이 속도(100%)를 나타냅니다.',
-        show: { clip: (s) => s.of('brollCity', 'video')[0] },
+        show: { clip: (s) => s.of('brollCity', 'video')[0] }, done: (s) => s.of('brollCity', 'video').some((c) => c.band?.type === 'timeRemap'),
       },
       {
         t: '속도 키프레임 두 개', d: 'Ctrl(맥: Cmd)을 누른 채 속도 선을 3초와 5초쯤에서 한 번씩 클릭하세요 (펜 도구 P로 클릭해도 됩니다).',
@@ -399,7 +400,7 @@ export const LESSONS = [
         done: (s) => s.of('brollCity', 'video').some((c) => kfs(c, 'timeRemap', 'speed').some((k) => k.v > 150)),
       },
       {
-        t: '램프로 부드럽게', d: '키프레임의 반쪽을 옆으로 끌면 둘로 나뉘며 속도가 서서히 바뀝니다. 두 키프레임 모두 해 보세요.',
+        t: '램프로 부드럽게', d: '빨라진 구간이 끝나는 곳의 키프레임(선이 꺾이는 곳)을 선택 도구로 옆으로 끄세요. 키프레임이 둘로 나뉘며 속도가 서서히 바뀝니다. Alt를 누른 채 끌면 키프레임이 통째로 옮겨집니다.',
         why: '갑자기 빨라지는 것보다 서서히 바뀌어야 자연스럽습니다.', done: (s) => s.did(/속도 램프 전환/),
       },
       playStep(),
@@ -414,7 +415,7 @@ export const LESSONS = [
     },
     panel: 'effects',
     steps: [
-      effectStep('mosaic', '모자이크', '움직이는 얼굴', 'face'),
+      effectStep('mosaic', '모자이크', '움직이는 얼굴', 'face', '스타일화'),
       {
         t: '타원 마스크 만들기', d: '클립을 선택한 채 효과 컨트롤의 모자이크 아래에 있는 타원 마스크 단추(○)를 누르세요. 화면 전체가 아니라 타원 안에만 모자이크가 생깁니다.',
         show: { panel: 'effectControls', text: '모자이크' },
@@ -432,9 +433,9 @@ export const LESSONS = [
         })),
       },
       {
-        t: '마스크 경로 추적', d: '효과 컨트롤의 마스크 경로 옆 ▶(선택한 마스크를 앞으로 추적) 단추를 누르세요. 프레임마다 키프레임이 찍히며 마스크가 얼굴을 따라갑니다.',
+        t: '마스크 경로 추적', d: '효과 컨트롤의 마스크 경로 옆 ▸(선택한 마스크를 앞으로 추적) 단추를 누르세요. 프레임마다 키프레임이 찍히며 마스크가 얼굴을 따라갑니다.',
         why: '얼굴이 움직여도 손으로 키프레임을 찍을 필요가 없습니다. 어긋난 곳은 그 프레임에서 마스크를 옮겨 고칩니다.',
-        show: { panel: 'effectControls', text: '마스크 경로' },
+        show: { panel: 'effectControls', sel: '[aria-label="선택한 마스크를 앞으로 추적"]' },
         done: (s) => s.of('face', 'video').some((c) => masksOf(s.fx(c, 'mosaic')).some((m) => (m.params?.path?.kf?.length || 0) > 10)),
       },
       playStep(),
@@ -454,7 +455,7 @@ export const LESSONS = [
         done: (s) => new Set(s.of('interview', 'video').map((c) => c.trackId)).size >= 2,
       },
       {
-        t: 'V2에 글자 넣기', d: '타임라인 왼쪽의 V2 트랙 머리글을 클릭해 대상으로 정하고, 문자 도구(T)로 프로그램 모니터 왼쪽을 클릭해 큰 글자(예: \'안녕\')를 쓰세요. 글자가 V2에 없으면 클립을 V2로 끌어 내리세요.',
+        t: 'V2에 글자 넣기', d: '문자 도구(T)로 프로그램 모니터 왼쪽을 클릭해 큰 글자(예: \'안녕\')를 쓰고 Esc를 누르세요. 비어 있는 V2에 텍스트 클립이 생깁니다. 다른 트랙에 생겼다면 V2로 끌어 옮기세요.',
         show: { tool: 'type' },
         done: (s) => {
           const ys = s.of('interview', 'video').map((c) => s.vIndex(c));
@@ -486,7 +487,7 @@ export const LESSONS = [
     },
     panel: 'effects',
     steps: [
-      effectStep('ultraKey', '울트라 키', 'V2의 그린 스크린', 'greenscreen'),
+      effectStep('ultraKey', '울트라 키', 'V2의 그린 스크린', 'greenscreen', '키잉'),
       {
         t: '키 색상 찍기', d: '효과 컨트롤 ▸ 울트라 키 ▸ 키 색상의 스포이드를 누르고 프로그램 모니터의 초록 배경을 클릭하세요. 배경이 빠지고 도시가 보입니다.',
         show: { panel: 'effectControls', text: '키 색상' },
@@ -502,7 +503,7 @@ export const LESSONS = [
         done: (s) => s.of('greenscreen', 'video').some((c) => (s.fx(c, 'ultraKey')?.params?.output?.value || 'composite') !== 'composite'),
       },
       {
-        t: '매트 정리 후 합성으로', d: '매트 정리 ▸ 경계 감소나 부드럽게를 조금 올리고, 출력을 다시 \'합성\'으로 바꾸세요.',
+        t: '매트 정리 후 합성으로', d: '\'매트 정리\'를 눌러 펼치고 경계 감소나 부드럽게를 조금 올린 뒤, 출력을 다시 \'합성\'으로 바꾸세요.',
         why: '초록 테두리(스필)가 남으면 경계 감소와 스필 억제로 정리합니다.', show: { panel: 'effectControls', text: '매트 정리' },
         done: (s) => s.of('greenscreen', 'video').some((c) => {
           const p = s.fx(c, 'ultraKey')?.params;
@@ -527,6 +528,10 @@ export const LESSONS = [
       },
       selectStep('brollLandscape', '클립 선택'),
       {
+        t: 'Lumetri 색상 효과 넣기', d: 'Lumetri 색상 패널 오른쪽 위 \'효과 추가\'를 누르세요. 기본 교정, 크리에이티브, 곡선, 색상 휠, HSL 보조, 비네팅이 나옵니다.',
+        show: { panel: 'lumetri', text: '효과 추가' }, done: (s) => s.of('brollLandscape', 'video').some((c) => s.fx(c, 'lumetri')),
+      },
+      {
         t: '흰색 균형 (온도·색조)', d: 'Lumetri 색상 ▸ 기본 교정에서 온도를 왼쪽(파랗게)이나 오른쪽(노랗게)으로 옮겨 보세요. 흰색 균형 선택기 스포이드로 흰 구름을 찍어도 됩니다.',
         show: { panel: 'lumetri', text: '온도' },
         done: (s) => s.of('brollLandscape', 'video').some((c) => (val(c, 'lumetri', 'temperature') || 0) !== 0 || (val(c, 'lumetri', 'tint') || 0) !== 0 || (val(c, 'lumetri', 'wbColor') || '#ffffff') !== '#ffffff'),
@@ -537,7 +542,7 @@ export const LESSONS = [
         done: (s) => s.of('brollLandscape', 'video').some((c) => (val(c, 'lumetri', 'exposure') || 0) !== 0 || (val(c, 'lumetri', 'contrast') || 0) !== 0),
       },
       {
-        t: '크리에이티브 Look', d: '크리에이티브 ▸ Look 목록에서 하나를 고르세요.', show: { panel: 'lumetri', text: '크리에이티브' },
+        t: '크리에이티브 Look', d: '\'크리에이티브\'를 눌러 펼치고 Look 목록에서 하나를 고르세요.', show: { panel: 'lumetri', text: '크리에이티브' },
         done: (s) => s.of('brollLandscape', 'video').some((c) => !!val(c, 'lumetri', 'look')),
       },
       {
@@ -595,12 +600,12 @@ export const LESSONS = [
         show: { clip: (s) => s.of('music', 'audio')[0] }, done: (s) => s.of('music', 'audio').some((c) => c.essential?.type === 'music'),
       },
       {
-        t: '더킹 켜고 키프레임 생성', d: '음악 클립을 선택한 채 기본 사운드 ▸ 더킹을 켜고 \'대화\'에 맞춰 줄이기를 확인한 뒤 \'키프레임 생성\'을 누르세요.',
+        t: '더킹 키프레임 생성', d: '음악 클립을 선택한 채 기본 사운드 ▸ 더킹에서 \'대화\'가 체크되어 있는지 확인하고 \'키프레임 생성\'을 누르세요. 감소량과 페이드 시간도 바꿀 수 있습니다.',
         why: '말이 나오는 곳마다 음악 볼륨에 키프레임이 찍혀 작아졌다가, 말이 끝나면 돌아옵니다.', show: { panel: 'essentialSound', text: '더킹' },
         done: (s) => s.of('music', 'audio').some((c) => kfs(c, 'volume', 'level').length >= 4 || kfs(c, 'volume', 'gain').length >= 4 || c.effects.some((e) => e.type === 'volume' && Object.values(e.params).some((p) => (p.kf?.length || 0) >= 4))),
       },
       {
-        t: '음악 음량 맞추기', d: '기본 사운드 ▸ 클립 볼륨 ▸ 수준을 내리거나, 타임라인에서 음악 클립의 볼륨 선을 아래로 끌어 말소리가 잘 들리게 하세요.',
+        t: '음악 음량 맞추기', d: '기본 사운드 ▸ 클립 볼륨 ▸ 레벨을 내리거나, 타임라인에서 음악 클립의 볼륨 선을 아래로 끌어 말소리가 잘 들리게 하세요.',
         done: (s) => s.changed(),
       },
       playStep(),
@@ -621,11 +626,11 @@ export const LESSONS = [
         done: (s) => s.modal(/오디오 게인/),
       },
       {
-        t: '게인 올리기', d: '\'게인 조정\'에 6을 입력하고 확인을 누르세요. 클립의 파형이 커집니다.', show: { sel: '.modal' },
+        t: '게인 올리기', d: '\'게인 조정\'을 고르고 6(dB)을 입력한 뒤 확인을 누르세요. 클립의 파형이 커집니다.', show: { sel: '.modal' },
         done: (s) => s.of('interview', 'audio').some((c) => (c.gain || 0) > 0),
       },
       {
-        t: '효과음 노멀라이즈', d: 'A2의 효과음 클립을 선택하고 G를 눌러 \'최대 피크 노멀라이즈\'를 -1 dB로 두고 확인을 누르세요.',
+        t: '효과음 노멀라이즈', d: 'A2의 효과음 클립을 선택하고 G를 누른 뒤 \'최대 피크를 다음으로 정규화\'를 고르고 -1(dBFS)로 두고 확인을 누르세요.',
         why: '노멀라이즈는 가장 큰 소리가 그 값이 되도록 게인을 정해 줍니다.', key: 'G', show: { clip: (s) => s.of('sfxDing', 'audio')[0] },
         done: (s) => s.of('sfxDing', 'audio').some((c) => c.gain),
       },

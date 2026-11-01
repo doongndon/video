@@ -217,6 +217,7 @@ export function createLearnPanel() {
         const mark = store.undoMark();
         await L.setup(api);
         store.squashSince(mark, `연습 파일 열기: ${L.title}`);
+        store.clearSelection();
         playback.requestRender?.();
       }
       showPanel(L.panel || 'project', { quiet: true });
@@ -335,7 +336,9 @@ export function createLearnPanel() {
   function toolButton(id) {
     const name = (TOOLS.find(([t]) => t === id)?.[1] || id).replace(/\s*\(.*\)$/, '');
     const btns = [...document.querySelectorAll('#tools button')].filter(visible);
-    return btns.find((b) => (b.getAttribute('aria-label') || '').startsWith(name)) || btns.find((b) => (b.title || '').includes(name)) || null;
+    return btns.find((b) => (b.getAttribute('aria-label') || '').startsWith(name)) || btns.find((b) => (b.title || '').includes(name))
+      // phones hide the tool box: the timeline's own buttons (자르기…) stand in where there is one
+      || findText(document.querySelector('.timeline'), name.replace(/\s*도구$/, '')) || null;
   }
 
   /** A spot on the timeline: a clip (or its edge), or a time on the ruler. */
@@ -380,7 +383,7 @@ export function createLearnPanel() {
       await frame();
       const t = TOOLS.find(([x]) => x === sh.tool)?.[1] || sh.tool;
       const btn = toolButton(sh.tool);
-      const same = btn && !(btn.getAttribute('aria-label') || '').startsWith(t.replace(/\s*\(.*\)$/, ''));
+      const same = btn?.closest('#tools') && !(btn.getAttribute('aria-label') || '').startsWith(t.replace(/\s*\(.*\)$/, ''));
       return pointAt(btn, `${t}${same ? ' · 이 단추를 길게 누르거나 오른쪽 클릭해서 고르세요' : ''}`, { back: isMobile() });
     }
     if (sh.clip || sh.time != null) {
@@ -395,7 +398,7 @@ export function createLearnPanel() {
     await frame();
     await frame();
     let target = null;
-    if (sh.sel) target = [...document.querySelectorAll(sh.sel)].find(visible) || null;
+    if (sh.sel) target = [...document.querySelectorAll(sh.sel)].find((x) => visible(x) && (!sh.text || x.textContent.trim().startsWith(sh.text))) || null;
     if (!target && sh.text) target = findText(sh.within ? document.querySelector(sh.within) : document.querySelector(`.panel-body[data-panel="${sh.panel}"]`) || document, sh.text);
     if (!target && sh.panel) {
       const body = document.querySelector(`.panel-body[data-panel="${sh.panel}"]`);
@@ -424,7 +427,8 @@ export function createLearnPanel() {
     coachText.textContent = `${cur.step + 1}/${L.steps.length} · ${L.steps[cur.step].t}`;
     // on the timeline's header row, clear of the picture
     const r = document.querySelector('#pg-timeline')?.getBoundingClientRect();
-    if (r && r.width) Object.assign(coach.style, { top: `${Math.round(r.top + 2)}px`, left: `${Math.round(r.left + r.width * 0.62)}px` });
+    if (isMobile()) Object.assign(coach.style, { left: '50%' });
+    else if (r && r.width) Object.assign(coach.style, { top: `${Math.round(r.top + 2)}px`, left: `${Math.round(r.left + r.width * 0.62)}px` });
   }
 
   // ---------------------------------------------------------------- the panel
@@ -434,7 +438,7 @@ export function createLearnPanel() {
     if (!usage) practiceUsage().then((u) => { usage = u; if (!lesson()) render(); });
     return h('div.prl-card',
       h('b', '내 예제 파일로 연습'),
-      h('div.prl-dim', '강의 예제 파일은 파일 ▸ 가져오기(Ctrl+I)로 가져오고, 아래 실습의 단계를 그대로 따라 하세요. 연습 파일은 이 브라우저에서 바로 만들어 지므로 내려받을 필요가 없습니다.'),
+      h('div.prl-dim', '강의 예제 파일은 파일 ▸ 가져오기(Ctrl+I)로 가져오고, 아래 실습의 단계를 그대로 따라 하세요. 연습 파일은 이 브라우저에서 바로 만들어지므로 내려받을 필요가 없습니다.'),
       info,
       h('div.prl-row',
         h('button.small', { onclick: () => import('../ui/project-panel.js').then((m) => (m.pickFiles ? m.pickFiles() : null)) }, icon('folder', 13), ' 가져오기…'),
@@ -532,7 +536,7 @@ export function createLearnPanel() {
   }
 
   // panels brought forward on purpose (창 menu, Shift+7…) count for "open the … panel" steps
-  for (const evt of ['focus']) store.on(evt, () => shownPanels.add(store.ui.focusPanel));
+  store.on('focus', () => shownPanels.add(store.ui.focusPanel));
   appMode.on?.(() => syncCoach());
   window.addEventListener('resize', () => syncCoach());
 
