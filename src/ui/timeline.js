@@ -414,7 +414,7 @@ export function createTimeline() {
       '-',
       { label: '비디오 트랙 추가', action: () => edit.addTrack('video') },
       { label: '오디오 트랙 추가', action: () => edit.addTrack('audio') },
-      { label: '빈 공간 모두 메우기', action: () => edit.closeAllGaps() },
+      { label: '간격 닫기', hint: '모든 빈 공간 메우기', action: () => edit.closeAllGaps() },
     ], r.left, r.bottom + 2);
   }
 
@@ -2190,12 +2190,12 @@ export function createTimeline() {
       const prev = clips.filter((c) => clipEnd(c) <= hit.t).pop();
       const next = clips.find((c) => c.start >= hit.t);
       showMenu([
-        { label: '이 빈 공간 메우기 (잔물결 삭제)', disabled: !next, action: () => { store.selectGap({ trackId: hit.row.track.id, start: prev ? clipEnd(prev) : 0, end: next.start }); edit.deleteSelection(); } },
+        { label: '잔물결 삭제', hint: '이 빈 공간 메우기', disabled: !next, action: () => { store.selectGap({ trackId: hit.row.track.id, start: prev ? clipEnd(prev) : 0, end: next.start }); edit.deleteSelection(); } },
         { label: '여기에 붙여넣기', key: 'Ctrl+V', disabled: !store.ui.clipboard, action: () => { store.setPlayhead(snapFrame(hit.t, fps())); edit.paste(); } },
         '-',
         { label: '비디오 트랙 추가', action: () => edit.addTrack('video') },
         { label: '오디오 트랙 추가', action: () => edit.addTrack('audio') },
-        { label: '빈 공간 모두 메우기', action: () => edit.closeAllGaps() },
+        { label: '간격 닫기', hint: '모든 빈 공간 메우기', action: () => edit.closeAllGaps() },
       ], e.clientX, e.clientY);
       return;
     }

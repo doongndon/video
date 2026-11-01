@@ -2436,7 +2436,6 @@ function installCommands(P) {
     P.selectLayer(l.id);
     C.toggleClip();
   };
-  C.layerStyle = (section = 'blending') => need() && D.layerStyleDialog(P, section);
   C.placeEmbedded = async () => {
     if (!need()) return;
     const { pickFiles } = await import('../ui/project-panel.js');

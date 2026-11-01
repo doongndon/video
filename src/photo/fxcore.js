@@ -39,6 +39,19 @@ export function rng(seed = 1) {
 
 /** A canvas grown by `p` pixels on each side, the border filled with mirrored copies of the edges. */
 export function mirrorPad(c, p) {
+  // wider than the picture: mirror the mirrored copy again (an opaque picture stays opaque after a
+  // blur wider than itself), up to a sane canvas size
+  p = Math.max(0, Math.min(Math.ceil(p), Math.max(Math.min(c.width, c.height), Math.floor((3072 - Math.max(c.width, c.height)) / 2))));
+  let out = { canvas: c, pad: 0 };
+  while (out.pad < p) {
+    const step = mirrorOnce(out.canvas, p - out.pad);
+    if (!step.pad) break;
+    out = { canvas: step.canvas, pad: out.pad + step.pad };
+  }
+  return out.pad ? out : mirrorOnce(c, 0);
+}
+
+function mirrorOnce(c, p) {
   const w = c.width;
   const h = c.height;
   p = Math.max(0, Math.min(Math.ceil(p), w, h));

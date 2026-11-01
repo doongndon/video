@@ -800,6 +800,141 @@ function movable(modal) {
 }
 
 /**
+ * On the picture around a filter window: the filter's centres as pins to drag (Lens Flare, Lighting
+ * Effects, Radial Blur, the Blur Gallery; Tilt-Shift with its band lines). `toDoc(u, v)` maps
+ * fractions of the filtered picture (`size` pixels) to the document and `fromDoc` back; a press on
+ * the picture calls `onPress(docPoint)` and moves the nearest pin there. Returns place(force).
+ */
+function picturePins(P, modal, { defs, params, ctls, size, toDoc, fromDoc, onChange, onPress = null }) {
+  const back = modal.parentElement;
+  // the window stays above the pins
+  modal.style.position = 'relative';
+  modal.style.zIndex = '1';
+  const gate = (a) => (a.endsWith('2') && defs.some((d) => d[0] === 'two') ? () => !!params.two : () => true);
+  const pins = POS_PAIRS.filter(([a, b]) => defs.some((d) => d[0] === a && d[2] === 0 && d[3] === 100) && defs.some((d) => d[0] === b))
+    .map(([a, b], i, all) => ({ a, b, on: gate(a), el: h('div.ph-pin', { title: all.length > 1 ? `핀 ${i + 1} (끌어서 옮기기)` : '중심 (끌어서 옮기기)' }) }));
+  // Tilt-Shift: a pin on the focus line (it moves up and down) and the lines of the sharp band
+  // (solid) and of where the blur is full (dashed), turned by the angle
+  const tilt = ['center', 'focus', 'fade', 'angle'].every((k) => defs.some((d) => d[0] === k));
+  let band = null;
+  if (tilt) {
+    pins.push({ a: null, b: 'center', on: () => true, el: h('div.ph-pin', { title: '초점 위치 (끌어서 옮기기)' }) });
+    band = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    band.setAttribute('class', 'ph-band');
+    band.innerHTML = '<path class="f"/><path class="d"/>';
+  }
+  const pinAt = (pin) => toDoc((pin.a ? params[pin.a] : 50) / 100, params[pin.b] / 100);
+  const toClient = (x, y) => {
+    // the inverse of P.toDoc (the view may be zoomed, moved or turned)
+    const o = P.toDoc(0, 0);
+    const ex = P.toDoc(1, 0);
+    const ey = P.toDoc(0, 1);
+    const a = ex.x - o.x;
+    const b = ey.x - o.x;
+    const c = ex.y - o.y;
+    const d = ey.y - o.y;
+    const det = a * d - b * c || 1;
+    return [(d * (x - o.x) - b * (y - o.y)) / det, (-c * (x - o.x) + a * (y - o.y)) / det];
+  };
+  let viewKey = '';
+  const place = (force = false) => {
+    const o = P.toDoc(0, 0);
+    const e = P.toDoc(1, 1);
+    const key = `${o.x},${o.y},${e.x},${e.y}`;
+    if (!force && key === viewKey) return;
+    viewKey = key;
+    for (const pin of pins) {
+      pin.el.hidden = !pin.on();
+      const [cx, cy] = toClient(...pinAt(pin));
+      pin.el.style.left = `${cx}px`;
+      pin.el.style.top = `${cy}px`;
+    }
+    if (band) {
+      // the same geometry as the filter (fx2.js tiltShift), in its pixels: offsets along the normal
+      const [W, H] = size;
+      const a = (params.angle * Math.PI) / 180;
+      const [dx, dy] = [Math.cos(a), Math.sin(a)];
+      const [cx, cy] = [W / 2, (H * params.center) / 100];
+      const L = Math.hypot(W, H) * 2;
+      // drawn over the picture area only
+      const r = document.querySelector('.ph-stage')?.getBoundingClientRect() || { left: 0, top: 0, width: innerWidth, height: innerHeight };
+      Object.assign(band.style, { left: `${r.left}px`, top: `${r.top}px`, width: `${r.width}px`, height: `${r.height}px` });
+      const pt = (x, y) => {
+        const [qx, qy] = toClient(...toDoc(x / W, y / H));
+        return `${qx - r.left},${qy - r.top}`;
+      };
+      const line = (d) => `M${pt(cx - dy * d - dx * L, cy + dx * d - dy * L)}L${pt(cx - dy * d + dx * L, cy + dx * d + dy * L)}`;
+      const f = (params.focus / 100) * (H / 2);
+      const fd = f + (params.fade / 100) * H;
+      band.children[0].setAttribute('d', line(-f) + line(f));
+      band.children[1].setAttribute('d', line(-fd) + line(fd));
+    }
+  };
+  const movePin = (pin, e) => {
+    const pt = P.toDoc(e.clientX, e.clientY);
+    const [u, v] = fromDoc(pt.x, pt.y);
+    for (const [k, val] of [[pin.a, u * 100], [pin.b, v * 100]]) {
+      if (!k) continue;
+      params[k] = clamp(Math.round(val), 0, 100);
+      ctls[k]?.(params[k]);
+    }
+    place(true);
+    onChange();
+  };
+  const dragPin = (pin, e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    pin.el.setPointerCapture(e.pointerId);
+    const mv = (ev) => movePin(pin, ev);
+    const up = () => {
+      pin.el.removeEventListener('pointermove', mv);
+      pin.el.removeEventListener('pointerup', up);
+      pin.el.removeEventListener('pointercancel', up);
+    };
+    pin.el.addEventListener('pointermove', mv);
+    pin.el.addEventListener('pointerup', up);
+    pin.el.addEventListener('pointercancel', up);
+  };
+  if (band) back.append(band);
+  for (const pin of pins) {
+    pin.el.addEventListener('pointerdown', (e) => dragPin(pin, e));
+    back.append(pin.el);
+  }
+  const stageAt = (e) => {
+    const r = document.querySelector('.ph-stage')?.getBoundingClientRect();
+    return e.target === back && r && e.clientX >= r.left && e.clientX < r.right && e.clientY >= r.top && e.clientY < r.bottom;
+  };
+  if (onPress || pins.length) {
+    back.addEventListener('pointermove', (e) => {
+      back.style.cursor = stageAt(e) ? 'crosshair' : '';
+    });
+    back.addEventListener('pointerdown', (e) => {
+      if (!stageAt(e) || picking) return;
+      const pt = P.toDoc(e.clientX, e.clientY);
+      onPress?.(pt);
+      // the nearest pin jumps there and follows the drag
+      const dist = (pin) => Math.hypot(pinAt(pin)[0] - pt.x, pinAt(pin)[1] - pt.y);
+      const near = pins.filter((pin) => pin.on()).sort((p1, p2) => dist(p1) - dist(p2))[0];
+      if (near) {
+        movePin(near, e);
+        dragPin(near, e);
+      }
+    });
+  }
+  if (pins.length) {
+    // follow the view while it is zoomed or moved (the window hidden with H)
+    const watch = () => {
+      if (!back.isConnected) return;
+      place();
+      requestAnimationFrame(watch);
+    };
+    place(true);
+    requestAnimationFrame(watch);
+  }
+  return place;
+}
+
+/**
  * Run `compute(baseCanvas, params)` live on the active layer (inside the selection), OK keeps it.
  * `proxy`: on a big layer, previews are computed at about screen resolution (what the view shows at
  * the current zoom) and only "확인" computes the full-size result. `box`: a 100% preview box in the
@@ -977,134 +1112,21 @@ function liveLayerDialog(P, { title, defs, params, compute, label, slow = false,
     },
   });
   movable(dlg.modal);
-  // ---- on the picture around the window: the filter's centres as pins to drag (Lens Flare, Lighting
-  // Effects, Radial Blur, the Blur Gallery), and a click shows that spot in the preview box
-  const back = dlg.modal.parentElement;
-  // the window stays above the pins
-  dlg.modal.style.position = 'relative';
-  dlg.modal.style.zIndex = '1';
-  const gate = (a) => (a.endsWith('2') && defs.some((d) => d[0] === 'two') ? () => !!params.two : () => true);
-  const pins = POS_PAIRS.filter(([a, b]) => defs.some((d) => d[0] === a && d[2] === 0 && d[3] === 100) && defs.some((d) => d[0] === b))
-    .map(([a, b], i, all) => ({ a, b, on: gate(a), el: h('div.ph-pin', { title: all.length > 1 ? `핀 ${i + 1} (끌어서 옮기기)` : '중심 (끌어서 옮기기)' }) }));
-  // Tilt-Shift: a pin on the focus line (it moves up and down) and the lines of the sharp band
-  // (solid) and of where the blur is full (dashed), turned by the angle
-  const tilt = ['center', 'focus', 'fade', 'angle'].every((k) => defs.some((d) => d[0] === k));
-  let band = null;
-  if (tilt) {
-    pins.push({ a: null, b: 'center', on: () => true, el: h('div.ph-pin', { title: '초점 위치 (끌어서 옮기기)' }) });
-    band = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-    band.setAttribute('class', 'ph-band');
-    band.innerHTML = '<path class="f"/><path class="d"/>';
-  }
-  const pinAt = (pin) => [bx + (base.width * (pin.a ? params[pin.a] : 50)) / 100, by + (base.height * params[pin.b]) / 100];
-  const toClient = (x, y) => {
-    // the inverse of P.toDoc (the view may be zoomed, moved or turned)
-    const o = P.toDoc(0, 0);
-    const ex = P.toDoc(1, 0);
-    const ey = P.toDoc(0, 1);
-    const a = ex.x - o.x;
-    const b = ey.x - o.x;
-    const c = ex.y - o.y;
-    const d = ey.y - o.y;
-    const det = a * d - b * c || 1;
-    return [(d * (x - o.x) - b * (y - o.y)) / det, (-c * (x - o.x) + a * (y - o.y)) / det];
-  };
-  let viewKey = '';
-  placePins = (force = false) => {
-    const o = P.toDoc(0, 0);
-    const e = P.toDoc(1, 1);
-    const key = `${o.x},${o.y},${e.x},${e.y}`;
-    if (!force && key === viewKey) return;
-    viewKey = key;
-    for (const pin of pins) {
-      pin.el.hidden = !pin.on();
-      const [cx, cy] = toClient(...pinAt(pin));
-      pin.el.style.left = `${cx}px`;
-      pin.el.style.top = `${cy}px`;
-    }
-    if (band) {
-      // the same geometry as the filter (fx2.js tiltShift): offsets along the normal of the angle
-      const H = base.height;
-      const a = (params.angle * Math.PI) / 180;
-      const [dx, dy] = [Math.cos(a), Math.sin(a)];
-      const [cx, cy] = pinAt(pins.at(-1));
-      const L = Math.hypot(base.width, H) * 2;
-      // drawn over the picture area only
-      const r = document.querySelector('.ph-stage')?.getBoundingClientRect() || { left: 0, top: 0, width: innerWidth, height: innerHeight };
-      Object.assign(band.style, { left: `${r.left}px`, top: `${r.top}px`, width: `${r.width}px`, height: `${r.height}px` });
-      const line = (d) => {
-        const p1 = toClient(cx - dy * d - dx * L, cy + dx * d - dy * L);
-        const p2 = toClient(cx - dy * d + dx * L, cy + dx * d + dy * L);
-        return `M${p1[0] - r.left},${p1[1] - r.top}L${p2[0] - r.left},${p2[1] - r.top}`;
-      };
-      const f = (params.focus / 100) * (H / 2);
-      const fd = f + (params.fade / 100) * H;
-      band.children[0].setAttribute('d', line(-f) + line(f));
-      band.children[1].setAttribute('d', line(-fd) + line(fd));
-    }
-  };
-  const movePin = (pin, e) => {
-    const pt = P.toDoc(e.clientX, e.clientY);
-    for (const [k, v] of [[pin.a, ((pt.x - bx) / base.width) * 100], [pin.b, ((pt.y - by) / base.height) * 100]]) {
-      if (!k) continue;
-      params[k] = clamp(Math.round(v), 0, 100);
-      ctls[k]?.(params[k]);
-    }
-    placePins(true);
-    schedule(false);
-  };
-  const dragPin = (pin, e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    pin.el.setPointerCapture(e.pointerId);
-    const mv = (ev) => movePin(pin, ev);
-    const up = () => {
-      pin.el.removeEventListener('pointermove', mv);
-      pin.el.removeEventListener('pointerup', up);
-      pin.el.removeEventListener('pointercancel', up);
-    };
-    pin.el.addEventListener('pointermove', mv);
-    pin.el.addEventListener('pointerup', up);
-    pin.el.addEventListener('pointercancel', up);
-  };
-  if (band) back.append(band);
-  for (const pin of pins) {
-    pin.el.addEventListener('pointerdown', (e) => dragPin(pin, e));
-    back.append(pin.el);
-  }
-  const stageAt = (e) => {
-    const r = document.querySelector('.ph-stage')?.getBoundingClientRect();
-    return e.target === back && r && e.clientX >= r.left && e.clientX < r.right && e.clientY >= r.top && e.clientY < r.bottom;
-  };
-  if (boxC || pins.length) {
-    back.addEventListener('pointermove', (e) => {
-      back.style.cursor = stageAt(e) ? 'crosshair' : '';
-    });
-    back.addEventListener('pointerdown', (e) => {
-      if (!stageAt(e) || picking) return;
-      const pt = P.toDoc(e.clientX, e.clientY);
-      if (boxC) {
-        bc = { x: pt.x - bx, y: pt.y - by };
-        drawBox();
-      }
-      // the nearest pin jumps there and follows the drag
-      const near = pins.filter((pin) => pin.on()).sort((p1, p2) => Math.hypot(...pinAt(p1).map((v, i) => v - [pt.x, pt.y][i])) - Math.hypot(...pinAt(p2).map((v, i) => v - [pt.x, pt.y][i])))[0];
-      if (near) {
-        movePin(near, e);
-        dragPin(near, e);
-      }
-    });
-  }
-  if (pins.length) {
-    // follow the view while it is zoomed or moved (the window hidden with H)
-    const watch = () => {
-      if (!back.isConnected) return;
-      placePins();
-      requestAnimationFrame(watch);
-    };
-    placePins(true);
-    requestAnimationFrame(watch);
-  }
+  // the filter's centres as pins on the picture around the window; a click there also shows that
+  // spot in the preview box
+  placePins = picturePins(P, dlg.modal, {
+    defs,
+    params,
+    ctls,
+    size: [base.width, base.height],
+    toDoc: (u, v) => [bx + base.width * u, by + base.height * v],
+    fromDoc: (x, y) => [(x - bx) / base.width, (y - by) / base.height],
+    onChange: () => schedule(false),
+    onPress: boxC ? (pt) => {
+      bc = { x: pt.x - bx, y: pt.y - by };
+      drawBox();
+    } : null,
+  });
   schedule(true);
 }
 
@@ -1160,6 +1182,12 @@ export function applyToLayer(P, fn) {
 }
 
 // ---------------------------------------------------------------- a mask as the target
+
+/** A name with its topic particle (은 / 는, by its last syllable). */
+const topic = (name) => {
+  const c = name.charCodeAt(name.length - 1) - 0xac00;
+  return `${name}${c < 0 || c > 11171 ? '은(는)' : c % 28 ? '은' : '는'}`;
+};
 
 // adjustments that mean something on a grey mask (Photoshop greys out the colour ones there)
 const MASK_ADJ = new Set(['levels', 'curves', 'brightness', 'exposure', 'invert', 'posterize', 'threshold', 'equalize', 'shadowsHighlights']);
@@ -1234,7 +1262,7 @@ function maskDialog(P, kind, id) {
   if (!def) return false;
   const name = maskName(mt);
   if ((kind === 'adjust' && !MASK_ADJ.has(id)) || (kind === 'filter' && (def.dialog || def.neural))) {
-    toast(`${def.name}은(는) ${name}에 쓸 수 없습니다. 레벨·곡선·반전·흐림 효과 등을 쓰거나, 레이어 패널에서 레이어 썸네일을 눌러 그림으로 돌아가세요.`);
+    toast(`${topic(def.name)} ${name}에 쓸 수 없습니다. 레벨·곡선·반전·흐림 효과 등을 쓰거나, 레이어 패널에서 레이어 썸네일을 눌러 그림으로 돌아가세요.`);
     return true;
   }
   const doc = P.doc;
@@ -1325,7 +1353,7 @@ function maskDialog(P, kind, id) {
 /** Ctrl+F on any mask being painted (layer mask, filter mask, alpha channel, quick mask). */
 function repeatOnMask(P, mt, id, params) {
   const f = FILTERS[id];
-  if (f.dialog || f.neural) return toast(`${f.name}은(는) ${maskName(mt)}에 쓸 수 없습니다`);
+  if (f.dialog || f.neural) return toast(`${topic(f.name)} ${maskName(mt)}에 쓸 수 없습니다`);
   const before = P.doc.capture();
   const orig = mt.canvas;
   maskWriter(P, mt)(maskInSelection(P, mt, orig, greyToMask(runOn('filter', id, maskToGrey(orig), params, P))));
@@ -1368,7 +1396,7 @@ function pixelsPrompt(P, again) {
   openModal({
     title: '필터',
     width: '440px',
-    body: [h('div', `이 ${what} 레이어를 래스터화하거나 고급 개체로 변환해야 계속할 수 있습니다. 래스터화하면 ${what}을(를) 더 이상 고칠 수 없고, 고급 개체로 변환하면 내용과 필터를 나중에 다시 고칠 수 있습니다.`)],
+    body: [h('div', `이 ${what} 레이어를 래스터화하거나 고급 개체로 변환해야 계속할 수 있습니다. 래스터화하면 ${what}${l.kind === 'text' ? '를' : '을'} 더 이상 고칠 수 없고, 고급 개체로 변환하면 내용과 필터를 나중에 다시 고칠 수 있습니다.`)],
     buttons: [
       { label: '취소' },
       { label: '래스터화', action: () => { P.cmd.rasterize?.(); setTimeout(() => { if (P.doc?.active?.kind === 'raster') again(); }, 0); } },
@@ -1484,10 +1512,12 @@ export function smartFilterDialog(P, id, params, index = null) {
   const op = { opacity: Math.round((entry.opacity ?? 1) * 100) };
   // the smart object's own content before this filter: what eyedroppers and histograms look at
   const source = () => doc.rasterizeLayer(l);
+  const ctls = {};
+  let placePins = null;
   const dlg = openModal({
     title: `고급 필터: ${filterName(id)}`,
     width: '460px',
-    body: [...paramEditors(defs, p, () => { clearTimeout(timer); timer = setTimeout(apply, 60); }, P, { source, sampleAt: (x, y) => spot(doc.flatten({ fg: P.fg, bg: P.bg }), x, y) }),
+    body: [...paramEditors(defs, p, () => { clearTimeout(timer); timer = setTimeout(apply, 60); placePins?.(true); }, P, { source, sampleAt: (x, y) => spot(doc.flatten({ fg: P.fg, bg: P.bg }), x, y), ctls }),
       ...paramEditors([['opacity', '불투명도 (%)', 0, 100, 100]], op, () => { entry.opacity = op.opacity / 100; clearTimeout(timer); timer = setTimeout(apply, 60); }, P),
       h('div.note', '고급 개체에 넣는 필터는 원본을 바꾸지 않습니다. 레이어 패널에서 끄거나 두 번 눌러 다시 고칠 수 있습니다.')],
     buttons: [{ label: '취소' }, { label: '확인', primary: true, action: () => { clearTimeout(timer); apply(); ok = true; P.commit(`고급 필터: ${filterName(id)}`, before); remember(); } }],
@@ -1502,6 +1532,22 @@ export function smartFilterDialog(P, id, params, index = null) {
     },
   });
   movable(dlg.modal);
+  // pins on the picture: the filter works on the smart object's own pixels, placed by its matrix
+  const { w: sw, h: sh, m } = l.smart;
+  const [ma, mb, mc, md, me, mf] = m;
+  const det = ma * md - mb * mc || 1;
+  placePins = picturePins(P, dlg.modal, {
+    defs,
+    params: p,
+    ctls,
+    size: [sw, sh],
+    toDoc: (u, v) => [ma * u * sw + mc * v * sh + me, mb * u * sw + md * v * sh + mf],
+    fromDoc: (x, y) => [(md * (x - me) - mc * (y - mf)) / det / sw, (-mb * (x - me) + ma * (y - mf)) / det / sh],
+    onChange: () => {
+      clearTimeout(timer);
+      timer = setTimeout(apply, 60);
+    },
+  });
   apply();
   return undefined;
 }
