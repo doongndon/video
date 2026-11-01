@@ -1680,7 +1680,12 @@ export function createPhotoEditor(root) {
     if (!t.options.some((o) => o[0] === key)) return null;
     const o = P.opts(P.tool);
     const v = o[key];
-    const nv = key === 'size' ? Math.max(1, Math.round(v + dir * Math.max(1, v * 0.1))) : clamp(v + dir * 10, 0, 100);
+    // Photoshop's steps: the size by 1 px under 10, 10 px up to 100, then 25, 50, 100 and 250 px;
+    // the hardness (Shift) by 25%
+    const stepAt = (x) => (key !== 'size' ? 25 : x < 10 ? 1 : x < 100 ? 10 : x < 200 ? 25 : x < 300 ? 50 : x < 1000 ? 100 : 250);
+    const s = stepAt(dir > 0 ? v : v - 1);
+    const max = t.options.find((x) => x[0] === key)?.[4] ?? 100;
+    const nv = clamp(dir > 0 ? Math.floor(v / s) * s + s : Math.ceil(v / s) * s - s, key === 'size' ? 1 : 0, max);
     P.setOpt(P.tool, key, nv);
     return undefined;
   }

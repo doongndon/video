@@ -1324,11 +1324,33 @@ const randomize = (id, params) => {
   return params;
 };
 
+/**
+ * A filter on a type, shape or fill layer: Photoshop first asks to rasterize it or turn it into a
+ * smart object (where the filter stays editable); `again()` reopens the filter afterwards.
+ */
+function pixelsPrompt(P, again) {
+  const l = P.doc?.active;
+  if (!l || !['text', 'shape', 'fill'].includes(l.kind)) return false;
+  const what = { text: '문자', shape: '모양', fill: '칠' }[l.kind];
+  openModal({
+    title: '필터',
+    width: '440px',
+    body: [h('div', `이 ${what} 레이어를 래스터화하거나 고급 개체로 변환해야 계속할 수 있습니다. 래스터화하면 ${what}을(를) 더 이상 고칠 수 없고, 고급 개체로 변환하면 내용과 필터를 나중에 다시 고칠 수 있습니다.`)],
+    buttons: [
+      { label: '취소' },
+      { label: '래스터화', action: () => { P.cmd.rasterize?.(); setTimeout(() => { if (P.doc?.active?.kind === 'raster') again(); }, 0); } },
+      { label: '고급 개체로 변환', primary: true, action: () => { P.cmd.convertToSmart?.(); setTimeout(() => { if (P.doc?.active?.kind === 'smart') again(); }, 0); } },
+    ],
+  });
+  return true;
+}
+
 export function filterDialog(P, id) {
   const f = FILTERS[id];
   if (!f || !P.doc) return undefined;
   if (P.channelEdit?.('filter', id)) return undefined; // an alpha channel / quick mask (selchan.js)
   if (maskDialog(P, 'filter', id)) return undefined; // the layer mask / a smart object's filter mask
+  if (pixelsPrompt(P, () => filterDialog(P, id))) return undefined;
   const params = randomize(id, lastFilter?.id === id ? structuredClone(lastFilter.params) : defaultFilterParams(id));
   if (ownDialog(P, id, lastFilter?.id === id ? lastFilter.params : null)) return undefined;
   if (P.doc?.active?.kind === 'smart') return smartFilterDialog(P, id, params);
@@ -1361,6 +1383,7 @@ export function repeatFilter(P) {
   const params = randomize(id, structuredClone(lastFilter.params));
   const mt = P.maskTarget?.();
   if (mt) return repeatOnMask(P, mt, id, params);
+  if (pixelsPrompt(P, () => repeatFilter(P))) return undefined;
   if (P.doc?.active?.kind === 'smart') {
     const l = P.doc.active;
     P.run(`고급 필터: ${FILTERS[id].name}`, () => { l.smart = { ...l.smart, filters: [...(l.smart.filters || []), { id, params: { ...params, _fg: P.fg, _bg: P.bg }, enabled: true }] }; P.doc.touch(l); });

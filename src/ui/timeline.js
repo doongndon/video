@@ -2397,7 +2397,8 @@ export function createTimeline() {
     } else if (kind === 'template') {
       // a title template from 기본 그래픽 ▸ 찾아보기 goes in where it is dropped
       const id = e.dataTransfer.getData('application/x-montage-template') || dnd.payload?.template;
-      if (id) (await import('../templates.js')).insertTemplate(id, Math.max(0, snapFrame(tOf(x), fps())));
+      const row = rowAtY(y);
+      if (id) (await import('../templates.js')).insertTemplate(id, Math.max(0, snapFrame(tOf(x), fps())), { trackId: row?.track.kind === 'video' ? row.track.id : null });
     } else if (kind === 'files') {
       const files = [...e.dataTransfer.files];
       const ids = await importFiles(files);

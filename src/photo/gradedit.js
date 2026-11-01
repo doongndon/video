@@ -20,7 +20,7 @@ injectStyle('ph-gradedit-css', `
 .ge-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: var(--fs-s); color: var(--text-dim); }
 .ge-row input[type=text] { flex: 1; min-width: 120px; }
 .ge-row input[type=number] { width: calc(62px * var(--ui-scale)); min-height: 0; height: calc(26px * var(--ui-scale)); }
-.ge-row select { min-height: 0; height: calc(26px * var(--ui-scale)); }
+.ge-row select { min-height: 0; height: auto; padding-top: 2px; padding-bottom: 2px; line-height: 1.4; }
 .ge-bar { position: relative; margin: 0 8px; }
 .ge-bar canvas { width: 100%; height: calc(30px * var(--ui-scale)); display: block; border: 1px solid var(--line-2); border-radius: 2px; }
 .ge-strip { position: relative; height: 20px; margin: 0 8px; cursor: copy; touch-action: none; }
@@ -35,6 +35,8 @@ injectStyle('ph-gradedit-css', `
 .ge-color { width: 40px; height: 22px; min-height: 0; padding: 0; border: 1px solid var(--line-2); border-radius: 3px; }
 .ge-noise { display: grid; grid-template-columns: auto 1fr 1fr; gap: 4px 8px; align-items: center; font-size: var(--fs-s); color: var(--text-dim); }
 .ge-noise input[type=number] { width: 100%; min-height: 0; height: calc(24px * var(--ui-scale)); }
+/* phones give buttons a 36px touch height: the stop strips grow to fit */
+@media (pointer: coarse) { .ge-strip { height: 40px; } .ge-strip .ge-stop { width: 18px; margin-left: -9px; } .ge-mid { top: 14px; } }
 `);
 
 const CHANNELS = { rgb: ['R', 'G', 'B'], hsb: ['H', 'S', 'B'], lab: ['L', 'a', 'b'] };

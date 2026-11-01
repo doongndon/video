@@ -315,7 +315,10 @@ export function createEssentialGraphicsPanel() {
       h('div.row', startOff.el, endOff.el),
       h('div.row', h('span', '사전 롤'), preRoll, h('span', '사후 롤'), postRoll),
       h('div.row', h('span', '감속'), easeIn, h('span', '가속'), easeOut));
-    styleSec.append(h('h4', '마스터 스타일'), h('div.row', styleSel, iconButton('trash', '고른 마스터 스타일 지우기 (적용한 텍스트는 그대로)', deleteMasterStyle)));
+    styleSec.append(h('h4', '마스터 스타일'), h('div.row', styleSel,
+      iconButton('up', '스타일 속성을 마스터 스타일로 보내기 (이 스타일을 쓴 모든 텍스트가 바뀝니다)', pushMasterStyle),
+      iconButton('reset', '마스터 스타일과 동기화 (바꾼 모양을 스타일대로 되돌리기)', syncMasterStyle),
+      iconButton('trash', '고른 마스터 스타일 지우기 (적용한 텍스트는 그대로)', deleteMasterStyle)));
     editPane.append(layerBar, alignSec, styleSec, rollSec, ecWrap);
   }
 
@@ -400,9 +403,8 @@ export function createEssentialGraphicsPanel() {
     if (!c) return toast('스타일로 저장할 텍스트 클립을 선택하세요');
     const name = await promptDialog('마스터 텍스트 스타일 만들기', '스타일 이름', `텍스트 스타일 ${masterStyles().length + 1}`);
     if (!name?.trim()) return;
-    const look = {};
-    for (const [k, p] of Object.entries(textFx(c).params)) if (!LOOK_SKIP.has(k)) look[k] = structuredClone(p.kf?.length ? p.kf[0].v : p.value);
     const id = uid('ts');
+    const look = lookOf(c);
     store.transact('마스터 텍스트 스타일 만들기', () => {
       store.project.textStyles = [...masterStyles(), { id, name: name.trim(), look }];
       const x = store.seq.clips[c.id];
@@ -411,22 +413,63 @@ export function createEssentialGraphicsPanel() {
     toast(`마스터 스타일 "${name.trim()}"을(를) 만들었습니다. 다른 텍스트를 선택하고 목록에서 고르면 같은 모양이 됩니다.`);
   }
 
+  const lookOf = (c) => {
+    const look = {};
+    for (const [k, p] of Object.entries(textFx(c).params)) if (!LOOK_SKIP.has(k)) look[k] = structuredClone(p.kf?.length ? p.kf[0].v : p.value);
+    return look;
+  };
+  /** Write a style's look onto a text clip (inside a transaction). */
+  const writeStyle = (c, st) => {
+    const fx = textFx(c);
+    if (!fx) return;
+    for (const [k, v] of Object.entries(st.look)) {
+      const p = fx.params[k];
+      if (!p) continue;
+      p.value = structuredClone(v);
+      p.kf = null;
+    }
+    c.textStyle = st.id;
+  };
+
   function applyMasterStyle(id) {
     const st = masterStyles().find((x) => x.id === id);
     const clips = selectedTexts();
     if (!st || !clips.length) return;
     store.transact(`마스터 스타일: ${st.name}`, () => {
+      for (const c0 of clips) if (store.seq.clips[c0.id]) writeStyle(store.seq.clips[c0.id], st);
+    });
+  }
+
+  /** 스타일 속성을 마스터 스타일로 보내기: the selected text's look becomes the style, on every text using it. */
+  function pushMasterStyle() {
+    const c = selectedTexts()[0];
+    const st = c && masterStyles().find((x) => x.id === c.textStyle);
+    if (!st) return toast('마스터 스타일을 쓰는 텍스트 클립을 선택하세요');
+    const look = lookOf(c);
+    let n = 0;
+    store.transact(`마스터 스타일 업데이트: ${st.name}`, () => {
+      store.project.textStyles = masterStyles().map((x) => (x.id === st.id ? { ...x, look } : x));
+      const next = store.project.textStyles.find((x) => x.id === st.id);
+      for (const seq of Object.values(store.project.sequences)) {
+        for (const x of Object.values(seq.clips)) {
+          if (x.textStyle !== st.id) continue;
+          writeStyle(x, next);
+          n++;
+        }
+      }
+    });
+    toast(`"${st.name}" 스타일을 쓰는 텍스트 ${n}개를 바꿨습니다`);
+  }
+
+  /** 마스터 스타일과 동기화: put the style's look back on the selected texts. */
+  function syncMasterStyle() {
+    const clips = selectedTexts().filter((c) => masterStyles().some((x) => x.id === c.textStyle));
+    if (!clips.length) return toast('마스터 스타일을 쓰는 텍스트 클립을 선택하세요');
+    store.transact('마스터 스타일과 동기화', () => {
       for (const c0 of clips) {
         const c = store.seq.clips[c0.id];
-        const fx = textFx(c);
-        if (!fx) continue;
-        for (const [k, v] of Object.entries(st.look)) {
-          const p = fx.params[k];
-          if (!p) continue;
-          p.value = structuredClone(v);
-          p.kf = null;
-        }
-        c.textStyle = id;
+        const st = masterStyles().find((x) => x.id === c?.textStyle);
+        if (st) writeStyle(c, st);
       }
     });
   }

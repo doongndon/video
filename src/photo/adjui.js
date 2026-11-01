@@ -10,8 +10,8 @@
 
 import { h, clamp } from '../util.js';
 import { toast } from '../ui/common.js';
-import { HUE_RANGES, PHOTO_FILTERS, SELECTIVE_TARGETS, levelsLut, curveLut } from './adjust.js';
-import { histograms, percentile, hexRgb, rgbHex, hslToRgb, mk, lum } from './fxcore.js';
+import { HUE_RANGES, PHOTO_FILTERS, SELECTIVE_TARGETS, levelsLut, curveLut, replaceWeight } from './adjust.js';
+import { histograms, percentile, hexRgb, rgbHex, hslToRgb, rgbToHsl, mk, lum } from './fxcore.js';
 import { GRADIENTS, gradientSwatch } from './resources.js';
 
 const STYLE_ID = 'ph-adjui-style';
@@ -35,6 +35,9 @@ export function ensureAdjStyle() {
 .adj-picks button { width: 30px; height: 26px; min-height: 0; padding: 0; display: grid; place-items: center; }
 .adj-picks button.on, .adj-onimg.on { background: var(--accent); border-color: var(--accent); color: #fff; }
 .adj-onimg { width: 30px; height: 26px; min-height: 0; padding: 0; display: inline-grid; place-items: center; }
+.adj-swatch { display: inline-block; width: 44px; height: 22px; border: 1px solid var(--line-2); border-radius: 3px; }
+.adj-prevwrap { display: grid; justify-items: center; gap: 4px; }
+.adj-selprev { max-width: 100%; max-height: 160px; background: #000; border: 1px solid var(--line-2); border-radius: 3px; }
 .adj-drop { width: 14px; height: 14px; border-radius: 50%; border: 1px solid #999; }
 .adj-hue { position: relative; width: 100%; height: 40px; touch-action: none; }
 .adj-hue .bar { position: absolute; left: 0; right: 0; height: 10px; border-radius: 2px; }
@@ -1403,7 +1406,104 @@ export function thresholdEditor(p, onChange, env) {
   return [h('div.adj-graph', cv), sl.el];
 }
 
+// ---------------------------------------------------------------- Replace Color
+
+/**
+ * Photoshop's Replace Color: the colour to change (eyedropper, + adds colours, − takes them out),
+ * Fuzziness, a black-and-white preview of what is selected, and the replacement hue / saturation /
+ * lightness with the resulting colour.
+ */
+export function replaceColorEditor(p, onChange, env) {
+  ensureAdjStyle();
+  const sw = h('input', { type: 'color', value: p.color, 'aria-label': '색상' });
+  const result = h('span.adj-swatch', { title: '결과 색상' });
+  const prev = h('canvas.adj-selprev', { width: 1, height: 1, 'aria-label': '선택 영역 미리 보기' });
+  let small = null;
+  const drawPrev = () => {
+    const src = env?.histSource?.();
+    if (!src) return;
+    if (!small) {
+      const k = Math.min(1, 220 / Math.max(src.width, src.height));
+      small = mk(Math.max(1, Math.round(src.width * k)), Math.max(1, Math.round(src.height * k)));
+      small.getContext('2d').drawImage(src, 0, 0, small.width, small.height);
+      prev.width = small.width;
+      prev.height = small.height;
+    }
+    const img = small.getContext('2d').getImageData(0, 0, small.width, small.height);
+    const d = img.data;
+    const w = replaceWeight(p);
+    for (let i = 0; i < d.length; i += 4) {
+      const v = d[i + 3] ? Math.round(w(d[i], d[i + 1], d[i + 2]) * 255) : 0;
+      d[i] = d[i + 1] = d[i + 2] = v;
+      d[i + 3] = 255;
+    }
+    prev.getContext('2d').putImageData(img, 0, 0);
+  };
+  const drawResult = () => {
+    const [r, g, b] = hexRgb(p.color);
+    const [hh, ss, ll] = rgbToHsl(r, g, b);
+    const h2 = ((((hh * 360 + (p.hue || 0)) % 360) + 360) % 360) / 360;
+    const s2 = clamp(ss * (1 + (p.saturation || 0) / 100), 0, 1);
+    const l2 = clamp(ll + ((p.lightness || 0) / 100) * ((p.lightness || 0) > 0 ? 1 - ll : ll), 0, 1);
+    result.style.background = rgbHex(...hslToRgb(h2, s2, l2));
+  };
+  const changed = (done) => {
+    drawPrev();
+    drawResult();
+    onChange(p, done);
+  };
+  sw.addEventListener('input', () => {
+    p.color = sw.value;
+    changed(false);
+  });
+  sw.addEventListener('change', () => changed(true));
+  const dropper = (kind, title, mark) => {
+    const b = h('button.small', { type: 'button', title, 'aria-label': title }, mark);
+    b.addEventListener('click', () => {
+      if (!env?.sample) return toast('스포이드는 문서가 열려 있을 때 쓸 수 있습니다');
+      b.classList.add('on');
+      env.sample((rgb) => {
+        b.classList.remove('on');
+        if (!rgb) return;
+        const hex = rgbHex(...rgb);
+        if (kind === 'set') {
+          p.color = hex;
+          p.add = null;
+          p.sub = null;
+          sw.value = hex;
+        } else if (kind === 'add') p.add = [...(p.add || []), hex];
+        else p.sub = [...(p.sub || []), hex];
+        changed(true);
+      });
+      return undefined;
+    });
+    return b;
+  };
+  const fuzz = slider('허용량', 1, 200, p.fuzz ?? 40, (v, done) => {
+    p.fuzz = v;
+    changed(done);
+  });
+  const hs = [['hue', '색조', -180, 180, SPECTRUM], ['saturation', '채도', -100, 100, null], ['lightness', '밝기', -100, 100, grad('#000', '#fff')]].map(([k, label, min, max, bg]) => slider(label, min, max, p[k] || 0, (v, done) => {
+    p[k] = v;
+    drawResult();
+    onChange(p, done);
+  }, { bg }));
+  drawResult();
+  // the preview needs the dialog in the page first (the picture is read lazily)
+  setTimeout(drawPrev, 0);
+  return [
+    h('div.ph-sub', '선택'),
+    h('div.adj-row', h('span', '색상'), sw, dropper('set', '이미지에서 샘플링하여 색 고르기', '스포이드'), dropper('add', '샘플에 추가 (색 더하기)', '+'), dropper('sub', '샘플에서 빼기 (색 빼기)', '−')),
+    fuzz.el,
+    h('div.adj-prevwrap', prev, h('div.note', '흰색: 바뀌는 곳 · 검정: 그대로인 곳')),
+    h('div.ph-sub', '대체'),
+    ...hs.map((x) => x.el),
+    h('div.adj-row', h('span', '결과'), result),
+  ];
+}
+
 export const CUSTOM_EDITORS = {
+  replaceColor: replaceColorEditor,
   levels: levelsEditor,
   curves: curvesEditor,
   hueSat: hueSatEditor,

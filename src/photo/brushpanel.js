@@ -283,8 +283,9 @@ window.addEventListener('keydown', (e) => {
   const has = (k) => opts.some((x) => x[0] === k);
   if (!has('flow') && !has('opacity')) return;
   const air = has('flow') && !!P.opts(id).airbrush;
-  const key = e.shiftKey !== air ? 'flow' : 'opacity';
-  if (!has(key)) return;
+  // a tool with only one of them (the mixer brush: flow) takes the keys with or without Shift
+  let key = e.shiftKey !== air ? 'flow' : 'opacity';
+  if (!has(key)) key = has('flow') ? 'flow' : 'opacity';
   const d = +m[2];
   const now = performance.now();
   let v;

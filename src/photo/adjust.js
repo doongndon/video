@@ -78,7 +78,7 @@ export const ADJUSTMENTS = {
       ['color', '조정: 색상', -100, 100, 20], ['midtone', '조정: 중간 톤', -100, 100, 0], ['blackClip', '검정 클리핑 (%)', 0, 50, 0.01, 0.01], ['whiteClip', '흰색 클리핑 (%)', 0, 50, 0.01, 0.01]],
   },
   desaturate: { name: '채도 감소', params: [] },
-  replaceColor: { name: '색상 대체', params: [['color', '바꿀 색 (스포이드로 고르기)', null, null, '#d03030', 'color'], ['fuzz', '허용량', 1, 200, 40], ['hue', '색조', -180, 180, 120], ['saturation', '채도', -100, 100, 0], ['lightness', '밝기', -100, 100, 0]] },
+  replaceColor: { name: '색상 대체', params: [['color', '색상', null, null, '#d03030', 'replaceColor'], ['add', '추가한 색', null, null, null, 'hidden'], ['sub', '뺀 색', null, null, null, 'hidden'], ['fuzz', '허용량', 1, 200, 40, 'hidden'], ['hue', '색조', -180, 180, 0, 'hidden'], ['saturation', '채도', -100, 100, 0, 'hidden'], ['lightness', '밝기', -100, 100, 0, 'hidden']] },
   equalize: { name: '평활화', params: [] },
 };
 
@@ -836,12 +836,25 @@ function shadowsHighlights(img, p) {
   }
 }
 
+/** How much a pixel belongs to Replace Color's selection: near its colours, not near the taken-out ones. */
+export function replaceWeight(p) {
+  const ins = [p.color, ...(Array.isArray(p.add) ? p.add : [])].map(hexRgb);
+  const outs = (Array.isArray(p.sub) ? p.sub : []).map(hexRgb);
+  const a = p.fuzz * 0.5;
+  const b = p.fuzz * 1.2;
+  const near = (cols, r, g, bl) => {
+    let w = 0;
+    for (const [cr, cg, cb] of cols) w = Math.max(w, 1 - smooth(a, b, Math.hypot(r - cr, g - cg, bl - cb)));
+    return w;
+  };
+  return (r, g, bl) => near(ins, r, g, bl) * (outs.length ? 1 - near(outs, r, g, bl) : 1);
+}
+
 function replaceColor(d, p) {
-  const [cr, cg, cb] = hexRgb(p.color);
+  const weight = replaceWeight(p);
   const n = d.length;
   for (let i = 0; i < n; i += 4) {
-    const dist = Math.hypot(d[i] - cr, d[i + 1] - cg, d[i + 2] - cb);
-    const w = 1 - smooth(p.fuzz * 0.5, p.fuzz * 1.2, dist);
+    const w = weight(d[i], d[i + 1], d[i + 2]);
     if (w <= 0) continue;
     let [hh, s, l] = rgbToHsl(d[i], d[i + 1], d[i + 2]);
     hh = (((hh * 360 + p.hue) % 360) + 360) % 360 / 360;

@@ -460,9 +460,12 @@ export function templateMenu(run = insertTemplate) {
   }));
 }
 
-function freeTrack(s, start, end) {
-  const tracks = videoTracks(s).filter((t) => !t.locked);
-  let tr = tracks.find((t, i) => i > 0 && !clipsOnTrack(s, t.id).some((c) => c.start < end - 1e-6 && clipEnd(c) > start + 1e-6));
+function freeTrack(s, start, end, baseId = null) {
+  // from the given track up (a drop target), otherwise from V2 up (V1 usually holds the footage)
+  const all = videoTracks(s);
+  const at = baseId ? all.findIndex((t) => t.id === baseId) : -1;
+  const base = at >= 0 ? at : 1;
+  let tr = all.find((t, i) => i >= base && !t.locked && !clipsOnTrack(s, t.id).some((c) => c.start < end - 1e-6 && clipEnd(c) > start + 1e-6));
   if (!tr) {
     tr = createTrack('video', videoTracks(s).length);
     const lastVideoIdx = s.tracks.findLastIndex((t) => t.kind === 'video');
@@ -513,14 +516,14 @@ export function buildTemplate(tpl, s, t0, { trackFor, add }) {
 }
 
 /** Insert a template at the playhead (one undo step); returns the ids of the clips it made. */
-export function insertTemplate(id, at = store.ui.playhead) {
+export function insertTemplate(id, at = store.ui.playhead, { trackId = null } = {}) {
   const tpl = TEMPLATES.find((t) => t.id === id);
   if (!tpl) return [];
   const s = store.seq;
   const created = [];
   store.transact(`템플릿: ${tpl.name}`, () => {
     const clips = buildTemplate(tpl, s, snapFrame(Math.max(0, at), s.fps), {
-      trackFor: (start, end) => freeTrack(s, start, end),
+      trackFor: (start, end) => freeTrack(s, start, end, trackId),
       add: (c) => { s.clips[c.id] = c; },
     });
     created.push(...clips.map((c) => c.id));

@@ -40,7 +40,7 @@ if (typeof window !== 'undefined') {
     if (tag === 'TEXTAREA' || tag === 'SELECT' || e.target?.isContentEditable || (tag === 'INPUT' && !['checkbox', 'radio', 'range', 'button', 'color'].includes(e.target.type))) return;
     if (e.ctrlKey || e.metaKey || !e.shiftKey || P.transform || e.repeat) return;
     // painting tools keep these keys for their own options
-    if (TOOL_BY_ID[P.tool]?.options?.some((o) => o[0] === 'opacity')) return;
+    if (TOOL_BY_ID[P.tool]?.options?.some((o) => o[0] === 'opacity' || o[0] === 'flow')) return;
     const C = P.cmd;
     let handled = false;
     if (e.altKey && BLEND_KEYS[e.code]) {

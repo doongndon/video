@@ -171,6 +171,20 @@ function readValue(r, type) {
       return { _class: r.key(), _name: nm };
     }
     case 'obj ': return readReference(r);
+    case 'ObAr': {
+      // an object array (points and the like): version, name, class, then lists of unit floats
+      r.u32();
+      r.unicode();
+      r.key();
+      const n = r.u32();
+      const out = [];
+      for (let i = 0; i < n; i++) {
+        const k = r.key();
+        r.ascii(4); // 'UnFl'
+        out.push({ key: k, ...readValue(r, 'UnFl') });
+      }
+      return out;
+    }
     case 'alis':
     case 'tdta':
     case 'Pth ': return r.bytes(r.u32());

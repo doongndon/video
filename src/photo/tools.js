@@ -10,6 +10,7 @@ import { h } from '../util.js';
 import { icon } from '../ui/icons.js';
 import { BLEND_MODES, compositeOnto } from './blend.js';
 import { GRADIENTS } from './resources.js';
+import { RETOUCH_MODES, retouchMode } from './retouchmix.js';
 
 const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
 const hexRgb = (hex) => {
@@ -67,6 +68,9 @@ function dab(size, hardness, color, hard = false) {
 
 /** Falloff weight of a dab at distance d from its centre (radius r, hardness h). */
 const falloff = (d, r, h) => (d >= r ? 0 : d <= r * h ? 1 : 1 - (d - r * h) / Math.max(1e-6, r * (1 - h)));
+// the blur and sharpen tools' 3×3 kernel: rows, then columns, then weights (they add up to 10)
+const taps = [0, 0, 0, -1, 1, -1, -1, 1, 1, 0, -1, 1, 0, 0, -1, 1, -1, 1];
+const tapW = [4, 1, 1, 1, 1, 0.5, 0.5, 0.5, 0.5];
 
 // ---------------------------------------------------------------- strokes (brush, pencil, eraser, mask, clone, heal)
 
@@ -384,12 +388,17 @@ class Retouch {
     this.carry = null;
     // the part of the document changed since the last redraw (doc coords)
     this.dirty = null;
+    // 모든 레이어 샘플링 (blur, sharpen, smudge): the picture as it shows is worked on, and the
+    // result is laid on the active layer (which can be an empty layer above)
+    if (o.sampleAll && ['blur', 'sharpen', 'smudge'].includes(kind)) this.all = E.doc.flatten().getContext('2d', { willReadFrequently: true });
   }
 
   to(p) {
     if (!this.last) {
       this.last = p;
       if (this.kind !== 'smudge' && this.kind !== 'push') this.apply(p, { x: 0, y: 0 });
+      // 손가락 페인팅: the stroke starts with the foreground colour on the finger
+      else if (this.kind === 'smudge' && this.o.fingerPaint) this.apply(p, { x: 0, y: 0 }, [...hexRgb(this.E.fg || '#000000'), 255]);
       return;
     }
     const step = Math.max(1, this.o.size * 0.2);
@@ -408,7 +417,7 @@ class Retouch {
     this.E.redraw();
   }
 
-  apply(p, mv) {
+  apply(p, mv, paint = null) {
     const g = this.g;
     const r = this.o.size / 2;
     const cx = p.x - this.layer.x;
@@ -423,10 +432,29 @@ class Retouch {
     if (w <= 2 || h <= 2) return;
     const r0 = { x: x0 + this.layer.x, y: y0 + this.layer.y, w, h };
     this.dirty = this.dirty ? union(this.dirty, r0) : r0;
-    const img = g.getImageData(x0, y0, w, h);
+    // with 모든 레이어 샘플링 the shown picture is worked on (and kept up to date for the next dabs);
+    // tv / tWt keep what each pixel became and how strongly, for the layer
+    const img = this.all ? this.all.getImageData(x0 + this.layer.x, y0 + this.layer.y, w, h) : g.getImageData(x0, y0, w, h);
     const d = img.data;
     const src = new Uint8ClampedArray(d);
+    const tv = this.all ? new Uint8ClampedArray(d.length) : null;
+    const tWt = this.all ? new Float32Array(w * h) : null;
+    const mode = this.o.mode && this.o.mode !== 'normal' && ['blur', 'sharpen', 'smudge'].includes(this.kind) ? this.o.mode : null;
+    const vv = [0, 0, 0, 0];
+    // mixed premultiplied, so transparent pixels don't darken what they touch
+    const put = (o, t) => {
+      if (mode) retouchMode(mode, src, o, vv);
+      const a0 = src[o + 3];
+      const a = a0 + (vv[3] - a0) * t;
+      if (a > 0) for (let c = 0; c < 3; c++) d[o + c] = (src[o + c] * a0 + (vv[c] * vv[3] - src[o + c] * a0) * t) / a;
+      d[o + 3] = a;
+      if (tv) {
+        for (let c = 0; c < 4; c++) tv[o + c] = vv[c];
+        tWt[o >> 2] = t;
+      }
+    };
     const k = (this.o.strength ?? 50) / 100;
+    const avg = [0, 0, 0, 0];
     // dodge and burn work on one tonal range (shadows, midtones, highlights), like Photoshop
     const range = this.o.range || 'midtones';
     const tone = (l) => (range === 'shadows' ? (1 - l) * (1 - l) : range === 'highlights' ? l * l : 1 - (2 * l - 1) * (2 * l - 1));
@@ -439,11 +467,29 @@ class Retouch {
         if (wgt <= 0) continue;
         const o = (y * w + x) * 4;
         if (this.kind === 'blur' || this.kind === 'sharpen') {
-          for (let c = 0; c < 4; c++) {
-            const avg = (src[o + c] * 4 + src[o - 4 + c] + src[o + 4 + c] + src[o - w * 4 + c] + src[o + w * 4 + c] + (src[o - w * 4 - 4 + c] + src[o - w * 4 + 4 + c] + src[o + w * 4 - 4 + c] + src[o + w * 4 + 4 + c]) * 0.5) / 10;
-            const v = this.kind === 'blur' ? avg : src[o + c] + (src[o + c] - avg) * 1.5;
-            d[o + c] = src[o + c] + (v - src[o + c]) * wgt * (this.kind === 'sharpen' ? 0.6 : 1);
+          // the 3×3 average, weighted by opacity (the colour of see-through pixels doesn't count)
+          let sa = 0;
+          avg[0] = avg[1] = avg[2] = 0;
+          for (let n = 0; n < 9; n++) {
+            const q = o + (taps[n] * w + taps[n + 9]) * 4;
+            const wa = tapW[n] * src[q + 3];
+            sa += wa;
+            for (let c = 0; c < 3; c++) avg[c] += src[q + c] * wa;
           }
+          for (let c = 0; c < 3; c++) avg[c] = sa > 0 ? avg[c] / sa : src[o + c];
+          avg[3] = sa / 10;
+          for (let c = 0; c < 4; c++) {
+            let v = this.kind === 'blur' ? avg[c] : src[o + c] + (src[o + c] - avg[c]) * 1.5;
+            if (this.kind === 'sharpen' && this.o.protectDetail) {
+              // 세부 묘사 보호: little overshoot past the neighbours, so no halos or speckles
+              const ns = [src[o - 4 + c], src[o + 4 + c], src[o - w * 4 + c], src[o + w * 4 + c], src[o + c]];
+              const lo = Math.min(...ns);
+              const hi = Math.max(...ns);
+              v = Math.min(hi + (hi - lo) * 0.25, Math.max(lo - (hi - lo) * 0.25, v));
+            }
+            vv[c] = v;
+          }
+          put(o, wgt * (this.kind === 'sharpen' ? (this.o.protectDetail ? 1 : 0.6) : 1));
         } else if (this.kind === 'dodge' || this.kind === 'burn') {
           const L = src[o] * 0.299 + src[o + 1] * 0.587 + src[o + 2] * 0.114;
           const tw = tone(L / 255) * wgt * 0.35;
@@ -482,11 +528,32 @@ class Retouch {
           const sy = Math.round(y - mv.y * (this.kind === 'push' ? 1 : 1));
           if (sx < 0 || sy < 0 || sx >= w || sy >= h) continue;
           const so = (sy * w + sx) * 4;
-          for (let c = 0; c < 4; c++) d[o + c] = src[o + c] + (src[so + c] - src[o + c]) * wgt;
+          for (let c = 0; c < 4; c++) vv[c] = paint ? paint[c] : src[so + c];
+          put(o, wgt);
         }
       }
     }
-    g.putImageData(img, x0, y0);
+    if (!this.all) {
+      g.putImageData(img, x0, y0);
+      return;
+    }
+    // the shown picture, and the layer moved towards what each pixel became (mixed premultiplied, so
+    // an empty layer takes on the colour itself)
+    this.all.putImageData(img, x0 + this.layer.x, y0 + this.layer.y);
+    const li = g.getImageData(x0, y0, w, h);
+    const ld = li.data;
+    for (let i = 0; i < tWt.length; i++) {
+      const t = tWt[i];
+      if (t <= 0) continue;
+      const o = i * 4;
+      const a0 = ld[o + 3] / 255;
+      const a1 = tv[o + 3] / 255;
+      const a = a0 + (a1 - a0) * t;
+      if (a <= 0) continue;
+      for (let c = 0; c < 3; c++) ld[o + c] = (ld[o + c] * a0 + (tv[o + c] * a1 - ld[o + c] * a0) * t) / a;
+      ld[o + 3] = a * 255;
+    }
+    g.putImageData(li, x0, y0);
   }
 
   end() {
@@ -917,6 +984,9 @@ function strokeTool(id, name, key, icon, mode, extra = {}) {
 
 const TONE_RANGE = ['range', '범위', 'select', null, null, 'midtones', [['shadows', '어두운 영역'], ['midtones', '중간 영역'], ['highlights', '밝은 영역']]];
 
+// the blur, sharpen and smudge tools' 모드 and 모든 레이어 샘플링
+const RETOUCH_MODE = ['mode', '모드', 'select', null, null, 'normal', RETOUCH_MODES];
+const SAMPLE_ALL_R = ['sampleAll', '모든 레이어 샘플링', 'bool', null, null, false];
 function retouchTool(id, name, key, icon, kind, extra = [], strengthLabel = '강도') {
   return {
     id, name, key, icon, group: 'retouch', cursor: 'brush',
@@ -2495,9 +2565,9 @@ export const TOOLS = [
   },
   // ---- retouch
   // Photoshop's names (흐림 효과 도구, 손가락 도구, 닷지 도구, 스폰지 도구…)
-  retouchTool('blur', '흐림 효과', null, 'drop', 'blur'),
-  retouchTool('sharpen', '선명 효과', null, 'sharpenTool', 'sharpen'),
-  retouchTool('smudge', '손가락', null, 'smudge', 'smudge'),
+  retouchTool('blur', '흐림 효과', null, 'drop', 'blur', [RETOUCH_MODE, SAMPLE_ALL_R]),
+  retouchTool('sharpen', '선명 효과', null, 'sharpenTool', 'sharpen', [RETOUCH_MODE, SAMPLE_ALL_R, ['protectDetail', '세부 묘사 보호', 'bool', null, null, true]]),
+  retouchTool('smudge', '손가락', null, 'smudge', 'smudge', [RETOUCH_MODE, SAMPLE_ALL_R, ['fingerPaint', '손가락 페인팅', 'bool', null, null, false]]),
   retouchTool('push', '픽셀 유동화 (밀기)', null, 'push', 'push'),
   retouchTool('dodge', '닷지', 'O', 'dodge', 'dodge', [TONE_RANGE, ['protectTones', '톤 보호', 'bool', null, null, true]], '노출'),
   retouchTool('burn', '번', 'O', 'burn', 'burn', [TONE_RANGE, ['protectTones', '톤 보호', 'bool', null, null, true]], '노출'),
