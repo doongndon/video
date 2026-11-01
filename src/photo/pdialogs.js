@@ -149,6 +149,7 @@ export function imageSizeDialog(P) {
   const res = num(st.res, 0.01, 99999, 'any', '90px');
   const resU = sel([['in', '픽셀/인치'], ['cm', '픽셀/센티미터']], 'in');
   const keep = chk(true, '비율 제한');
+  const scaleStyles = chk(true, '스타일 비율 조정');
   const resample = chk(true, '리샘플링');
   const method = sel(RESAMPLE, 'auto');
   const noise = h('input', { type: 'range', min: 0, max: 100, value: 0, 'aria-label': '노이즈 감소' });
@@ -265,7 +266,7 @@ export function imageSizeDialog(P) {
   openModal({
     title: '이미지 크기',
     width: '500px',
-    body: [info, formRow('맞추기', fit), formRow('폭', w, wu), formRow('높이', hh, hu), formRow('', keep.el), formRow('해상도', res, resU), formRow('', resample.el, method), noiseRow,
+    body: [info, formRow('맞추기', fit), formRow('폭', w, wu), formRow('높이', hh, hu), formRow('', keep.el), formRow('', scaleStyles.el), formRow('해상도', res, resU), formRow('', resample.el, method), noiseRow,
       h('div.note', '리샘플링을 끄면 픽셀은 그대로 두고 인쇄 크기와 해상도만 바뀝니다. 글자·모양 레이어는 크기 값만 바뀌어 선명하게 유지됩니다.')],
     buttons: [{ label: '취소' }, {
       label: '확인', primary: true, action: () => {
@@ -277,7 +278,7 @@ export function imageSizeDialog(P) {
         }
         const r = Math.round(st.res * 100) / 100;
         if (W !== W0 || H !== H0) {
-          P.resizeImage(W, H, method.value, { noise: +noise.value });
+          P.resizeImage(W, H, method.value, { noise: +noise.value, scaleStyles: scaleStyles.box.checked });
           // the resolution belongs to the same step (its "before" already holds the old one)
           if (P.doc) P.doc.resolution = r;
         } else if (r !== (doc.resolution || 72)) P.run('이미지 크기', () => { doc.resolution = r; });
@@ -985,7 +986,17 @@ function liveLayerDialog(P, { title, defs, params, compute, label, slow = false,
   const gate = (a) => (a.endsWith('2') && defs.some((d) => d[0] === 'two') ? () => !!params.two : () => true);
   const pins = POS_PAIRS.filter(([a, b]) => defs.some((d) => d[0] === a && d[2] === 0 && d[3] === 100) && defs.some((d) => d[0] === b))
     .map(([a, b], i, all) => ({ a, b, on: gate(a), el: h('div.ph-pin', { title: all.length > 1 ? `핀 ${i + 1} (끌어서 옮기기)` : '중심 (끌어서 옮기기)' }) }));
-  const pinAt = (pin) => [bx + (base.width * params[pin.a]) / 100, by + (base.height * params[pin.b]) / 100];
+  // Tilt-Shift: a pin on the focus line (it moves up and down) and the lines of the sharp band
+  // (solid) and of where the blur is full (dashed), turned by the angle
+  const tilt = ['center', 'focus', 'fade', 'angle'].every((k) => defs.some((d) => d[0] === k));
+  let band = null;
+  if (tilt) {
+    pins.push({ a: null, b: 'center', on: () => true, el: h('div.ph-pin', { title: '초점 위치 (끌어서 옮기기)' }) });
+    band = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    band.setAttribute('class', 'ph-band');
+    band.innerHTML = '<path class="f"/><path class="d"/>';
+  }
+  const pinAt = (pin) => [bx + (base.width * (pin.a ? params[pin.a] : 50)) / 100, by + (base.height * params[pin.b]) / 100];
   const toClient = (x, y) => {
     // the inverse of P.toDoc (the view may be zoomed, moved or turned)
     const o = P.toDoc(0, 0);
@@ -1011,10 +1022,28 @@ function liveLayerDialog(P, { title, defs, params, compute, label, slow = false,
       pin.el.style.left = `${cx}px`;
       pin.el.style.top = `${cy}px`;
     }
+    if (band) {
+      // the same geometry as the filter (fx2.js tiltShift): offsets along the normal of the angle
+      const H = base.height;
+      const a = (params.angle * Math.PI) / 180;
+      const [dx, dy] = [Math.cos(a), Math.sin(a)];
+      const [cx, cy] = pinAt(pins.at(-1));
+      const L = Math.hypot(base.width, H) * 2;
+      const line = (d) => {
+        const p1 = toClient(cx - dy * d - dx * L, cy + dx * d - dy * L);
+        const p2 = toClient(cx - dy * d + dx * L, cy + dx * d + dy * L);
+        return `M${p1[0]},${p1[1]}L${p2[0]},${p2[1]}`;
+      };
+      const f = (params.focus / 100) * (H / 2);
+      const fd = f + (params.fade / 100) * H;
+      band.children[0].setAttribute('d', line(-f) + line(f));
+      band.children[1].setAttribute('d', line(-fd) + line(fd));
+    }
   };
   const movePin = (pin, e) => {
     const pt = P.toDoc(e.clientX, e.clientY);
     for (const [k, v] of [[pin.a, ((pt.x - bx) / base.width) * 100], [pin.b, ((pt.y - by) / base.height) * 100]]) {
+      if (!k) continue;
       params[k] = clamp(Math.round(v), 0, 100);
       ctls[k]?.(params[k]);
     }
@@ -1035,6 +1064,7 @@ function liveLayerDialog(P, { title, defs, params, compute, label, slow = false,
     pin.el.addEventListener('pointerup', up);
     pin.el.addEventListener('pointercancel', up);
   };
+  if (band) back.append(band);
   for (const pin of pins) {
     pin.el.addEventListener('pointerdown', (e) => dragPin(pin, e));
     back.append(pin.el);
@@ -1386,7 +1416,9 @@ export function repeatFilter(P) {
   if (pixelsPrompt(P, () => repeatFilter(P))) return undefined;
   if (P.doc?.active?.kind === 'smart') {
     const l = P.doc.active;
-    P.run(`고급 필터: ${FILTERS[id].name}`, () => { l.smart = { ...l.smart, filters: [...(l.smart.filters || []), { id, params: { ...params, _fg: P.fg, _bg: P.bg }, enabled: true }] }; P.doc.touch(l); });
+    // the Filter Gallery's stack goes in as one smart filter per effect, as its own window does
+    const add = id === 'filterGallery' && Array.isArray(params.stack) ? params.stack : [{ id, params }];
+    P.run(`고급 필터: ${FILTERS[id].name}`, () => { l.smart = { ...l.smart, filters: [...(l.smart.filters || []), ...add.map((e) => ({ id: e.id, params: { ...e.params, _fg: P.fg, _bg: P.bg }, enabled: true }))] }; P.doc.touch(l); });
     return undefined;
   }
   const l = P.doc.active;
@@ -1435,8 +1467,13 @@ export function smartFilterDialog(P, id, params, index = null) {
     doc.touch(l);
     P.redraw();
   };
+  // a new smart filter becomes Ctrl+F's filter, as in Photoshop
+  const remember = () => {
+    if (index == null && !id.startsWith('adj:')) lastFilter = { id, params: structuredClone(p) };
+  };
   if (!visibleParams(defs).length) {
     P.run(`고급 필터: ${filterName(id)}`, apply);
+    remember();
     return undefined;
   }
   let timer = null;
@@ -1450,7 +1487,7 @@ export function smartFilterDialog(P, id, params, index = null) {
     body: [...paramEditors(defs, p, () => { clearTimeout(timer); timer = setTimeout(apply, 60); }, P, { source, sampleAt: (x, y) => spot(doc.flatten({ fg: P.fg, bg: P.bg }), x, y) }),
       ...paramEditors([['opacity', '불투명도 (%)', 0, 100, 100]], op, () => { entry.opacity = op.opacity / 100; clearTimeout(timer); timer = setTimeout(apply, 60); }, P),
       h('div.note', '고급 개체에 넣는 필터는 원본을 바꾸지 않습니다. 레이어 패널에서 끄거나 두 번 눌러 다시 고칠 수 있습니다.')],
-    buttons: [{ label: '취소' }, { label: '확인', primary: true, action: () => { clearTimeout(timer); apply(); ok = true; P.commit(`고급 필터: ${filterName(id)}`, before); } }],
+    buttons: [{ label: '취소' }, { label: '확인', primary: true, action: () => { clearTimeout(timer); apply(); ok = true; P.commit(`고급 필터: ${filterName(id)}`, before); remember(); } }],
     onClose: () => {
       clearTimeout(timer);
       picking?.cancel();

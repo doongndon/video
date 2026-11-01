@@ -6,12 +6,15 @@ import { store } from '../store.js';
 import { mediaUrl, runtime, mediaEvents, mediaStatus, interpretRatio } from '../media.js';
 import * as edit from '../edit.js';
 import { h, clamp, formatTimecode, parseTimecode, snapFrame, modKey } from '../util.js';
-import { fitRect, fitCanvasToBox, dnd, inlineEdit, showMenu, toast, menusOpen } from './common.js';
+import { fitRect, fitCanvasToBox, dnd, inlineEdit, showMenu, toast, menusOpen, loadPref, savePref } from './common.js';
 import { icon, iconButton } from './icons.js';
 import { extendMenu } from './menubar.js';
 import { fileIdOf, itemRange, isSubclip } from '../subclips.js';
 
 export const sourceApi = {};
+
+/** 확대/축소 레벨 of the Source monitor (100% = one media pixel per screen pixel), like Premiere's. */
+const ZOOM_LEVELS = [['fit', '맞추기'], ['0.25', '25%'], ['0.5', '50%'], ['0.75', '75%'], ['1', '100%'], ['1.5', '150%'], ['2', '200%'], ['4', '400%']];
 
 export function createSourceMonitor() {
   const view = h('div.monitor-view');
@@ -30,8 +33,24 @@ export function createSourceMonitor() {
   const dragVideo = h('span.drag-src', { draggable: true, title: '끌어서 영상만 타임라인에 놓기' }, icon('film'), '영상만');
   const dragAudio = h('span.drag-src', { draggable: true, title: '끌어서 소리만 타임라인에 놓기' }, icon('audio'), '소리만');
   const subBtn = iconButton('subclip', '하위 클립 만들기 (Ctrl+U): 시작~끝 표시 구간을 새 프로젝트 항목으로', () => makeSubclip());
+  // view options: zoom level (pan by dragging when zoomed in) and 안전 여백
+  let zoom = loadPref('source.zoom', 'fit');
+  let safe = loadPref('source.safe', false);
+  let pan = { x: 0, y: 0 };
+  let frameRect = null;
+  const zoomSel = h('select', { title: '확대/축소 레벨 (확대하면 화면을 끌어서 이동)', 'aria-label': '확대/축소 레벨' },
+    ZOOM_LEVELS.map(([v, l]) => h('option', { value: v, selected: v === String(zoom) }, l)));
+  zoomSel.addEventListener('change', () => setZoom(zoomSel.value));
+  const safeBtn = iconButton('safe', '안전 여백 (TV 가장자리 잘림 확인)', () => setSafe(!safe));
+  const settingsBtn = iconButton('gear', '설정: 확대/축소 레벨·안전 여백', (e) => {
+    const r = e.currentTarget.getBoundingClientRect();
+    showMenu([
+      { label: '확대/축소 레벨', submenu: ZOOM_LEVELS.map(([v, l]) => ({ label: l, checked: String(zoom) === v, action: () => setZoom(v) })) },
+      { label: '안전 여백', checked: safe, action: () => setSafe(!safe) },
+    ], r.left, r.top - 4);
+  });
   const transport = h('div.transport',
-    tcEl,
+    tcEl, zoomSel,
     h('span.grow'),
     iconButton('markIn', '시작 표시 (I)', () => markIn()),
     iconButton('markOut', '끝 표시 (O)', () => markOut()),
@@ -44,7 +63,7 @@ export function createSourceMonitor() {
     iconButton('insert', '삽입: 재생헤드 위치에 끼워 넣고 뒤를 밀기 (,)', () => insert('insert'), { label: '삽입' }),
     iconButton('overwrite', '덮어쓰기: 재생헤드 위치에 덮어 놓기 (.)', () => insert('overwrite'), { label: '덮어쓰기' }),
     subBtn,
-    dragVideo, dragAudio,
+    dragVideo, dragAudio, safeBtn, settingsBtn,
     h('span.grow'),
     durEl);
   const root = h('div.monitor', h('div.panel-toolbar', titleEl), view, scrubBar, transport);
@@ -111,12 +130,36 @@ export function createSourceMonitor() {
     if (focus) store.setFocus('source');
   }
 
+  function setZoom(v) {
+    zoom = ZOOM_LEVELS.some(([x]) => x === String(v)) ? String(v) : 'fit';
+    savePref('source.zoom', zoom);
+    zoomSel.value = zoom;
+    pan = { x: 0, y: 0 };
+    layout();
+  }
+
+  function setSafe(on) {
+    safe = !!on;
+    savePref('source.safe', safe);
+    safeBtn.classList.toggle('on', safe);
+    safeBtn.setAttribute('aria-pressed', String(safe));
+    draw();
+  }
+
   function layout() {
     const r = view.getBoundingClientRect();
     const m = media();
     const w = m?.width || 16;
     const hh = m?.height || 9;
-    const fr = fitRect(r.width, r.height, w, hh);
+    let fr = fitRect(r.width, r.height, w, hh);
+    if (zoom !== 'fit' && m?.width) {
+      const k = Number(zoom);
+      // keep at least a quarter of the picture in view while panning
+      pan.x = clamp(pan.x, -(w * k) / 2 - r.width / 4, (w * k) / 2 + r.width / 4);
+      pan.y = clamp(pan.y, -(hh * k) / 2 - r.height / 4, (hh * k) / 2 + r.height / 4);
+      fr = { x: (r.width - w * k) / 2 + pan.x, y: (r.height - hh * k) / 2 + pan.y, w: w * k, h: hh * k };
+    }
+    frameRect = fr;
     for (const el of [video, img]) Object.assign(el.style, { left: `${fr.x}px`, top: `${fr.y}px`, width: `${fr.w}px`, height: `${fr.h}px` });
     Object.assign(wave.style, { left: '8px', top: '8px', width: `${r.width - 16}px`, height: `${r.height - 16}px` });
     draw();
@@ -185,6 +228,23 @@ export function createSourceMonitor() {
     // in/out overlay markers on the image
     const o = fitCanvasToBox(overlay);
     o.ctx.clearRect(0, 0, o.w, o.h);
+    if (m && m.kind !== 'audio' && safe && frameRect) {
+      // 안전 여백: action safe (90%) and title safe (80%), and a small centre cross
+      const R = frameRect;
+      o.ctx.save();
+      o.ctx.strokeStyle = 'rgba(255,255,255,0.55)';
+      o.ctx.lineWidth = 1;
+      for (const k of [0.9, 0.8]) o.ctx.strokeRect(Math.round(R.x + (R.w * (1 - k)) / 2) + 0.5, Math.round(R.y + (R.h * (1 - k)) / 2) + 0.5, Math.round(R.w * k), Math.round(R.h * k));
+      const cx = R.x + R.w / 2;
+      const cy = R.y + R.h / 2;
+      o.ctx.beginPath();
+      o.ctx.moveTo(cx - 10, cy);
+      o.ctx.lineTo(cx + 10, cy);
+      o.ctx.moveTo(cx, cy - 10);
+      o.ctx.lineTo(cx, cy + 10);
+      o.ctx.stroke();
+      o.ctx.restore();
+    }
     if (m && m.kind !== 'audio' && hi > lo) {
       const t = current();
       o.ctx.fillStyle = 'rgba(255,255,255,0.8)';
@@ -341,7 +401,31 @@ export function createSourceMonitor() {
     e.preventDefault();
     step(e.deltaY > 0 ? 1 : -1);
   }, { passive: false });
-  view.addEventListener('pointerdown', () => { if (media()) store.setFocus('source'); });
+  view.addEventListener('pointerdown', (e) => {
+    if (!media()) return;
+    store.setFocus('source');
+    // zoomed in: drag the picture around (like the hand tool in Premiere's monitors)
+    if (zoom === 'fit' || e.button > 1 || media().kind === 'audio') return;
+    e.preventDefault();
+    view.setPointerCapture(e.pointerId);
+    const p0 = { ...pan };
+    const x0 = e.clientX;
+    const y0 = e.clientY;
+    view.style.cursor = 'grabbing';
+    const move = (ev) => {
+      pan = { x: p0.x + ev.clientX - x0, y: p0.y + ev.clientY - y0 };
+      layout();
+    };
+    const up = () => {
+      view.style.cursor = '';
+      view.removeEventListener('pointermove', move);
+      view.removeEventListener('pointerup', up);
+      view.removeEventListener('pointercancel', up);
+    };
+    view.addEventListener('pointermove', move);
+    view.addEventListener('pointerup', up);
+    view.addEventListener('pointercancel', up);
+  });
   view.addEventListener('contextmenu', (e) => {
     e.preventDefault();
     const m = media();
@@ -445,6 +529,8 @@ export function createSourceMonitor() {
     else draw();
   });
   new ResizeObserver(layout).observe(view);
+  safeBtn.classList.toggle('on', safe);
+  safeBtn.setAttribute('aria-pressed', String(safe));
 
   Object.assign(sourceApi, {
     togglePlay, stop, step, shuttle, markIn, markOut, goIn, goOut, clearIn, clearOut,

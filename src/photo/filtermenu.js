@@ -6,6 +6,7 @@ import { toast } from '../ui/common.js';
 import { FILTERS, ADJUSTMENTS, visibleParams } from './adjust.js';
 import * as D from './pdialogs.js';
 import { resampleCanvas } from './resample.js';
+import { scaleFx } from './styles.js';
 import { neuralFiltersDialog } from './neural.js';
 
 const FILTER_GROUPS = ['흐림 효과', '흐림 효과 갤러리', '왜곡', '노이즈', '픽셀화', '렌더', '선명 효과', '비디오', '스타일화', '기타'];
@@ -116,7 +117,17 @@ export function installFilters(P) {
       if (!doc) return undefined;
       if (!method) return plainResize(W, H);
       const srcs = new Map(doc.layers.filter((l) => l.kind === 'raster' && l.canvas).map((l) => [l.id, l.canvas]));
+      // 스타일 비율 조정 (Scale Styles): layer effects keep their size relative to the picture
+      const k = Math.sqrt((W / doc.width) * (H / doc.height));
       const r = plainResize(W, H);
+      if (opts.scaleStyles && k !== 1) {
+        for (const l of doc.layers) {
+          if (!l.fx || !Object.keys(l.fx).length) continue;
+          l.fx = scaleFx(l.fx, k);
+          l._styled = null;
+          doc.touch(l);
+        }
+      }
       for (const l of doc.layers) {
         const s = srcs.get(l.id);
         if (!s || !l.canvas || l.canvas === s) continue;

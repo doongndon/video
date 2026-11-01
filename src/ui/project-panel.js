@@ -349,7 +349,7 @@ export function createProjectPanel() {
     const m = store.project.media[id];
     if (!m) return;
     if (m.kind === 'lut') {
-      toast('LUT는 클립에 적용해서 씁니다: 클립을 선택하고 오른쪽 클릭 ▸ 선택한 클립에 LUT 적용');
+      toast('LUT는 클립에 적용해서 씁니다: 타임라인에서 클립을 선택한 뒤 여기에서 LUT를 오른쪽 클릭 ▸ 선택한 클립에 LUT 적용');
       return;
     }
     if (m.kind === 'font') {
@@ -722,6 +722,10 @@ export function createProjectPanel() {
       m.kind === 'color' ? { label: '색상 바꾸기…', action: () => changeColor(id) } : null,
       { label: '이름 바꾸기…', action: () => rename(id) },
       { label: real ? (st === 'ready' ? '다른 파일로 바꾸기…' : '미디어 다시 연결…') : '다른 파일로 바꾸기…', disabled: !real || sub, action: () => relinkOne(id) },
+      // 수정 ▸ 푸티지 해석 (Premiere's Modify ▸ Interpret Footage; a subclip changes its master)
+      m.kind === 'video' ? { label: '수정', submenu: [
+        { label: '푸티지 해석…', disabled: st !== 'ready', action: () => import('../commands.js').then(({ commands }) => commands.interpretFootage?.()) },
+      ] } : null,
       { label: '속성…', action: () => showProperties(id) },
       '-',
       ...common,

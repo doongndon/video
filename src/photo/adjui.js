@@ -52,6 +52,9 @@ body.ph-picking .ph-stage, body.ph-picking .ph-stage canvas { cursor: crosshair 
 .ph-pin { position: fixed; width: 24px; height: 24px; margin: -12px 0 0 -12px; border-radius: 50%; border: 2px solid #fff; background: rgba(30, 110, 255, .3); box-shadow: 0 0 0 1px rgba(0,0,0,.65), inset 0 0 0 1px rgba(0,0,0,.65); cursor: move; touch-action: none; display: grid; place-items: center; }
 .ph-pin::after { content: ''; width: 5px; height: 5px; border-radius: 50%; background: #fff; box-shadow: 0 0 0 1px rgba(0,0,0,.6); }
 .ph-pin[hidden] { display: none; }
+.ph-band { position: fixed; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
+.ph-band path { fill: none; stroke: #fff; stroke-width: 1.5; filter: drop-shadow(0 0 1px rgba(0,0,0,.8)); }
+.ph-band path.d { stroke-dasharray: 6 5; }
 .modal-backdrop.peeking .ph-pin { pointer-events: auto; }
 .nf { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 12px; min-height: 300px; }
 .nf-list { display: flex; flex-direction: column; gap: 4px; }

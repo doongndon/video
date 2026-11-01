@@ -285,7 +285,7 @@ export function createEssentialGraphicsPanel() {
     const ids = rollTargets().map((c) => c.id);
     if (!ids.length) return;
     if (!rollOn.box.checked) {
-      clearRollCrawl(ids);
+      if (rollTargets().some((c) => c.roll)) clearRollCrawl(ids);
       return;
     }
     measure = measure || (await rollMeasure());
