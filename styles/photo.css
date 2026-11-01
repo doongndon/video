@@ -824,3 +824,5 @@ body.mobile .ph-dropbtn { width: 28px; }
 .ph-theme { width: 30px; height: 22px; min-height: 0; padding: 0; border: 1px solid #000; border-radius: 2px; }
 .ph-theme.on { outline: 2px solid var(--accent); outline-offset: 2px; }
 body.photo-mode .toast { background: var(--bg-3); border-color: var(--line-2); color: var(--text); }
+.ph-sheet-head button[hidden] { display: none; }
+.ph-home-nav button { white-space: nowrap; }

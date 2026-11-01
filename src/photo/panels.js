@@ -1540,6 +1540,17 @@ export function buildHistoryPanel(P) {
     P.openDoc(d);
   };
   P.stateToDoc = () => snapshotToDoc({ name: '복사', state: P.doc.capture() });
+  // the dock's panel menu (≡) for this panel
+  P.panelMenus = P.panelMenus || {};
+  P.panelMenus.history = () => [
+    { label: '단계 앞으로', key: 'Shift+Ctrl+Z', disabled: !P.doc?.history.redoStack?.length, action: () => P.redo() },
+    { label: '단계 뒤로', key: 'Ctrl+Z', disabled: !P.doc?.history.undoStack.length, action: () => P.undo() },
+    '-',
+    { label: '새 스냅숏…', disabled: !P.doc, action: () => P.newSnapshot() },
+    { label: '새 문서', disabled: !P.doc, action: () => P.stateToDoc() },
+    '-',
+    { label: '작업 내역 옵션…', action: () => P.cmd.historyOptions?.() },
+  ];
   const render = () => {
     const doc = P.doc;
     list.replaceChildren();
