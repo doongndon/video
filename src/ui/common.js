@@ -397,7 +397,8 @@ const focusables = (root) => [...root.querySelectorAll(FOCUSABLE)].filter(canFoc
  * Keys: Enter runs the primary button (not from a text area or a focused button), Esc closes,
  * Tab stays inside the dialog. Only the topmost dialog answers; the editors' shortcuts wait.
  */
-export function openModal({ title, body, buttons = [{ label: '닫기', primary: true }], onClose, width, peek, compare }) {
+export function openModal({ title, body, buttons = [{ label: '닫기', primary: true }], onClose, width, peek, compare, mount }) {
+  if (mount) return inlineModal({ title, body, buttons, onClose, mount });
   const footer = h('footer');
   const head = h('header', h('span.modal-title', title));
   const modal = h('div.modal', { role: 'dialog', 'aria-modal': 'true', 'aria-label': typeof title === 'string' ? title : null, style: width ? { width } : null },
@@ -548,6 +549,49 @@ export function openModal({ title, body, buttons = [{ label: '닫기', primary: 
     (first(phone ? 'button.primary' : 'input:not([type=hidden]),select,textarea,button.primary') || first(FOCUSABLE))?.focus({ preventScroll: phone });
   }, 0);
   return { close, modal, footer, peek: setPeek };
+}
+
+/**
+ * A dialog's content laid into a page instead of over it (e.g. the 내보내기 mode page shows the
+ * export settings dialog). Not modal: the page's own keys stay with it. Closing empties `mount`
+ * and fires 'modal-closed' on it.
+ */
+function inlineModal({ title, body, buttons, onClose, mount }) {
+  const footer = h('footer');
+  const modal = h('div.modal.inline', { role: 'region', 'aria-label': typeof title === 'string' ? title : null },
+    h('header', h('span.modal-title', title)), h('div.body', body), footer);
+  let closed = false;
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    modal.remove();
+    onClose?.();
+    mount.dispatchEvent(new Event('modal-closed'));
+  };
+  let busy = false;
+  for (const b of buttons) {
+    const btn = h(`button${b.primary ? '.primary' : ''}`, {
+      onclick: async () => {
+        if (busy || closed) return;
+        busy = true;
+        let keep;
+        try {
+          keep = await b.action?.();
+        } catch (err) {
+          console.error(err);
+          toast(String(err?.message || err));
+          keep = false;
+        } finally {
+          busy = false;
+        }
+        if (keep !== false) close();
+      },
+    }, b.label);
+    b.el = btn;
+    footer.append(btn);
+  }
+  mount.append(modal);
+  return { close, modal, footer, peek: () => {} };
 }
 
 export function confirmDialog(title, message) {

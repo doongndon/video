@@ -917,6 +917,10 @@ async function blobCanvas(b) {
   return c;
 }
 
+/** One document as plain data with PNG blobs (the home screen's document library, library.js). */
+export const docToRecord = (doc) => serializeDoc(doc, canvasBlob);
+export const docFromRecord = (o) => deserializeDoc(o, blobCanvas);
+
 export async function saveSession(docs, activeIndex) {
   const out = [];
   for (const doc of docs) out.push({ ...(await serializeDoc(doc, canvasBlob)), smartParent: doc.smartParent || null });

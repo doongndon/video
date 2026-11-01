@@ -225,18 +225,24 @@ function estimateMotion(A, B, w, h, box, method, guess, inside = () => true) {
       const dx = u - x;
       const dy = v - y;
       let w = 0;
-      for (const q of pairs) if (Math.hypot(q[2] - q[0] - dx, q[3] - q[1] - dy) < 2) w += q[4];
+      for (const q of pairs) if (Math.hypot(q[2] - q[0] - dx, q[3] - q[1] - dy) < 0.8) w += q[4];
       if (w > bestW) {
         bestW = w;
         best = [dx, dy];
       }
     }
-    // a scale or rotation change spreads the shifts out: only narrow down when the winner holds
-    // a real share of the texture, and keep everything within a few pixels of it
-    const keep = pairs.filter((q) => Math.hypot(q[2] - q[0] - best[0], q[3] - q[1] - best[1]) < 4);
-    if (keep.length >= 2 && keep.length < pairs.length) {
-      pairs.length = 0;
-      pairs.push(...keep);
+    const near = pairs.filter((q) => Math.hypot(q[2] - q[0] - best[0], q[3] - q[1] - best[1]) < 1.2);
+    if (near.length >= 2 && near.length < pairs.length) {
+      // a scale or rotation change spreads the shifts out, so the fit on the winners competes
+      // with the fit on all pairs: whichever explains more texture (within 1 px) is kept
+      const inl = (t) => pairs.filter(([x, y, u, v]) => Math.hypot(t.a * x - t.b * y + t.tx - u, t.b * x + t.a * y + t.ty - v) < 1);
+      const wsum = (ps) => ps.reduce((acc, q) => acc + q[4], 0);
+      const a = inl(fitSimilarity(near, method));
+      const b = inl(fitSimilarity(pairs, method));
+      if (a.length >= 3 && wsum(a) > wsum(b) && wsum(a) > wsum(pairs) * 0.35) {
+        pairs.length = 0;
+        pairs.push(...a);
+      }
     }
   }
   let tr = fitSimilarity(pairs, method);

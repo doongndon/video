@@ -34,7 +34,8 @@ const heading = (text) => h('div', { style: { fontWeight: '700', margin: '12px 0
 let support = null; // encodable codecs, checked once
 const supportReady = () => support || (support = Promise.all([encodableVideoCodecs(1920, 1080), encodableAudioCodecs()]).then(([v, a]) => ({ v, a })).catch(() => ({ v: {}, a: {} })));
 
-export function openExportSettings() {
+/** mount: lay the settings into that element (the 내보내기 mode page) instead of a dialog. */
+export function openExportSettings({ mount = null } = {}) {
   const s = store.seq;
   const saved = loadPref('export.settings', {});
   const fileName = h('input', { type: 'text', value: (s.name || '시퀀스').replace(/[\\/:*?"<>|]+/g, '_'), style: { width: '100%' } });
@@ -352,6 +353,7 @@ export function openExportSettings() {
       },
     ],
     onClose: () => { token.cancelled = true; },
+    mount,
   });
   return modal;
 }
