@@ -106,6 +106,123 @@ function folder(name, count, closed, onToggle) {
   return h('div.ph-swhead', h('button.ph-twist', { 'aria-expanded': String(!closed), 'aria-label': `${name} ${closed ? '펼치기' : '접기'}`, onclick: onToggle }, icon(closed ? 'chevronRight' : 'chevronDown', 12)), h('span', name), h('small', ` ${count}`));
 }
 
+// the panel menu's view sizes (Photoshop's preset panels)
+const VIEW_SIZES = [['small', '작은 축소판'], ['large', '큰 축소판'], ['smallList', '작은 목록'], ['largeList', '큰 목록']];
+function viewMenu(prefKey, get, set) {
+  return VIEW_SIZES.map(([v, label]) => ({ label, checked: get() === v, action: () => {
+    savePref(prefKey, v);
+    set(v);
+  } }));
+}
+
+/**
+ * The user's preset groups (panel menu ▸ 새 그룹): group names in `${key}.groups` and which group each
+ * preset is in, by id, in `${key}.groupOf` (presets in no group go to `base`).
+ */
+function presetGroups(key, base) {
+  const names = () => loadPref(`${key}.groups`, []);
+  const of = () => loadPref(`${key}.groupOf`, {});
+  return {
+    base,
+    groupOf: (p, map = of()) => map[p.id] ?? p.group ?? base,
+    /** [[name, presets]] for the user's presets, empty groups too (the base group only when used). */
+    list(presets) {
+      const map = of();
+      const made = names();
+      const all = [...new Set([base, ...made, ...presets.map((p) => this.groupOf(p, map))])];
+      return all.map((n) => [n, presets.filter((p) => this.groupOf(p, map) === n)]).filter(([n, l]) => l.length || (n !== base && made.includes(n)));
+    },
+    async add(title) {
+      const n = (await promptDialog(title, '그룹 이름', `그룹 ${names().length + 1}`))?.trim();
+      if (!n) return null;
+      if (!names().includes(n)) savePref(`${key}.groups`, [...names(), n]);
+      return n;
+    },
+    move(id, n) {
+      savePref(`${key}.groupOf`, { ...of(), [id]: n });
+    },
+    rename(from, to, presets) {
+      const map = of();
+      for (const p of presets) if (this.groupOf(p, map) === from) map[p.id] = to;
+      savePref(`${key}.groupOf`, map);
+      savePref(`${key}.groups`, [...new Set([...names().filter((x) => x !== from), to])]);
+    },
+    /** Drops the group; returns the ids of the presets that were in it. */
+    remove(n, presets) {
+      const map = of();
+      const ids = presets.filter((p) => this.groupOf(p, map) === n).map((p) => p.id);
+      for (const id of ids) delete map[id];
+      savePref(`${key}.groupOf`, map);
+      savePref(`${key}.groups`, names().filter((x) => x !== n));
+      return ids;
+    },
+  };
+}
+
+/** Gradients as a Photoshop gradient file (.grd, version 5; Photoshop's 가져오기 reads it). */
+function grdFile(list, fg, bg) {
+  const out = [];
+  const u8 = (v) => out.push(v & 255);
+  const u16 = (v) => { u8(v >> 8); u8(v); };
+  const u32 = (v) => { u16(v >>> 16); u16(v & 0xffff); };
+  const f64 = (v) => {
+    const b = new DataView(new ArrayBuffer(8));
+    b.setFloat64(0, v);
+    for (let i = 0; i < 8; i++) u8(b.getUint8(i));
+  };
+  const ascii = (s) => { for (const ch of s) u8(ch.charCodeAt(0)); };
+  const key = (k) => {
+    u32(k.length === 4 ? 0 : k.length);
+    ascii(k);
+  };
+  const uni = (s) => {
+    u32(s.length + 1);
+    for (let i = 0; i < s.length; i++) u16(s.charCodeAt(i));
+    u16(0);
+  };
+  // a descriptor: its items are [key, type, writer]
+  const desc = (cls, items) => {
+    uni('');
+    key(cls);
+    u32(items.length);
+    for (const [k, t, w] of items) {
+      key(k);
+      ascii(t);
+      w();
+    }
+  };
+  const obj = (cls, items) => () => desc(cls, items);
+  const objs = (items) => () => {
+    u32(items.length);
+    for (const w of items) {
+      ascii('Objc');
+      w();
+    }
+  };
+  const doub = (v) => () => f64(v);
+  const long = (v) => () => u32(Math.round(v) | 0);
+  const rgb = (hex) => [1, 3, 5].map((i) => parseInt(resolveStopColor(hex, fg, bg).slice(i, i + 2), 16) || 0);
+  ascii('8BGR');
+  u16(5);
+  u32(16);
+  desc('null', [['GrdL', 'VlLs', objs(list.filter((g) => g.type !== 'noise').map((g) => obj('Grdn', [['Grad', 'Objc', obj('Grdn', [
+    ['Nm  ', 'TEXT', () => uni(g.name || '그레이디언트')],
+    ['GrdF', 'enum', () => { key('GrdF'); key('CstS'); }],
+    ['Intr', 'doub', doub(((g.smooth ?? 100) / 100) * 4096)],
+    ['Clrs', 'VlLs', objs(g.stops.map((s) => {
+      const [r, gg, b] = rgb(s.color);
+      return obj('Clrt', [
+        ['Clr ', 'Objc', obj('RGBC', [['Rd  ', 'doub', doub(r)], ['Grn ', 'doub', doub(gg)], ['Bl  ', 'doub', doub(b)]])],
+        ['Type', 'enum', () => { key('Clry'); key('UsrS'); }],
+        ['Lctn', 'long', long(s.pos * 4096)], ['Mdpn', 'long', long(s.mid ?? 50)]]);
+    }))],
+    ['Trns', 'VlLs', objs((g.alphas?.length ? g.alphas : [{ pos: 0, a: 1 }, { pos: 1, a: 1 }]).map((a) => obj('TrnS', [
+      ['Opct', 'UntF', () => { ascii('#Prc'); f64((a.a ?? 1) * 100); }],
+      ['Lctn', 'long', long(a.pos * 4096)], ['Mdpn', 'long', long(a.mid ?? 50)]])))],
+  ])]])))]]);
+  return new Blob([new Uint8Array(out)], { type: 'application/octet-stream' });
+}
+
 // ---------------------------------------------------------------- gradient library
 
 const g2 = (a, b) => [{ pos: 0, color: a }, { pos: 1, color: b }];
@@ -189,32 +306,90 @@ export function buildGradientsPanel(P) {
     }
     render();
   };
+  const MINE = '내 그레이디언트';
+  const groups = presetGroups('photo.gradients', MINE);
+  let view = loadPref('photo.gradients.view', 'small');
+  const isUser = (g) => !!g && userGradients().some((u) => u.id === g.id);
+  const renameG = async (g) => {
+    const v = await promptDialog('그레이디언트 이름', '이름', g.name);
+    if (!v?.trim()) return;
+    savePref('photo.gradients', userGradients().map((u) => (u.id === g.id ? { ...u, name: v.trim() } : u)));
+    if (current?.id === g.id) current = { ...current, name: v.trim() };
+    render();
+  };
+  const deleteG = (ids) => {
+    savePref('photo.gradients', userGradients().filter((u) => !ids.includes(u.id)));
+    if (current && ids.includes(current.id)) current = null;
+    render();
+  };
   const presetMenu = (g, user, x, y) => showMenu([
     { label: '그레이디언트 도구에 쓰기', action: () => { toTool(g); P.setTool('gradient'); } },
     { label: '새 그레이디언트 칠 레이어', disabled: !P.doc, action: () => fillLayer(g) },
     { label: '그레이디언트 오버레이 (레이어 스타일)', disabled: !P.doc?.active, action: () => overlay(g) },
+    { label: '그레이디언트 내보내기…', action: () => exportG([g]) },
     ...(user ? ['-',
-      { label: '이름 바꾸기…', action: async () => { const v = await promptDialog('그레이디언트 이름', '이름', g.name); if (v?.trim()) { savePref('photo.gradients', userGradients().map((u) => (u.id === g.id ? { ...u, name: v.trim() } : u))); render(); } } },
-      { label: '삭제', action: () => { savePref('photo.gradients', userGradients().filter((u) => u.id !== g.id)); render(); } }] : []),
+      { label: '이름 바꾸기…', action: () => renameG(g) },
+      { label: '그룹으로 이동', submenu: () => [
+        ...groups.list(userGradients()).map(([n]) => n).filter((n) => n !== groups.groupOf(g)).map((n) => ({ label: n, action: () => { groups.move(g.id, n); render(); } })),
+        { label: '새 그룹…', action: async () => { const n = await groups.add('새 그레이디언트 그룹'); if (n) { groups.move(g.id, n); render(); } } }] },
+      { label: '삭제', action: () => deleteG([g.id]) }] : []),
+  ], x, y);
+  const groupMenu = (name, list, x, y) => showMenu([
+    { label: '그룹 이름 바꾸기…', disabled: name === MINE, action: async () => {
+      const v = (await promptDialog('그룹 이름', '이름', name))?.trim();
+      if (v && v !== name) { groups.rename(name, v, userGradients()); render(); }
+    } },
+    { label: '그룹 삭제', action: async () => {
+      if (list.length && !(await confirmDialog('그룹 삭제', `"${name}" 그룹과 그 안의 그레이디언트 ${list.length}개를 지울까요?`))) return;
+      deleteG(groups.remove(name, userGradients()));
+    } },
   ], x, y);
   const saveCurrent = async () => {
     const o = P.opts('gradient');
     const g = o.preset === 'custom' && o.custom ? o.custom : GRADIENTS.find((x) => x.id === o.preset) || GRADIENTS[0];
     const name = await promptDialog('새 그레이디언트', '이름 (그레이디언트 도구의 지금 그레이디언트)', `내 그레이디언트 ${userGradients().length + 1}`);
     if (!name?.trim()) return;
-    savePref('photo.gradients', [...userGradients(), { ...resolved(g, P), id: `ug${Date.now().toString(36)}`, name: name.trim() }]);
+    const id = `ug${Date.now().toString(36)}`;
+    savePref('photo.gradients', [...userGradients(), { ...resolved(g, P), id, name: name.trim() }]);
+    // into the group of the picked gradient, as Photoshop does
+    if (isUser(current) && groups.groupOf(current) !== MINE) groups.move(id, groups.groupOf(current));
     render();
   };
+  const importG = async () => {
+    const { pickFiles } = await import('../ui/project-panel.js');
+    const { importGradientFiles } = await import('./gradedit.js');
+    await importGradientFiles(P, await pickFiles({ accept: '.grd', multiple: true }));
+  };
+  const exportG = async (list) => {
+    const { downloadBlob } = await import('../util.js');
+    const name = list.length === 1 ? list[0].name : '내 그레이디언트';
+    downloadBlob(grdFile(list, P.fg, P.bg), `${String(name).replace(/[\\/:*?"<>|]+/g, '_')}.grd`);
+  };
+  // the panel menu (≡ on the dock's tab bar)
+  P.panelMenus = P.panelMenus || {};
+  P.panelMenus.gradients = () => [
+    { label: '새 그레이디언트 사전 설정…', action: saveCurrent },
+    { label: '새 그레이디언트 그룹…', action: async () => { if (await groups.add('새 그레이디언트 그룹')) render(); } },
+    '-',
+    { label: '그레이디언트 이름 바꾸기…', disabled: !isUser(current), action: () => renameG(current) },
+    { label: '그레이디언트 삭제', disabled: !isUser(current), action: () => deleteG([current.id]) },
+    '-',
+    ...viewMenu('photo.gradients.view', () => view, (v) => { view = v; render(); }),
+    '-',
+    { label: '그레이디언트 가져오기…', action: importG },
+    { label: '선택한 그레이디언트 내보내기…', disabled: !current, action: () => exportG([current]) },
+    { label: '내 그레이디언트 모두 내보내기…', disabled: !userGradients().length, action: () => exportG(userGradients()) },
+  ];
   const render = () => {
-    const groups = [...GRAD_GROUPS()];
-    const mine = userGradients();
-    if (mine.length) groups.unshift(['내 그레이디언트', mine]);
+    const mine = groups.list(userGradients()).map(([n, list]) => [n, list, true]);
+    const all = [...mine, ...GRAD_GROUPS()];
+    el.className = `ph-panel ph-presetp pv-${view}`;
     el.replaceChildren(
       h('div.ph-swbar',
         h('button.small', { title: '그레이디언트 도구의 지금 그레이디언트를 저장', onclick: saveCurrent }, icon('plus', 13), ' 새 그레이디언트'),
         h('button.small', { disabled: !current, title: '고른 그레이디언트로 새 칠 레이어', onclick: () => current && fillLayer(current) }, '칠 레이어'),
         h('button.small', { disabled: !current, title: '고른 그레이디언트를 지금 레이어의 오버레이 스타일로', onclick: () => current && overlay(current) }, '오버레이')),
-      ...groups.map(([name, list]) => {
+      ...all.map(([name, list, user]) => {
         const shut = closed.has(name);
         const head = folder(name, list.length, shut, () => {
           if (shut) closed.delete(name);
@@ -222,8 +397,9 @@ export function buildGradientsPanel(P) {
           savePref('photo.gradients.closed', [...closed]);
           render();
         });
+        if (user) onContext(head, (x, y) => groupMenu(name, list, x, y));
         const grid = shut ? null : h('div.ph-presetgrid.grad', list.map((g) => {
-          const b = h(`button.ph-preset${current?.id === g.id ? '.on' : ''}`, { title: `${g.name}\n클릭: ${P.doc?.active?.fill?.type === 'gradient' ? '고른 칠 레이어에 적용' : '그레이디언트 도구에 쓰기'} · 오른쪽 클릭: 메뉴`, 'aria-label': g.name }, gradientSwatch(g, 64, 24, P.fg, P.bg));
+          const b = h(`button.ph-preset${current?.id === g.id ? '.on' : ''}`, { title: `${g.name}\n클릭: ${P.doc?.active?.fill?.type === 'gradient' ? '고른 칠 레이어에 적용' : '그레이디언트 도구에 쓰기'} · 오른쪽 클릭: 메뉴`, 'aria-label': g.name }, gradientSwatch(g, 64, 24, P.fg, P.bg), h('span.ph-pname', g.name));
           b.addEventListener('click', () => !consumeLongpress(b) && use(g));
           b.addEventListener('dblclick', () => fillLayer(g));
           // onto the picture: a layer under the pointer gets an overlay, elsewhere a fill layer
@@ -233,7 +409,7 @@ export function buildGradientsPanel(P) {
             else if (t) overlay(g, t);
             else fillLayer(g);
           });
-          onContext(b, (x, y) => presetMenu(g, name === '내 그레이디언트', x, y));
+          onContext(b, (x, y) => presetMenu(g, !!user, x, y));
           return b;
         }));
         return h('div.ph-swgroup', head, grid);
@@ -372,18 +548,65 @@ export function buildPatternsPanel(P) {
     g.fillRect(0, 0, 48, 48);
     return c;
   };
+  const MINE = '내 패턴';
+  const groups = presetGroups('photo.patterns', MINE);
+  let view = loadPref('photo.patterns.view', 'small');
+  const isUser = (p) => !!p && (p.id.startsWith('user:') || userPatterns.has(p.id));
+  const mineNow = () => listPatterns().filter(isUser);
+  const forget = (ids) => {
+    for (const id of ids) userPatterns.delete(id);
+    savePref('photo.patterns', loadPref('photo.patterns', []).filter((x) => !ids.includes(x.id)));
+    savePref(IMPORTED, loadPref(IMPORTED, []).filter((x) => !ids.includes(x.id)));
+    if (current && ids.includes(current.id)) current = null;
+    render();
+  };
+  const deleteP = async (p) => {
+    if (!(await confirmDialog('패턴 삭제', `"${p.name}" 패턴을 지울까요? 이미 쓴 칠 레이어는 문서를 닫으면 기본 패턴으로 보일 수 있습니다.`))) return;
+    forget([p.id]);
+  };
+  const renameP = async (p) => {
+    const v = (await promptDialog('패턴 이름', '이름', p.name))?.trim();
+    if (!v) return;
+    const up = userPatterns.get(p.id);
+    if (up) up.name = v;
+    for (const k of ['photo.patterns', IMPORTED]) savePref(k, loadPref(k, []).map((x) => (x.id === p.id ? { ...x, name: v } : x)));
+    if (current?.id === p.id) current = { ...current, name: v };
+    render();
+  };
   const presetMenu = (p, x, y) => showMenu([
     { label: '페인트 통 · 패턴 도장에 쓰기', action: () => toTools(p.id) },
     { label: '새 패턴 칠 레이어', disabled: !P.doc, action: () => fillLayer(p) },
     { label: '패턴 오버레이 (레이어 스타일)', disabled: !P.doc?.active, action: () => overlay(p) },
-    ...(p.id.startsWith('user:') ? ['-', { label: '삭제 (이 브라우저에서)', action: async () => {
-      if (!(await confirmDialog('패턴 삭제', `"${p.name}" 패턴을 지울까요? 이미 쓴 칠 레이어는 문서를 닫으면 기본 패턴으로 보일 수 있습니다.`))) return;
-      userPatterns.delete(p.id);
-      savePref('photo.patterns', loadPref('photo.patterns', []).filter((x) => x.id !== p.id));
-      savePref(IMPORTED, loadPref(IMPORTED, []).filter((x) => x.id !== p.id));
-      render();
-    } }] : []),
+    ...(isUser(p) ? ['-',
+      { label: '이름 바꾸기…', action: () => renameP(p) },
+      { label: '그룹으로 이동', submenu: () => [
+        ...groups.list(mineNow()).map(([n]) => n).filter((n) => n !== groups.groupOf(p)).map((n) => ({ label: n, action: () => { groups.move(p.id, n); render(); } })),
+        { label: '새 그룹…', action: async () => { const n = await groups.add('새 패턴 그룹'); if (n) { groups.move(p.id, n); render(); } } }] },
+      { label: '삭제 (이 브라우저에서)', action: () => deleteP(p) }] : []),
   ], x, y);
+  const groupMenu = (name, list, x, y) => showMenu([
+    { label: '그룹 이름 바꾸기…', disabled: name === MINE, action: async () => {
+      const v = (await promptDialog('그룹 이름', '이름', name))?.trim();
+      if (v && v !== name) { groups.rename(name, v, mineNow()); render(); }
+    } },
+    { label: '그룹 삭제', action: async () => {
+      if (list.length && !(await confirmDialog('그룹 삭제', `"${name}" 그룹과 그 안의 패턴 ${list.length}개를 지울까요?`))) return;
+      forget(groups.remove(name, mineNow()));
+    } },
+  ], x, y);
+  // the panel menu (≡ on the dock's tab bar)
+  P.panelMenus = P.panelMenus || {};
+  P.panelMenus.patterns = () => [
+    { label: '새 패턴…', disabled: !P.doc, action: () => P.cmd.definePattern?.() },
+    { label: '새 패턴 그룹…', action: async () => { if (await groups.add('새 패턴 그룹')) render(); } },
+    '-',
+    { label: '패턴 이름 바꾸기…', disabled: !isUser(current), action: () => renameP(current) },
+    { label: '패턴 삭제', disabled: !isUser(current), action: () => deleteP(current) },
+    '-',
+    ...viewMenu('photo.patterns.view', () => view, (v) => { view = v; render(); }),
+    '-',
+    { label: '패턴 가져오기…', action: () => P.cmd.importPatterns() },
+  ];
   const scaleIn = h('input.ph-num', { type: 'number', min: 1, max: 1000, value: scale, 'aria-label': '비율 (%)', title: '칠 레이어 · 오버레이의 패턴 크기 (%)' });
   scaleIn.addEventListener('change', () => {
     scale = Math.max(1, Math.min(1000, Math.round(+scaleIn.value || 100)));
@@ -392,21 +615,25 @@ export function buildPatternsPanel(P) {
   });
   const render = () => {
     const all = listPatterns();
-    const builtin = all.filter((p) => !p.id.startsWith('user:') && !userPatterns.has(p.id));
-    const mine = all.filter((p) => p.id.startsWith('user:') || userPatterns.has(p.id));
-    const group = (name, list) => h('div.ph-swgroup', h('div.ph-swhead', h('span', name), h('small', ` ${list.length}`)), h('div.ph-presetgrid', list.map((p) => {
-      const b = h(`button.ph-preset.pat${current?.id === p.id ? '.on' : ''}`, { title: `${p.name}\n클릭: 고른 패턴 칠 레이어를 바꾸거나 도구에 씀 · 두 번 클릭: 새 칠 레이어`, 'aria-label': p.name }, tile(p.id));
-      b.addEventListener('click', () => !consumeLongpress(b) && use(p));
-      b.addEventListener('dblclick', () => fillLayer(p));
-      draggable(P, b, p.name, (pt, layer) => {
-        const t = dropTarget(P, layer);
-        if (t?.kind === 'shape' && t.shape?.type !== 'line') fillShape(P, t, { kind: 'pattern', pattern: p.id, scale, name: p.name }, '모양 칠: 패턴');
-        else if (t) overlay(p, t);
-        else fillLayer(p);
-      });
-      onContext(b, (x, y) => presetMenu(p, x, y));
-      return b;
-    })));
+    const builtin = all.filter((p) => !isUser(p));
+    const group = (name, list, user) => {
+      const head = h('div.ph-swhead', h('span', name), h('small', ` ${list.length}`));
+      if (user) onContext(head, (x, y) => groupMenu(name, list, x, y));
+      return h('div.ph-swgroup', head, h('div.ph-presetgrid', list.map((p) => {
+        const b = h(`button.ph-preset.pat${current?.id === p.id ? '.on' : ''}`, { title: `${p.name}\n클릭: 고른 패턴 칠 레이어를 바꾸거나 도구에 씀 · 두 번 클릭: 새 칠 레이어`, 'aria-label': p.name }, tile(p.id), h('span.ph-pname', p.name));
+        b.addEventListener('click', () => !consumeLongpress(b) && use(p));
+        b.addEventListener('dblclick', () => fillLayer(p));
+        draggable(P, b, p.name, (pt, layer) => {
+          const t = dropTarget(P, layer);
+          if (t?.kind === 'shape' && t.shape?.type !== 'line') fillShape(P, t, { kind: 'pattern', pattern: p.id, scale, name: p.name }, '모양 칠: 패턴');
+          else if (t) overlay(p, t);
+          else fillLayer(p);
+        });
+        onContext(b, (x, y) => presetMenu(p, x, y));
+        return b;
+      })));
+    };
+    el.className = `ph-panel ph-presetp pv-${view}`;
     el.replaceChildren(
       h('div.ph-swbar',
         h('button.small', { title: '선택 영역(없으면 보이는 그림 전체)으로 새 패턴 만들기 (편집 ▸ 패턴 정의)', disabled: !P.doc, onclick: () => P.cmd.definePattern?.() }, icon('plus', 13), ' 패턴 정의'),
@@ -414,7 +641,7 @@ export function buildPatternsPanel(P) {
         h('button.small', { disabled: !current, onclick: () => current && fillLayer(current) }, '칠 레이어'),
         h('button.small', { disabled: !current, onclick: () => current && overlay(current) }, '오버레이'),
         h('label.ph-prow', h('span', '비율'), scaleIn, h('small', '%'))),
-      ...(mine.length ? [group('내 패턴', mine)] : []),
+      ...groups.list(all.filter(isUser)).map(([n, list]) => group(n, list, true)),
       group('기본 패턴', builtin),
       h('div.note', '클릭: 고른 패턴 칠 레이어를 바꾸거나 페인트 통·패턴 도장에 씀 · 두 번 클릭: 새 칠 레이어 · 그림 속 레이어로 끌어 놓기: 패턴 오버레이 (빈 곳: 칠 레이어) · 오른쪽 클릭: 메뉴'));
   };

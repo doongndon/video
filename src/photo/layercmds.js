@@ -5,7 +5,7 @@ import { newLayer, makeCanvas, cloneCanvas, lid, alphaBox, PhotoDoc, LAYER_COLOR
 import { compositeOnto, BLEND_MODES, blendName } from './blend.js';
 import { TOOL_BY_ID } from './tools.js';
 import { ADJUSTMENTS, defaultParams } from './adjust.js';
-import { toast, promptDialog, menusOpen } from '../ui/common.js';
+import { toast, promptDialog, menusOpen, loadPref } from '../ui/common.js';
 import { FX_DEFAULTS, scaleFx } from './styles.js';
 import { layerStyleDialog, globalLightDialog } from './layerstyle.js';
 
@@ -124,7 +124,10 @@ export function installLayerCommands(P) {
     if (!need()) return;
     P.run(`새 조정 레이어: ${ADJUSTMENTS[type].name}`, () => {
       const l = newLayer('adjust', { name: numbered(ADJUSTMENTS[type].name), adjust: { type, params: defaultParams(type) } });
-      doc().addMask(l, 'white', !!doc().selection);
+      // the Adjustments panel menu: 기본적으로 마스크 추가 (a selection still makes one) and 기본적으로 클립
+      if (loadPref('photo.adj.mask', true) || doc().selection) doc().addMask(l, 'white', !!doc().selection);
+      const below = doc().active;
+      if (loadPref('photo.adj.clip', false) && below && below.kind !== 'group') l.clip = true;
       P.addLayer(l);
     });
     P.showPanel('props');

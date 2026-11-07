@@ -92,6 +92,41 @@ function snapshotLayer(l) {
   return o;
 }
 
+// Pixel canvases a snapshot holds are never changed again (editing copies them first, see
+// editPixels), so what is worked out from their pixels can be remembered for as long as they live.
+const frozen = new WeakSet();
+const frozenBox = new WeakMap();
+
+/** A rectangle cut to whole pixels inside a w×h canvas, or null when nothing is left. */
+function clipToDoc(r, w, h) {
+  const x = Math.max(0, Math.floor(r.x));
+  const y = Math.max(0, Math.floor(r.y));
+  const cw = Math.min(w, Math.ceil(r.x + r.w)) - x;
+  const ch = Math.min(h, Math.ceil(r.y + r.h)) - y;
+  return cw > 0 && ch > 0 ? { x, y, w: cw, h: ch } : null;
+}
+
+// settings are compared by value; canvases and other objects only match when they are the same one
+function sameValue(a, b) {
+  if (a === b) return true;
+  if (!a || !b || typeof a !== 'object' || typeof b !== 'object') return false;
+  if (Array.isArray(a)) return Array.isArray(b) && a.length === b.length && a.every((v, i) => sameValue(v, b[i]));
+  const pa = Object.getPrototypeOf(a);
+  if ((pa !== Object.prototype && pa !== null) || Object.getPrototypeOf(b) !== pa) return false;
+  const ka = Object.keys(a);
+  if (ka.length !== Object.keys(b).length) return false;
+  return ka.every((k) => sameValue(a[k], b[k]));
+}
+
+/** A live layer is unchanged from its snapshot `s` (caches and the revision aside). */
+function sameLayer(l, s) {
+  for (const k of new Set([...Object.keys(l), ...Object.keys(s)])) {
+    if (k === 'rev' || k[0] === '_') continue;
+    if (!sameValue(l[k], s[k])) return false;
+  }
+  return true;
+}
+
 const DOC_ARRAYS = ['selectedIds', 'guides', 'channels', 'paths', 'notes', 'counts', 'samplers', 'comps', 'frames', 'charStyles', 'paraStyles'];
 
 export class PhotoDoc {
@@ -170,7 +205,17 @@ export class PhotoDoc {
    * that part; changes without one (or a bare rev++) redraw everything.
    */
   touch(layer, rect = null) {
-    if (layer) layer.rev++;
+    if (layer) {
+      // a raster layer's pixels can only be where they were and in the changed part: remember that,
+      // so finding their bounds again (opaqueBounds) needn't read the whole canvas
+      const k = layer._ob;
+      if (k && rect && layer.kind === 'raster' && k.canvas === layer.canvas) {
+        const was = k.rev === layer.rev ? k.b || { x: 0, y: 0, w: 0, h: 0 } : k.hintRev === layer.rev ? k.hint : null;
+        k.hint = was && unionRect(was, { x: Math.floor(rect.x - layer.x) - 1, y: Math.floor(rect.y - layer.y) - 1, w: Math.ceil(rect.w) + 2, h: Math.ceil(rect.h) + 2 });
+        k.hintRev = was ? layer.rev + 1 : -1;
+      }
+      layer.rev++;
+    }
     if (rect && this._dirtyRect && this._dirtyTo === this.rev) this._dirtyRect = unionRect(this._dirtyRect, rect);
     else if (rect) {
       this._dirtyRect = { x: rect.x, y: rect.y, w: rect.w, h: rect.h };
@@ -179,6 +224,105 @@ export class PhotoDoc {
     this.rev++;
     this._dirtyTo = rect ? this.rev : -1;
     this.saved = false;
+    // the same record for undo / redo (changedSince), kept for a while instead of until the next redraw
+    this.logArea(rect);
+  }
+
+  logArea(rect, from = undefined) {
+    const log = (this._areaLog ||= []);
+    log.push({ rev: this.rev, rect: rect && { x: rect.x, y: rect.y, w: rect.w, h: rect.h }, from });
+    if (log.length > 600) log.splice(0, 300);
+  }
+
+  /**
+   * The area changed between revisions `from` and `to` (now) when every change in between said
+   * where it was (an empty rectangle: nothing on screen changed), or null when that isn't known. A
+   * bare rev++ elsewhere leaves a gap in the record, so it counts as unknown too.
+   */
+  changedSince(from, to = this.rev) {
+    let r = { x: 0, y: 0, w: 0, h: 0 };
+    if (to === from) return r;
+    const log = this._areaLog;
+    if (!log || !(to > from)) return null;
+    let want = to;
+    for (let i = log.length - 1; i >= 0 && want > from; i--) {
+      const e = log[i];
+      if (e.rev > want) continue;
+      if (e.rev !== want || !e.rect) return null;
+      r = unionRect(r, e.rect);
+      // an entry can stand for several revisions (markSince)
+      want = e.from !== undefined ? e.from : want - 1;
+    }
+    return want <= from ? r : null;
+  }
+
+  /** Everything that changed since revision `rev` lies in `area` (doc coords): the next redraw does that part alone. */
+  markSince(rev, area) {
+    this.rev++;
+    this._dirtyRect = { x: area.x, y: area.y, w: area.w, h: area.h };
+    this._dirtyBase = rev;
+    this._dirtyTo = this.rev;
+    this.logArea(area, rev);
+    this.saved = false;
+  }
+
+  /**
+   * Where the picture can differ from snapshot `st` (doc coords; empty: nowhere), worked out from
+   * the layers that changed, or null when it can't be told (an adjustment, a group, a fill layer or
+   * the order of the layers changed): then everything is redrawn.
+   */
+  diffArea(st) {
+    if (!st?.layers || st.revOf !== this.id) return null;
+    if (st.width !== this.width || st.height !== this.height || !!st.hideFx !== !!this.hideFx || (st.globalAngle ?? 120) !== (this.globalAngle ?? 120) || (st.globalAltitude ?? 30) !== (this.globalAltitude ?? 30) || (st.mode || 'rgb') !== (this.mode || 'rgb')) return null;
+    const old = new Map(st.layers.map((l) => [l.id, l]));
+    const now = new Map(this.layers.map((l) => [l.id, l]));
+    // the layers kept must keep their order; layers added or taken away change the clipping of the
+    // layers above them
+    const kept = st.layers.filter((l) => now.has(l.id));
+    const kept2 = this.layers.filter((l) => old.has(l.id));
+    if (kept.some((l, i) => l.id !== kept2[i].id)) return null;
+    if ((kept.length !== st.layers.length || kept2.length !== this.layers.length) && (st.layers.some((l) => l.clip) || this.layers.some((l) => l.clip))) return null;
+    // where a layer shows (its pixels and styles), in the document it belongs to
+    // (bounds of pixels a filter or a transform just made aren't worked out: their whole canvas counts)
+    const where = (l, layers, fresh = false) => {
+      if (l.kind === 'adjust' || l.kind === 'fill' || l.kind === 'group' || l.knockout === 'deep') return null;
+      for (let p = l.parent; p; ) {
+        const g = layers.get(p);
+        if (!g || hasFx(g.fx)) return null;
+        p = g.parent;
+      }
+      let r = fresh ? this.quickArea(l) : this.movedArea(l);
+      // a clipped layer changes how its base is drawn too (the two are put together first)
+      if (r && l.clip) {
+        const list = [...layers.values()];
+        for (let i = list.indexOf(l) - 1; i >= 0; i--) {
+          const b = list[i];
+          if ((b.parent || null) !== (l.parent || null)) continue;
+          if (b.clip) continue;
+          const br = b.kind === 'adjust' || b.kind === 'fill' || b.kind === 'group' ? null : this.movedArea(b);
+          r = br && unionRect(r, br);
+          break;
+        }
+      }
+      return r;
+    };
+    let area = { x: 0, y: 0, w: 0, h: 0 };
+    for (const l of this.layers) {
+      const o = old.get(l.id);
+      if (o && sameLayer(l, o)) continue;
+      const fresh = !!o && o.canvas !== l.canvas;
+      const a = where(l, now, fresh);
+      const b = o ? where(o, old, fresh) : { x: 0, y: 0, w: 0, h: 0 };
+      if (!a || !b) return null;
+      area = unionRect(unionRect(area, a), b);
+    }
+    for (const o of st.layers) {
+      if (now.has(o.id)) continue;
+      const b = where(o, old);
+      if (!b) return null;
+      area = unionRect(area, b);
+    }
+    return area;
   }
 
   /**
@@ -286,7 +430,19 @@ export class PhotoDoc {
       layer.parent = ref.parent || null;
       this.layers.splice(this.index(ref.id) + 1, 0, layer);
     }
-    this.touch(layer);
+    this.touch(layer, this.insertedArea(layer));
+  }
+
+  /**
+   * Where a layer just put in changes the picture (its pixels and styles), or null when that can't
+   * be told: an adjustment, fill or group, a clipping mask, or a layer that cuts into a clipping group.
+   */
+  insertedArea(l) {
+    if (l.kind === 'adjust' || l.kind === 'fill' || l.kind === 'group' || l.clip || (l.knockout && l.knockout !== 'none')) return null;
+    if (this.ancestors(l).some((a) => hasFx(a.fx))) return null;
+    const sib = this.children(l.parent || null);
+    if (sib[sib.indexOf(l) + 1]?.clip) return null;
+    return this.movedArea(l);
   }
 
   // ---------------------------------------------------------------- moving layers
@@ -349,16 +505,31 @@ export class PhotoDoc {
   }
 
   /**
-   * Where the picture changes when floating pixels (a selection dragged by the move tool) only moved
-   * from `a` to `b`; null when that isn't known (redraw everything).
+   * Where the picture changes when floating pixels (a selection dragged by the move tool, a layer
+   * being transformed) moved or changed from `a` to `b`: where either was drawn. null when that isn't
+   * known (redraw everything).
    */
   floatMoveArea(a, b) {
-    if (!a || !b || a.canvas !== b.canvas || a.layerId !== b.layerId || a.tint !== b.tint || a.viewOnly || b.viewOnly) return null;
+    if (!a || !b || a.layerId !== b.layerId || a.tint !== b.tint || a.viewOnly || b.viewOnly) return null;
     if (this.layers.some((l) => l.kind === 'adjust' && l.visible && !LOCAL_ADJ.has(l.adjust?.type))) return null;
     // a group's styles (a shadow, a glow) spread what is inside it
     if (!this.hideFx) for (let g = this.layer(a.layerId)?.parent; g; g = this.layer(g)?.parent) if (hasFx(this.layer(g)?.fx)) return null;
     const r = (f) => ({ x: Math.floor(f.x) - 1, y: Math.floor(f.y) - 1, w: f.canvas.width + 3, h: f.canvas.height + 3 });
     return unionRect(r(a), r(b));
+  }
+
+  /**
+   * movedArea without reading many pixels: a raster layer whose bounds aren't known yet (just made
+   * by a filter or a transform) counts as its whole canvas.
+   */
+  quickArea(l) {
+    const k = l._ob;
+    const known = k && k.canvas === l.canvas ? k.rev === l.rev || k.hintRev === l.rev : frozenBox.has(l.canvas);
+    if (l.kind === 'raster' && l.canvas && !known) {
+      const pad = 2 + (!this.hideFx && hasFx(l.fx) ? fxPad(l.fx) : 0);
+      return { x: Math.floor(l.x) - pad, y: Math.floor(l.y) - pad, w: l.canvas.width + pad * 2, h: l.canvas.height + pad * 2 };
+    }
+    return this.movedArea(l);
   }
 
   /** What a layer covers before a move, when moving it changes nothing outside (no styles). */
@@ -392,12 +563,19 @@ export class PhotoDoc {
     const x1 = Math.max(layer.x + layer.canvas.width, Math.ceil(want.x + want.w));
     const y1 = Math.max(layer.y + layer.canvas.height, Math.ceil(want.y + want.h));
     const same = had && x0 === layer.x && y0 === layer.y && x1 - x0 === layer.canvas.width && y1 - y0 === layer.canvas.height;
+    // the copy covers the same pixels as the canvas it copies
+    const k = layer._ob;
+    // (bounds this layer measured before its last change are unknown now, whatever a snapshot says)
+    const ob = !had ? null : k && k.canvas === layer.canvas ? (k.rev === layer.rev ? k.b : undefined) : frozenBox.get(layer.canvas);
     const c = makeCanvas(x1 - x0, y1 - y0);
     c.getContext('2d').drawImage(layer.canvas, layer.x - x0, layer.y - y0);
+    const dx = layer.x - x0;
+    const dy = layer.y - y0;
     layer.canvas = c;
     layer.x = x0;
     layer.y = y0;
     this.touch(layer, quiet && same ? { x: 0, y: 0, w: 0, h: 0 } : null);
+    if (ob !== undefined) Object.defineProperty(layer, '_ob', { value: { canvas: c, rev: layer.rev, b: ob && { x: ob.x + dx, y: ob.y + dy, w: ob.w, h: ob.h } }, enumerable: false, configurable: true, writable: true });
     return c.getContext('2d');
   }
 
@@ -424,19 +602,48 @@ export class PhotoDoc {
 
   // ---------------------------------------------------------------- snapshots (undo)
 
+  /**
+   * Finish work that is still changing the pixels in the background (the fill at the end of a spot
+   * healing stroke, brushes.js) before the document is looked at or changed again. why: 'undo' with
+   * the history entry being undone (the work may then be given up instead; returns true when it was).
+   */
+  settle(why = 'capture', entry = null) {
+    const f = this._settle;
+    if (!f) return false;
+    this._settle = null;
+    return !!f(why, entry);
+  }
+
   capture() {
+    if (this._settle) this.settle();
+    for (const l of this.layers) {
+      if (!l.canvas) continue;
+      frozen.add(l.canvas);
+      // its bounds as worked out now, for a later undo / redo that brings this canvas back
+      const k = l._ob;
+      if (k && k.canvas === l.canvas && k.rev === l.rev) frozenBox.set(l.canvas, k.b);
+    }
     const st = {
       name: this.name, width: this.width, height: this.height, activeId: this.activeId, selection: this.selection, quickMask: this.quickMask || null,
       workPath: this.workPath && structuredClone(this.workPath), mode: this.mode, resolution: this.resolution,
       info: this.info ? { ...this.info } : null, hideFx: !!this.hideFx, frameIndex: this.frameIndex || 0, frameLoop: this.frameLoop || 0,
       globalAngle: this.globalAngle ?? 120, globalAltitude: this.globalAltitude ?? 30,
-      layers: this.layers.map(snapshotLayer),
+      layers: this.layers.map(snapshotLayer), rev: this.rev, revOf: this.id,
     };
     for (const k of DOC_ARRAYS) st[k] = (this[k] || []).map((v) => (v && typeof v === 'object' ? { ...v } : v));
     return st;
   }
 
-  restore(st) {
+  /**
+   * Go back to a snapshot. `area` (doc coords, from the history) is where the picture differs from
+   * the snapshot when that is known: only that part is redrawn then. Layers that are the same as in
+   * the snapshot stay as they are, with their rendered text, styles and adjustments.
+   */
+  restore(st, area = null) {
+    if (this._settle) this.settle();
+    // the picture as a whole changes with these: redraw everything
+    if (st.width !== this.width || st.height !== this.height || !!st.hideFx !== !!this.hideFx || (st.globalAngle ?? 120) !== (this.globalAngle ?? 120) || (st.globalAltitude ?? 30) !== (this.globalAltitude ?? 30) || (st.mode || 'rgb') !== (this.mode || 'rgb')) area = null;
+    const cur = new Map(this.layers.map((l) => [l.id, l]));
     this.name = st.name;
     this.width = st.width;
     this.height = st.height;
@@ -453,9 +660,12 @@ export class PhotoDoc {
     this.frameIndex = st.frameIndex || 0;
     this.frameLoop = st.frameLoop || 0;
     for (const k of DOC_ARRAYS) this[k] = (st[k] || []).map((v) => (v && typeof v === 'object' ? { ...v } : v));
-    this.layers = st.layers.map((l) => ({ ...snapshotLayer(l), rev: (l.rev || 0) + 1 }));
-    this.rev++;
-    this.saved = false;
+    // a changed layer gets a revision it never had, so nothing cached for another state matches it
+    this.layers = st.layers.map((l) => {
+      const c = cur.get(l.id);
+      return c && sameLayer(c, l) ? c : { ...snapshotLayer(l), rev: Math.max(l.rev || 0, c?.rev || 0, this.rev) + 1 };
+    });
+    this.touch(null, area);
   }
 
   /** Bytes of one full-size layer, used to size the undo history. */
@@ -506,7 +716,14 @@ export class PhotoDoc {
     let b;
     if (k && k.canvas === c.canvas && k.rev === layer.rev) b = k.b;
     else {
-      b = alphaBox(c.canvas);
+      // a canvas this layer hasn't measured (a step undone or redone) has the bounds it had when it
+      // was kept for undo; one that changed since this layer measured it is read again
+      if (!(k && k.canvas === c.canvas) && frozenBox.has(c.canvas)) b = frozenBox.get(c.canvas);
+      else {
+        // painted since it was last worked out: only where it was and where it was painted (touch)
+        b = alphaBox(c.canvas, k && k.canvas === c.canvas && k.hintRev === layer.rev ? k.hint : null);
+        if (frozen.has(c.canvas)) frozenBox.set(c.canvas, b);
+      }
       Object.defineProperty(layer, '_ob', { value: { canvas: c.canvas, rev: layer.rev, b }, enumerable: false, configurable: true, writable: true });
     }
     return b && { x: c.x + b.x, y: c.y + b.y, w: b.w, h: b.h };
@@ -515,7 +732,7 @@ export class PhotoDoc {
   // ---------------------------------------------------------------- compositing
 
   /** Draw the visible layers into ctx (doc-size). `upTo`: only layers below that flat index. */
-  render(ctx, { upTo = null, skipId = null, float = null, fg, bg, clip = null } = {}) {
+  render(ctx, { upTo = null, skipId = null, float = null, fg, bg, clip = null, draft = null } = {}) {
     ctx.save();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     // clip: redo only this rectangle (whole pixels); everything outside stays as it was
@@ -526,7 +743,7 @@ export class PhotoDoc {
       ctx.clearRect(clip.x, clip.y, clip.w, clip.h);
     } else ctx.clearRect(0, 0, this.width, this.height);
     const only = upTo == null ? null : new Set(this.layers.slice(0, upTo).map((l) => l.id));
-    const o = { skipId, float, only, sig: '', fg, bg, clip, root: ctx };
+    const o = { skipId, float, only, sig: '', fg, bg, clip, root: ctx, draft };
     const prevClip = setCompositeClip(ctx, clip);
     try {
       this.renderList(ctx, this.children(null), o);
@@ -916,9 +1133,13 @@ export class PhotoDoc {
 
   drawAdjustment(ctx, l, sig, o = {}) {
     if (o.clip && ctx === o.root && LOCAL_ADJ.has(l.adjust.type)) return this.drawAdjustmentIn(ctx, l, o, o.clip);
-    const key = `${sig}|${JSON.stringify(l.adjust)}|${l.mask ? l.rev : 0}|${ctx.canvas.width}`;
+    const own = `${JSON.stringify(l.adjust)}|${l.mask ? l.rev : 0}`;
+    const key = `${sig}|${own}|${ctx.canvas.width}`;
     let out = l._cache?.key === key ? l._cache.canvas : null;
+    // its own settings changed since it was last drawn in full (a slider being dragged): quickly
+    if (!out && o.draft && ctx === o.root && l._fullOwn && l._fullOwn !== own && this.drawAdjustmentDraft(ctx, l, o)) return undefined;
     if (!out) {
+      l._fullOwn = own;
       const src = ctx.canvas;
       out = makeCanvas(src.width, src.height);
       const og = out.getContext('2d');
@@ -947,6 +1168,51 @@ export class PhotoDoc {
       ctx.drawImage(out, 0, 0);
       ctx.restore();
     } else compositeOnto(ctx, out, 0, 0, mode, l.opacity);
+  }
+
+  /**
+   * An adjustment layer drawn for the screen only, while its settings are being changed: at the
+   * view's size (blurry when looked at close up, so then at full size for the part on screen alone).
+   * The editor draws the whole picture properly once the changes stop. Returns false to draw in full.
+   */
+  drawAdjustmentDraft(ctx, l, o) {
+    const d = o.draft;
+    const W = ctx.canvas.width;
+    const H = ctx.canvas.height;
+    if (blendIfTests(l.blendIf)) return false;
+    const s = Math.max(0.1, d.scale || 1);
+    if (s > 0.6) {
+      const r = d.rect && LOCAL_ADJ.has(l.adjust.type) && clipToDoc(d.rect, W, H);
+      if (!r || r.w * r.h > W * H * 0.6) return false;
+      this.drawAdjustmentIn(ctx, l, o, r);
+      d.used = true;
+      return true;
+    }
+    const sw = Math.max(1, Math.round(W * s));
+    const sh = Math.max(1, Math.round(H * s));
+    const small = makeCanvas(sw, sh);
+    const sg = small.getContext('2d', { willReadFrequently: true });
+    sg.drawImage(ctx.canvas, 0, 0, sw, sh);
+    const img = sg.getImageData(0, 0, sw, sh);
+    applyAdjustment(img, l.adjust.type, { ...l.adjust.params, _fg: o.fg, _bg: o.bg });
+    sg.putImageData(img, 0, 0);
+    sg.globalCompositeOperation = 'destination-in';
+    if (l.mask && l.mask.enabled) sg.drawImage(maskAlpha(this, l.mask), 0, 0, sw, sh);
+    if (l.vmask?.subpaths?.length && vectorMaskRenderer) sg.drawImage(vectorMaskRenderer(this, l.vmask), 0, 0, sw, sh);
+    const mode = l.blend === 'pass through' ? 'normal' : l.blend;
+    if (mode === 'normal') {
+      ctx.save();
+      ctx.globalAlpha = l.opacity;
+      ctx.globalCompositeOperation = 'source-atop';
+      ctx.drawImage(small, 0, 0, W, H);
+      ctx.restore();
+    } else {
+      const up = makeCanvas(W, H);
+      up.getContext('2d').drawImage(small, 0, 0, W, H);
+      compositeOnto(ctx, up, 0, 0, mode, l.opacity);
+    }
+    d.used = true;
+    return true;
   }
 
   /** An adjustment layer over just one rectangle (per-pixel adjustments only), not cached. */
@@ -1089,7 +1355,14 @@ function psdTextPicture(l) {
 }
 
 /** Tight box of non-transparent pixels in a canvas. */
-export function alphaBox(canvas) {
+export function alphaBox(canvas, area = null) {
+  if (area) {
+    // only inside this part of the canvas (everything outside it is known to be empty)
+    const r = clipToDoc(area, canvas.width, canvas.height);
+    if (!r) return null;
+    const b = alphaBox({ width: r.w, height: r.h, getContext: () => ({ getImageData: (x, y, sw, sh) => canvas.getContext('2d').getImageData(x + r.x, y + r.y, sw, sh) }) });
+    return b && { x: b.x + r.x, y: b.y + r.y, w: b.w, h: b.h };
+  }
   const { width: w, height: h } = canvas;
   if (!w || !h) return null;
   const g = canvas.getContext('2d');

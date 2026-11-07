@@ -54,7 +54,16 @@ export const P = {
   bg: loadPref('photo.bg', '#ffffff'),
   recent: loadPref('photo.recent', []),
   tool: loadPref('photo.tool', 'brush'),
-  editMask: false,
+  // painting goes to the layer mask; adjustment and fill layers have nothing else to paint on, so
+  // their mask is always the target (Photoshop)
+  _editMask: false,
+  get editMask() {
+    const l = this.doc?.active;
+    return this._editMask || (!!l?.mask && (l.kind === 'adjust' || l.kind === 'fill'));
+  },
+  set editMask(v) {
+    this._editMask = !!v;
+  },
   float: null,
   transform: null,
   clipboard: null,
@@ -562,8 +571,21 @@ export function createPhotoEditor(root) {
     if (!doc) return;
     // whatever the step changed, the picture is redrawn (some commands swap layers without touching
     // them), unless the step marked every change itself (a move: only where the object was and is)
-    if (!touched) doc.rev++;
-    doc.history.push(label, before);
+    // or the layers it changed show where (a layer shown or hidden, added, its opacity): then that
+    // part alone, when the picture on screen is still the one from before the step
+    let area;
+    if (!touched) {
+      area = doc.diffArea(before);
+      // the picture on screen was put together at compRev: before the step or part-way through it
+      let dirty = null;
+      if (area && compDoc === doc && compRev >= 0 && compFloat === (P.float?.viewOnly ? null : P.float)) {
+        const m = compRev >= before.rev ? doc.changedSince(before.rev, compRev) : doc.changedSince(compRev, before.rev);
+        dirty = m && unionRect(m, area);
+      }
+      if (dirty) doc.markSince(compRev, dirty);
+      else doc.rev++;
+    }
+    doc.history.push(label, before, area);
     doc.saved = false;
     P.afterHistory();
   };
@@ -628,6 +650,8 @@ export function createPhotoEditor(root) {
   };
   let vidCounter = 0;
   let checker = null;
+  let draftTimer = 0;
+  let draftFull = false;
   P.composite = () => {
     const doc = P.doc;
     if (comp.width !== doc.width || comp.height !== doc.height) {
@@ -662,7 +686,21 @@ export function createPhotoEditor(root) {
         if (mipDirty !== 'all') mipDirty = mipDirty ? unionRect(mipDirty, clip) : clip;
         if (viewDirty !== 'all') viewDirty = viewDirty ? unionRect(viewDirty, clip) : clip;
       } else {
-        doc.render(comp.getContext('2d'), { float: fl, fg: P.fg, bg: P.bg });
+        // an adjustment layer being changed (a slider dragged) is drawn quickly at screen size or
+        // for the part on screen (doc.js); the whole picture follows once the changes stop
+        const v = doc.view;
+        const dpr = window.devicePixelRatio || 1;
+        const draft = draftFull || !v ? null : { scale: v.zoom * dpr, rect: { x: (-off.x - v.x) / v.zoom, y: (-off.y - v.y) / v.zoom, w: view.width / dpr / v.zoom, h: view.height / dpr / v.zoom } };
+        draftFull = false;
+        doc.render(comp.getContext('2d'), { float: fl, fg: P.fg, bg: P.bg, draft });
+        if (draft?.used) {
+          clearTimeout(draftTimer);
+          draftTimer = setTimeout(() => {
+            draftFull = true;
+            compRev = -1;
+            P.redraw();
+          }, 300);
+        }
         mipDirty = 'all';
         viewDirty = 'all';
       }

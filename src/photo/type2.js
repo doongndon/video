@@ -236,6 +236,15 @@ export function installType2(P) {
     P.emit('typesel');
     refocus();
   };
+  /** A double-click on text (layer thumbnail, move tool): the type tool edits it, all of it selected. */
+  P.editTextLayer = (l) => {
+    if (l?.kind !== 'text' || l.locked) return;
+    P.selectLayer(l.id);
+    const t = l.text.vertical ? 'verticalText' : 'text';
+    if (P.tool !== t) P.setTool(t);
+    P.editText(l);
+    document.querySelector('.ph-textedit textarea')?.select();
+  };
   P.on('history', () => {
     if (!P.editingText) session = null;
   });

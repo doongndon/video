@@ -870,41 +870,62 @@ export function buildNavigatorPanel(P, stage) {
 
 /** Info: colour and position under the cursor, selection and document size. */
 export function buildInfoPanel(P) {
-  const el = h('div.ph-panel.ph-info');
+  // built once; the values alone change (only what changed, and only while the panel can be seen)
+  const val = () => h('b');
+  const v = { rgb: val(), hex: val(), cmyk: val(), alpha: val(), xy: val(), sel: val(), doc: val(), layer: val() };
+  const swatch = h('i.ph-info-swatch');
+  const hexText = document.createTextNode('—');
+  v.hex.append(swatch, hexText);
+  const row = (a, b) => h('div.ph-info-row', h('span', a), b);
+  const el = h('div.ph-panel.ph-info', h('div.ph-info-grid',
+    row('R G B', v.rgb), row('16진수', v.hex), row('C M Y K', v.cmyk), row('불투명도', v.alpha),
+    row('X, Y', v.xy), row('선택 영역', v.sel), row('문서', v.doc), row('레이어', v.layer)));
+  const set = (node, text) => {
+    if (node.textContent !== text) node.textContent = text;
+  };
   let raf = 0;
+  let shown = true;
   let cache = { rev: -1, g: null };
   const render = () => {
     raf = 0;
     const doc = P.doc;
-    if (!doc || !el.isConnected) return;
+    if (!doc || !el.isConnected || !shown) return;
     const p = P.hoverPoint;
     let rgb = null;
     if (p && p.x >= 0 && p.y >= 0 && p.x < doc.width && p.y < doc.height) {
       if (cache.rev !== doc.rev || cache.doc !== doc) cache = { rev: doc.rev, doc, g: P.composite().getContext('2d', { willReadFrequently: true }) };
       rgb = cache.g.getImageData(Math.floor(p.x), Math.floor(p.y), 1, 1).data;
     }
-    const hex = rgb ? `#${[rgb[0], rgb[1], rgb[2]].map((v) => v.toString(16).padStart(2, '0')).join('')}` : '';
+    const hex = rgb ? `#${[rgb[0], rgb[1], rgb[2]].map((n) => n.toString(16).padStart(2, '0')).join('')}` : '';
     const k = rgb ? 1 - Math.max(rgb[0], rgb[1], rgb[2]) / 255 : 0;
     const cmyk = rgb ? [0, 1, 2].map((i) => (k >= 1 ? 0 : Math.round(((1 - rgb[i] / 255 - k) / (1 - k)) * 100))).concat(Math.round(k * 100)) : null;
     const sb = doc.selection ? P.selBounds?.(doc.selection.canvas) : null;
-    const row = (a, b) => h('div.ph-info-row', h('span', a), h('b', b));
     // positions and sizes in the ruler unit (Preferences ▸ Units & Rulers)
     const u = (px, axis) => (P.fmtUnits ? P.fmtUnits(px, axis) : `${Math.round(px)} px`);
     const inPx = (P.prefs?.units || 'px') === 'px';
-    el.replaceChildren(
-      h('div.ph-info-grid',
-        row('R G B', rgb ? `${rgb[0]}  ${rgb[1]}  ${rgb[2]}` : '—'),
-        h('div.ph-info-row', h('span', '16진수'), h('b', rgb ? h('i.ph-info-swatch', { style: { background: hex } }) : null, hex || '—')),
-        row('C M Y K', cmyk ? `${cmyk.join('  ')} %` : '—'),
-        row('불투명도', rgb ? `${Math.round((rgb[3] / 255) * 100)}%` : '—'),
-        row('X, Y', p ? `${u(Math.floor(p.x) - (doc.rulerOrigin?.x || 0), 'x')}, ${u(Math.floor(p.y) - (doc.rulerOrigin?.y || 0), 'y')}` : '—'),
-        row('선택 영역', sb ? `${u(sb.w, 'x')} × ${u(sb.h, 'y')}` : '없음'),
-        row('문서', `${doc.width} × ${doc.height} px${inPx ? '' : ` (${u(doc.width, 'x')} × ${u(doc.height, 'y')})`}`),
-        row('레이어', doc.active?.name || '—')));
+    set(v.rgb, rgb ? `${rgb[0]}  ${rgb[1]}  ${rgb[2]}` : '—');
+    swatch.hidden = !rgb;
+    if (rgb && swatch.style.background !== hex) swatch.style.background = hex;
+    if (hexText.data !== (hex || '—')) hexText.data = hex || '—';
+    set(v.cmyk, cmyk ? `${cmyk.join('  ')} %` : '—');
+    set(v.alpha, rgb ? `${Math.round((rgb[3] / 255) * 100)}%` : '—');
+    set(v.xy, p ? `${u(Math.floor(p.x) - (doc.rulerOrigin?.x || 0), 'x')}, ${u(Math.floor(p.y) - (doc.rulerOrigin?.y || 0), 'y')}` : '—');
+    set(v.sel, sb ? `${u(sb.w, 'x')} × ${u(sb.h, 'y')}` : '없음');
+    set(v.doc, `${doc.width} × ${doc.height} px${inPx ? '' : ` (${u(doc.width, 'x')} × ${u(doc.height, 'y')})`}`);
+    set(v.layer, doc.active?.name || '—');
   };
   const schedule = () => {
-    if (!raf) raf = requestAnimationFrame(render);
+    if (!raf && shown) raf = requestAnimationFrame(render);
   };
+  // a panel in a tab behind another one (or a closed dock) is not drawn: nothing to update
+  if (typeof IntersectionObserver === 'function') {
+    shown = false;
+    new IntersectionObserver((es) => {
+      const was = shown;
+      shown = es[es.length - 1].isIntersecting;
+      if (shown && !was) schedule();
+    }).observe(el);
+  }
   P.on('pointer', schedule);
   P.on('doc', schedule);
   P.on('history', schedule);

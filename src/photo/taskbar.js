@@ -380,8 +380,20 @@ export function installTaskbar(P) {
   const soon = () => {
     if (!raf) raf = requestAnimationFrame(() => { raf = 0; update(); });
   };
+  // the marching ants redraw several times a second with nothing else changed: skip those
+  let lastFrame = '';
+  let lastSel = null;
   P.on('redraw', () => {
     if (pressing) return;
+    const doc = P.doc;
+    const v = doc?.view;
+    const ce = P.tool === 'crop' ? P.cropExtent?.() : null;
+    const f = P.float;
+    const frame = doc ? `${doc.id}|${doc.rev}|${v?.zoom}|${v?.x}|${v?.y}|${v?.rot}|${P.tool}|${ce ? `${ce.x},${ce.y},${ce.w},${ce.h}` : ''}|${f ? `${f.x},${f.y}` : ''}|${!!P.transform}|${!!P.editingText}|${document.body.className}` : '';
+    const sel = doc?.selection || null;
+    if (frame === lastFrame && sel === lastSel) return;
+    lastFrame = frame;
+    lastSel = sel;
     if (ctxNow && !bar.hidden && !dragged) {
       // the cheap part every frame: stay under the box as the view or the box moves
       const k = context();

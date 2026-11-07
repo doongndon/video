@@ -198,6 +198,8 @@ const P = {
   splitH: '<rect x="2" y="3" width="12" height="10" rx="1"/><path d="M2 8h12"/>',
   splitV: '<rect x="2" y="3" width="12" height="10" rx="1"/><path d="M8 3v10"/>',
   splitCross: '<rect x="2" y="3" width="12" height="10" rx="1"/><path d="M8 3v10M2 8h12"/>',
+  flipH: '<path d="M8 2v12" stroke-dasharray="1.6 1.4"/><path d="M6 4 2 12h4zM10 4l4 8h-4z"/>',
+  flipV: '<path d="M2 8h12" stroke-dasharray="1.6 1.4"/><path d="M4 6l8-4v4zM4 10l8 4v-4z"/>',
   // type and paths (photo editor)
   paraLeft: '<path d="M2 3.5h12M2 6.5h8M2 9.5h12M2 12.5h7"/>',
   paraCenter: '<path d="M2 3.5h12M4 6.5h8M2 9.5h12M4.5 12.5h7"/>',

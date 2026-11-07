@@ -12,8 +12,8 @@ import { hasFx, FX_NAMES, instanceKeys } from './styles.js';
 
 const FX_ORDER = ['bevel', 'stroke', 'innerShadow', 'innerGlow', 'satin', 'colorOverlay', 'gradientOverlay', 'patternOverlay', 'outerGlow', 'dropShadow'];
 import { TOOLS, TOOL_BY_ID, TOOL_GROUPS } from './tools.js';
-import { ADJUSTMENTS } from './adjust.js';
-import { createColorPicker } from './colorpicker.js';
+import { ADJUSTMENTS, defaultParams } from './adjust.js';
+import { buildColorViews } from './colorpanel.js';
 import { paramEditors } from './pdialogs.js';
 import { transformMasksBy } from './transform.js';
 
@@ -1161,7 +1161,7 @@ export function buildLayersPanel(P) {
     onDbl(t, `${l.id}:thumb`, () => {
       if (l.kind === 'smart') P.cmd.editSmartContents(l);
       else if (l.kind === 'fill' || l.kind === 'adjust') P.showPanel('props');
-      else if (l.kind === 'text' && P.editText) P.editText(l);
+      else if (l.kind === 'text' && P.editText) P.editTextLayer(l);
       else P.cmd.layerStyle('blending');
     });
     const mt = l.mask ? thumb(P, l, 'mask') : null;
@@ -1510,17 +1510,17 @@ export function buildColorPanel(P) {
   };
   const fgB = h('button.ph-cbig.fg', { title: '전경색 (다시 누르면 색상 피커)', 'aria-label': '전경색', onclick: () => pick('fg') });
   const bgB = h('button.ph-cbig.bg', { title: '배경색 (다시 누르면 색상 피커)', 'aria-label': '배경색', onclick: () => pick('bg') });
-  const picker = createColorPicker({ value: P.fg, onChange: (v, done) => P.setColor(v, target === 'bg', !done) });
-  // a lower field than the dialogs' so the panel stays small
-  const field = picker.el.querySelector('.cp-sv');
-  if (field) field.height = 90;
+  // 색조 큐브, 색상환 and the sliders, chosen in the panel menu (colorpanel.js)
+  const views = buildColorViews(P, () => target, (v, done) => P.setColor(v, target === 'bg', !done));
+  P.panelMenus = P.panelMenus || {};
+  P.panelMenus.color = views.menu;
   const recent = h('div.ph-swatches.recent');
   const sync = () => {
     fgB.style.background = P.fg;
     bgB.style.background = P.bg;
     fgB.classList.toggle('on', target === 'fg');
     bgB.classList.toggle('on', target === 'bg');
-    picker.set(target === 'fg' ? P.fg : P.bg);
+    views.sync();
     recent.replaceChildren(...P.recent.slice(0, 16).map((c) => h('button.ph-swatch', { style: { background: c }, title: c, 'aria-label': c, onclick: () => P.setColor(c, target === 'bg') })));
   };
   P.on('color', sync);
@@ -1529,10 +1529,21 @@ export function buildColorPanel(P) {
   const swap = h('button.ph-cswap', { onclick: () => P.swapColors(), title: '전경색과 배경색 전환 (X)', 'aria-label': '전경색과 배경색 바꾸기' }, icon('swapColors', 11));
   const def = h('button.ph-cdef', { onclick: () => P.defaultColors(), title: '기본 전경색과 배경색 (D)', 'aria-label': '기본 전경색과 배경색' }, icon('defaultColors', 10));
   const sw = h('div.ph-swatches.ph-cswatches', SWATCHES.map((c) => h('button.ph-swatch', { style: { background: c }, title: c, 'aria-label': c, onclick: () => P.setColor(c, target === 'bg') })));
-  return h('div.ph-panel.color', h('div.ph-cmain', h('div.ph-cfgbg', bgB, fgB, swap, def), picker.el), h('div.ph-sub.ph-csub', '견본'), sw, h('div.ph-sub', '최근 색'), recent);
+  return h('div.ph-panel.color', h('div.ph-cmain', h('div.ph-cfgbg', bgB, fgB, swap, def), views.el), views.bar, h('div.ph-sub.ph-csub', '견본'), sw, h('div.ph-sub', '최근 색'), recent);
 }
 
 // ---------------------------------------------------------------- properties
+
+/** A smart object's bounds in the document: its contents' corners through its transform. */
+function smartBox(sm) {
+  const m = sm.m;
+  const q = sm.corners || [[0, 0], [sm.w, 0], [sm.w, sm.h], [0, sm.h]].map(([x, y]) => [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]]);
+  const xs = q.map((p) => p[0]);
+  const ys = q.map((p) => p[1]);
+  const x = Math.min(...xs);
+  const y = Math.min(...ys);
+  return { x, y, w: Math.max(...xs) - x, h: Math.max(...ys) - y };
+}
 
 export function buildPropertiesPanel(P) {
   const el = h('div.ph-panel.props');
@@ -1553,10 +1564,126 @@ export function buildPropertiesPanel(P) {
     n.addEventListener('change', () => onSet(clamp(+n.value, min, max)));
     return n;
   };
+  // 변형 (pixel layers and smart objects, as Photoshop): W / H with a link, X / Y, angle and the flips;
+  // each change is one undo step and the linked masks follow (P.transformLayerBy)
+  let linkWH = loadPref('photo.props.linkWH', true);
+  // the bounds need a scan of the pixels: only while the panel shows (it draws again when it shows),
+  // and not right after a change (a brush stroke on a big layer): the last bounds show (fields off)
+  // until the scan has run when the browser is idle
+  let stale = false;
+  const measured = new WeakMap();
+  let measuring = 0;
+  const pixelBounds = (doc, l) => {
+    const m = measured.get(l);
+    if (m && m.rev === l.rev && m.canvas === l.canvas) return m.b;
+    if (!measuring) {
+      const later = window.requestIdleCallback || ((fn) => setTimeout(fn, 60));
+      measuring = later(() => {
+        measuring = 0;
+        const a = P.doc?.active;
+        if (a?.kind !== 'raster' || !a.canvas || !el.offsetParent) return;
+        measured.set(a, { rev: a.rev, canvas: a.canvas, b: P.doc.opaqueBounds(a) });
+        render();
+      }, { timeout: 400 });
+    }
+    return m?.b ? { ...m.b, old: true } : undefined;
+  };
+  const transformRows = (doc, l) => {
+    const head = h('div.ph-sub', '변형');
+    if (!el.isConnected || !el.offsetParent) {
+      stale = true;
+      return [head];
+    }
+    const b = l.kind === 'smart' ? smartBox(l.smart) : pixelBounds(doc, l);
+    if (b === undefined) return [head, h('div.note', '크기를 재는 중…')];
+    if (!b) return [head, h('div.note', '빈 레이어입니다.')];
+    const fixed = l.locked || l.lockPos || b.old;
+    const cx = b.x + b.w / 2;
+    const cy = b.y + b.h / 2;
+    const go = (label, M) => P.run(label, () => P.transformLayerBy(l, M));
+    const scaleTo = (w, hh) => {
+      const kx = w / b.w;
+      const ky = hh / b.h;
+      if (Math.abs(kx - 1) > 1e-6 || Math.abs(ky - 1) > 1e-6) go('변형', [kx, 0, 0, ky, b.x - kx * b.x, b.y - ky * b.y]);
+    };
+    const moveBy = (dx, dy) => {
+      if (!dx && !dy) return;
+      // whole pixels move without resampling
+      if (l.kind === 'raster') {
+        P.run('이동', () => {
+          l.x += dx;
+          l.y += dy;
+          transformMasksBy(doc, l, [1, 0, 0, 1, dx, dy]);
+          doc.touch(l);
+        });
+      } else go('이동', [1, 0, 0, 1, dx, dy]);
+    };
+    // Photoshop's angle: positive turns clockwise, about the middle
+    const ang = l.kind === 'smart' ? Math.round((Math.atan2(l.smart.m[1], l.smart.m[0]) * 1800) / Math.PI) / 10 : 0;
+    const turn = (deg) => {
+      const t = ((deg - ang) * Math.PI) / 180;
+      const [c, s] = [Math.cos(t), Math.sin(t)];
+      if (Math.abs(t) > 1e-6) go('회전', [c, s, -s, c, cx - c * cx + s * cy, cy - s * cx - c * cy]);
+    };
+    const flip = (horiz) => (l.kind === 'raster' ? P.cmd.transformLayer(horiz ? 'flipH' : 'flipV') : go('뒤집기', horiz ? [-1, 0, 0, 1, 2 * cx, 0] : [1, 0, 0, -1, 0, 2 * cy]));
+    const r1 = (v) => Math.round(v * 10) / 10;
+    const wIn = numIn(r1(b.w), 1, 30000, 1, (v) => scaleTo(v, linkWH ? (b.h * v) / b.w : b.h));
+    const hIn = numIn(r1(b.h), 1, 30000, 1, (v) => scaleTo(linkWH ? (b.w * v) / b.h : b.w, v));
+    const xIn = numIn(Math.round(b.x), -30000, 30000, 1, (v) => moveBy(Math.round(v - b.x), 0));
+    const yIn = numIn(Math.round(b.y), -30000, 30000, 1, (v) => moveBy(0, Math.round(v - b.y)));
+    const aIn = numIn(ang, -360, 360, 0.1, (v) => turn(v));
+    const link = h(`button.small.ph-xlink${linkWH ? '.on' : ''}`, { title: linkWH ? '폭과 높이 비율 유지 (누르면 해제)' : '폭과 높이 연결', 'aria-label': '폭과 높이 연결', 'aria-pressed': String(linkWH), onclick: () => {
+      linkWH = !linkWH;
+      savePref('photo.props.linkWH', linkWH);
+      render();
+    } }, icon('link', 13));
+    for (const n of [wIn, hIn, xIn, yIn, aIn]) n.disabled = fixed;
+    const lab = (t, n, title) => h('label.ph-xf-f', { title }, h('span', t), n);
+    return [head,
+      h('div.ph-xform',
+        lab('W', wIn, '폭 (px)'), link, lab('H', hIn, '높이 (px)'),
+        lab('X', xIn, '왼쪽 위치 (px)'), h('span'), lab('Y', yIn, '위쪽 위치 (px)')),
+      h('div.ph-prow.ph-xf-row', lab('각도', aIn, '회전 각도 (°, 양수: 시계 방향)'), h('small', '°'),
+        h('button.small', { disabled: fixed, title: '가로로 뒤집기', 'aria-label': '가로로 뒤집기', onclick: () => flip(true) }, icon('flipH', 14)),
+        h('button.small', { disabled: fixed, title: '세로로 뒤집기', 'aria-label': '세로로 뒤집기', onclick: () => flip(false) }, icon('flipV', 14))),
+      fixed ? h('div.note', '위치가 잠긴 레이어입니다.') : null].filter(Boolean);
+  };
+  new ResizeObserver(() => {
+    if (stale && el.offsetParent) render();
+  }).observe(el);
+  // the panel menu (≡ on the dock's tab bar): commands for what the panel shows
+  P.panelMenus = P.panelMenus || {};
+  P.panelMenus.props = () => {
+    const doc = P.doc;
+    const l = doc?.active;
+    if (!l) return [];
+    const C = P.cmd;
+    return [
+      ...(l.kind === 'adjust' ? [
+        { label: '아래 레이어에 클립', key: 'Ctrl+Alt+G', checked: !!l.clip, action: () => C.toggleClip() },
+        { label: '조정 기본값으로 재설정', action: () => P.run(`${ADJUSTMENTS[l.adjust.type].name} 재설정`, () => { l.adjust = { ...l.adjust, params: defaultParams(l.adjust.type) }; l._cache = null; doc.touch(l); }) },
+        '-'] : []),
+      ...(l.kind === 'text' ? [
+        { label: '문자 패널', action: () => P.showPanel('char') },
+        { label: '단락 패널', action: () => P.showPanel('para') },
+        { label: '텍스트 뒤틀기…', action: () => P.warpText?.() },
+        '-'] : []),
+      ...(l.kind === 'raster' || l.kind === 'smart' ? [
+        { label: '자유 변형', key: 'Ctrl+T', disabled: l.locked || l.lockPos, action: () => C.freeTransform() },
+        '-'] : []),
+      ...(l.mask ? [
+        { label: '선택 및 마스크…', action: () => C.selectAndMask?.() },
+        { label: '마스크를 선택 영역으로', action: () => C.maskToSelection?.() },
+        { label: '마스크 반전', action: () => C.invertMask() },
+        '-'] : []),
+      { label: '레이어 스타일…', disabled: l.kind === 'adjust', action: () => C.layerStyle('blending') },
+    ];
+  };
   const render = () => {
     const doc = P.doc;
     const l = doc?.active;
     pending = null;
+    stale = false;
     if (!l) {
       el.replaceChildren(h('div.empty-hint', '레이어가 없습니다'));
       return;
@@ -1679,14 +1806,14 @@ export function buildPropertiesPanel(P) {
         h('div.ph-prow', h('span', '원본 크기'), h('span.mono', `${sm.w} × ${sm.h}`)),
         h('div.ph-prow', h('span', '배율'), h('span.mono', `${Math.round(scale * 1000) / 10}%  ${Math.round((Math.atan2(b, a) * 180) / Math.PI)}°`)),
         h('div.ph-prow', h('button.small', { onclick: () => P.cmd.editSmartContents(l) }, '내용 편집'), h('button.small', { onclick: () => P.cmd.replaceSmartContents() }, '내용 바꾸기…'), h('button.small', { onclick: () => P.cmd.exportSmartContents() }, '내용 내보내기')),
-        h('div.ph-prow', h('button.small', { onclick: () => P.cmd.rasterize() }, '래스터화 (일반 레이어로)'), h('button.small', { onclick: () => P.cmd.freeTransform() }, '변형')));
+        h('div.ph-prow', h('button.small', { onclick: () => P.cmd.rasterize() }, '래스터화 (일반 레이어로)'), h('button.small', { onclick: () => P.cmd.freeTransform() }, '변형')),
+        ...transformRows(doc, l));
     } else if (l.kind === 'group' && l.artboard && P.artboardProps) {
       rows.push(...P.artboardProps(l), h('div.ph-prow', h('button.small', { onclick: () => P.cmd.ungroup() }, '대지 그룹 해제')));
     } else if (l.kind === 'group') {
       rows.push(h('div.ph-sub', `그룹 · 레이어 ${doc.descendants(l.id).length}개`), h('div.ph-prow', h('button.small', { onclick: () => P.cmd.mergeGroup() }, '그룹 병합'), h('button.small', { onclick: () => P.cmd.ungroup() }, '그룹 해제')));
     } else {
-      rows.push(h('div.ph-prow', h('span', '위치'), h('span.mono', `${Math.round(l.x)}, ${Math.round(l.y)}`)),
-        h('div.ph-prow', h('span', '크기'), h('span.mono', l.canvas ? `${l.canvas.width} × ${l.canvas.height}` : '-')));
+      rows.push(...(l.kind === 'raster' && l.canvas ? transformRows(doc, l) : [h('div.ph-prow', h('span', '위치'), h('span.mono', `${Math.round(l.x)}, ${Math.round(l.y)}`))]));
       if (l.psdText) rows.push(h('div.note', `PSD의 글자 레이어였습니다: "${String(l.psdText.text || '').slice(0, 40)}"`), h('div.ph-prow', h('button.small', { onclick: () => P.cmd.psdTextToEditable?.(l) }, '고칠 수 있는 글자로 다시 만들기')));
     }
     // mask controls

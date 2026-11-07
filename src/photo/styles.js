@@ -264,13 +264,20 @@ export function blurArray(src, w, h, r) {
         acc += a[o + Math.min(w - 1, x + rad + 1)] - a[o + Math.max(0, x - rad)];
       }
     }
-    // vertical
-    for (let x = 0; x < w; x++) {
-      let acc = 0;
-      for (let y = -rad; y <= rad; y++) acc += b[Math.min(h - 1, Math.max(0, y)) * w + x];
-      for (let y = 0; y < h; y++) {
-        a[y * w + x] = acc / (2 * rad + 1);
-        acc += b[Math.min(h - 1, y + rad + 1) * w + x] - b[Math.max(0, y - rad) * w + x];
+    // vertical: every column at once, row by row (the same sums as one column at a time, read in
+    // memory order, which is several times faster on big layers)
+    const acc = new Float64Array(w);
+    for (let y = -rad; y <= rad; y++) {
+      const o = Math.min(h - 1, Math.max(0, y)) * w;
+      for (let x = 0; x < w; x++) acc[x] += b[o + x];
+    }
+    for (let y = 0; y < h; y++) {
+      const o = y * w;
+      const add = Math.min(h - 1, y + rad + 1) * w;
+      const sub = Math.max(0, y - rad) * w;
+      for (let x = 0; x < w; x++) {
+        a[o + x] = acc[x] / (2 * rad + 1);
+        acc[x] += b[add + x] - b[sub + x];
       }
     }
   }

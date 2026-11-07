@@ -6,8 +6,9 @@
 
 import { h, clamp } from '../util.js';
 import { toast, openModal } from '../ui/common.js';
-import { makeCanvas, cloneCanvas } from './doc.js';
-import { TOOLS, TOOL_BY_ID, TOOL_GROUPS, Stroke, brushOpts, needRaster, liftSelection, selMode, rgbHex } from './tools.js';
+import { icon } from '../ui/icons.js';
+import { makeCanvas, cloneCanvas, unionRect } from './doc.js';
+import { TOOLS, TOOL_BY_ID, TOOL_GROUPS, Stroke, brushOpts, needRaster, liftSelection, selMode, rgbHex, changedRect } from './tools.js';
 import * as SEL from './selection.js';
 import { inpaint, healBlend, solveLaplace } from './inpaint.js';
 import { createBrushRun, normDyn } from './brushengine.js';
@@ -142,23 +143,21 @@ function dilate(m, w, hh, r) {
 }
 
 /**
- * Content-aware fill on a canvas context: rebuild the pixels where hole (r.w×r.h, for rectangle r of
- * the canvas) is set, from the rest of the picture. amt (0..255 per hole pixel, optional) softens the
- * result into the original.
+ * The pixels a content-aware fill works on: the hole (r.w×r.h, for rectangle r of a W×H canvas) and
+ * the picture around it, read with read(x, y, w, h) → ImageData. Returns null for an empty hole.
+ * texture-like fills (reach < 0.9) take their patches from close by only.
  */
-function contentFill(g, hole, r, amt = null, reach = 0.9) {
-  const W = g.canvas.width;
-  const H = g.canvas.height;
+function fillJob(W, H, read, hole, r, reach = 0.9) {
   const hb = bboxOf(hole, r.w, r.h);
-  if (!hb) return false;
+  if (!hb) return null;
   const b = { x: hb.x + r.x, y: hb.y + r.y, w: hb.w, h: hb.h };
-  // how far around the hole patches are taken from (texture: close by only)
+  // how far around the hole patches are taken from
   const m = clamp(Math.round(Math.max(b.w, b.h) * reach), 16, 360);
   const x0 = Math.max(0, b.x - m);
   const y0 = Math.max(0, b.y - m);
   const cw = Math.min(W, b.x + b.w + m) - x0;
   const ch = Math.min(H, b.y + b.h + m) - y0;
-  const img = g.getImageData(x0, y0, cw, ch);
+  const img = read(x0, y0, cw, ch);
   const d = img.data;
   const hc = new Uint8Array(cw * ch);
   const hi = (x, y) => {
@@ -185,8 +184,21 @@ function contentFill(g, hole, r, amt = null, reach = 0.9) {
     avoid = new Uint8Array(cw * ch);
     for (let i = 0; i < cw * ch; i++) if (d[i * 4 + 3] <= 200) avoid[i] = 1;
   }
+  return { img, x0, y0, cw, ch, hole: hc, avoid, hi };
+}
+
+/**
+ * Content-aware fill on a canvas context: rebuild the pixels where hole (r.w×r.h, for rectangle r of
+ * the canvas) is set, from the rest of the picture. amt (0..255 per hole pixel, optional) softens the
+ * result into the original.
+ */
+function contentFill(g, hole, r, amt = null, reach = 0.9) {
+  const job = fillJob(g.canvas.width, g.canvas.height, (x, y, w, hh) => g.getImageData(x, y, w, hh), hole, r, reach);
+  if (!job) return false;
+  const { img, cw, ch, hole: hc, hi } = job;
+  const d = img.data;
   const orig = amt ? new Uint8ClampedArray(d) : null;
-  inpaint(d, cw, ch, hc, { avoid });
+  inpaint(d, cw, ch, hc, { avoid: job.avoid });
   if (amt) {
     for (let y = 0; y < ch; y++) {
       for (let x = 0; x < cw; x++) {
@@ -197,8 +209,61 @@ function contentFill(g, hole, r, amt = null, reach = 0.9) {
       }
     }
   }
-  g.putImageData(img, x0, y0);
+  g.putImageData(img, job.x0, job.y0);
   return true;
+}
+
+// The fill at the end of a spot healing / remove stroke runs in a worker: on a big picture it takes
+// a second or more. One job at a time; a newer one (or giving up on it) stops the one running.
+let healWorker = null;
+let healSeq = 0;
+let healWaiting = null;
+
+/** Fill job.img's hole off the main thread; resolves with the filled RGBA bytes (null: given up). */
+function inpaintInWorker(job) {
+  stopInpaint();
+  return new Promise((resolve) => {
+    const id = ++healSeq;
+    // no module workers (or the worker fails): the same fill on this thread, a moment later
+    const here = () => setTimeout(() => {
+      if (healWaiting?.id !== id) return;
+      healWaiting = null;
+      const d = new Uint8ClampedArray(job.img.data);
+      inpaint(d, job.cw, job.ch, job.hole, { avoid: job.avoid });
+      resolve(d);
+    }, 0);
+    healWaiting = { id, resolve };
+    try {
+      healWorker ||= new Worker(new URL('./cafill-worker.js', import.meta.url), { type: 'module' });
+    } catch {
+      here();
+      return;
+    }
+    healWorker.onmessage = (e) => {
+      if (e.data.id !== healWaiting?.id) return;
+      if (e.data.error) return void here();
+      healWaiting = null;
+      resolve(e.data.data);
+    };
+    healWorker.onerror = (e) => {
+      e.preventDefault?.();
+      healWorker?.terminate();
+      healWorker = null;
+      here();
+    };
+    // a copy goes over (the job keeps its pixels in case the fill has to be done here after all)
+    healWorker.postMessage({ id, op: 'inpaint', data: new Uint8ClampedArray(job.img.data), w: job.cw, h: job.ch, hole: job.hole, avoid: job.avoid });
+  });
+}
+
+/** Give up on the fill running in the worker (its promise resolves with null). */
+function stopInpaint() {
+  if (!healWaiting) return;
+  const { resolve } = healWaiting;
+  healWaiting = null;
+  healWorker?.terminate();
+  healWorker = null;
+  resolve(null);
 }
 
 /**
@@ -519,49 +584,171 @@ export function installBrushTools(P) {
    * With 모든 레이어 샘플링 the picture of every visible layer is used and only the fix goes onto
    * this layer (so retouching can live on an empty layer of its own).
    */
+  // the stroke being filled in the worker: { doc, settle } (see healFill)
+  let healing = null;
+  let busyTimer = 0;
+  /** The busy cursor over the picture, and after a moment a note that the fill is being worked out. */
+  const showBusy = (on, remove) => {
+    const stage = document.querySelector('.ph-stage');
+    clearTimeout(busyTimer);
+    stage?.classList.toggle('ph-busy', on);
+    stage?.querySelector('.ph-heal-busy')?.remove();
+    if (on && stage) busyTimer = setTimeout(() => stage.append(h('div.ph-heal-busy', { role: 'status' }, icon(remove ? 'removeTool' : 'heal', 14), remove ? '제거하는 중…' : '복구하는 중…')), 400);
+  };
+  /**
+   * The end of a spot healing / remove stroke: the painted area is rebuilt from its surroundings.
+   * With 모든 레이어 샘플링 the picture of every visible layer is used and only the fix goes onto
+   * this layer (so retouching can live on an empty layer of its own). The content-aware fill runs in a
+   * worker while the stroke stays on screen; it lands on the layer in the same history step. Undoing
+   * before it is done gives it up; anything else that needs the document first waits for it here.
+   */
   P.healFill = (st) => {
     const remove = st.o.healKind === 'remove';
     if (st.onMask || (!remove && P.tool !== 'heal')) return false;
+    healing?.settle();
     const o = P.opts(remove ? 'remove' : 'heal');
     const kind = remove ? 'content' : o.type || 'content';
+    const doc = P.doc;
+    const layer = st.layer;
     const g = st.g;
-    const W = g.canvas.width;
-    const H = g.canvas.height;
-    g.save();
-    g.globalCompositeOperation = 'copy';
-    g.drawImage(st.base, 0, 0);
-    g.restore();
+    const canvas = g.canvas;
+    const W = canvas.width;
+    const H = canvas.height;
+    // layer pixels to doc coords, and the changed part of the picture (styles spread it: all of it)
+    const toDoc = (q) => ({ x: q.x + st.ox, y: q.y + st.oy, w: q.w, h: q.h });
+    const mark = (q) => {
+      layer._styled = null;
+      doc.touch(layer, layer.mask?.feather > 0 ? null : changedRect(doc, layer, toDoc(q)));
+    };
+    // the pre-stroke pixels back where the stroke was shown
+    const unpaint = (q) => {
+      g.save();
+      g.beginPath();
+      g.rect(q.x, q.y, q.w, q.h);
+      g.clip();
+      g.globalCompositeOperation = 'copy';
+      g.drawImage(st.base, 0, 0);
+      g.restore();
+    };
     // only the painted part of the (document-sized) stroke is looked at
     const grow = remove ? 3 : 2;
     const box = paintedBox(st.buf, st.o.size || 10);
     const r = box && clipRect(growRect(box, grow + 1), W, H);
+    // everything the stroke showed on the layer
+    const U = clipRect(st.used ? growRect(r ? unionRect(st.used, r) : st.used, 1) : { x: 0, y: 0, w: W, h: H }, W, H);
+    let hole = null;
     if (r) {
       const a = alphaIn(st.buf, r);
-      let hole = new Uint8Array(r.w * r.h);
+      hole = new Uint8Array(r.w * r.h);
       for (let i = 0; i < a.length; i++) if (a[i] > 20) hole[i] = 1;
       hole = dilate(hole, r.w, r.h, grow);
-      let work = g;
-      if (o.sampleAll) {
-        const comp = makeCanvas(W, H);
-        comp.getContext('2d').drawImage(sampleCanvas(P, P.doc, { sample: 'all' }), -st.ox, -st.oy);
-        work = comp.getContext('2d', { willReadFrequently: true });
-      }
-      if (kind === 'proximity') proximityFill(work, hole, r);
-      else contentFill(work, hole, r, null, kind === 'texture' ? 0.35 : 0.9);
-      if (work !== g) {
-        // the rebuilt pixels alone go onto this layer
-        const m = makeCanvas(r.w, r.h);
-        const mg = m.getContext('2d');
-        const mi = mg.createImageData(r.w, r.h);
-        for (let i = 0; i < hole.length; i++) if (hole[i]) mi.data[i * 4 + 3] = 255;
-        mg.putImageData(mi, 0, 0);
-        mg.globalCompositeOperation = 'source-in';
-        mg.drawImage(work.canvas, -r.x, -r.y);
-        g.drawImage(m, r.x, r.y);
-      }
     }
-    st.layer._styled = null;
-    P.doc.touch(st.layer);
+    // the rebuilt pixels alone go onto this layer (모든 레이어 샘플링): src is in layer coords
+    const putHole = (src, sx, sy) => {
+      const m = makeCanvas(r.w, r.h);
+      const mg = m.getContext('2d');
+      const mi = mg.createImageData(r.w, r.h);
+      for (let i = 0; i < hole.length; i++) if (hole[i]) mi.data[i * 4 + 3] = 255;
+      mg.putImageData(mi, 0, 0);
+      mg.globalCompositeOperation = 'source-in';
+      mg.drawImage(src, sx - r.x, sy - r.y);
+      g.drawImage(m, r.x, r.y);
+    };
+    if (!r || kind === 'proximity') {
+      // quick: done right here
+      unpaint(U || { x: 0, y: 0, w: W, h: H });
+      if (r && o.sampleAll) {
+        const comp = makeCanvas(W, H);
+        comp.getContext('2d').drawImage(sampleCanvas(P, doc, { sample: 'all' }), -st.ox, -st.oy);
+        proximityFill(comp.getContext('2d', { willReadFrequently: true }), hole, r);
+        putHole(comp, 0, 0);
+      } else if (r) proximityFill(g, hole, r);
+      layer._styled = null;
+      doc.touch(layer);
+      P.redraw();
+      return true;
+    }
+    // the pixels to fill from: this layer before the stroke, or the whole picture without the stroke
+    let read = (x, y, w, hh) => st.base.getContext('2d').getImageData(x, y, w, hh);
+    let shown = null;
+    if (o.sampleAll) {
+      shown = makeCanvas(U.w, U.h);
+      shown.getContext('2d').drawImage(canvas, -U.x, -U.y);
+      unpaint(U);
+      mark(U);
+      const pic = !P.float && !P.showMaskOnly && doc === P.doc ? P.composite() : sampleCanvas(P, doc, { sample: 'all' });
+      read = (x, y, w, hh) => pic.getContext('2d').getImageData(x + st.ox, y + st.oy, w, hh);
+    }
+    const job = fillJob(W, H, read, hole, r, kind === 'texture' ? 0.35 : 0.9);
+    if (shown) {
+      // the stroke stays on screen while the fill is worked out
+      g.save();
+      g.beginPath();
+      g.rect(U.x, U.y, U.w, U.h);
+      g.clip();
+      g.globalCompositeOperation = 'copy';
+      g.drawImage(shown, U.x, U.y);
+      g.restore();
+      mark(U);
+    }
+    if (!job) {
+      unpaint(U);
+      mark(U);
+      P.redraw();
+      return true;
+    }
+    const put = (data) => {
+      unpaint(U);
+      const res = new ImageData(data, job.cw, job.ch);
+      let area = U;
+      if (!o.sampleAll) {
+        g.putImageData(res, job.x0, job.y0);
+        area = unionRect(U, { x: job.x0, y: job.y0, w: job.cw, h: job.ch });
+      } else {
+        const t = makeCanvas(job.cw, job.ch);
+        t.getContext('2d').putImageData(res, 0, 0);
+        putHole(t, job.x0, job.y0);
+      }
+      mark(area);
+      P.redraw();
+    };
+    const me = {
+      doc,
+      // still this layer's pixels (nothing has copied or replaced them since)
+      live: () => doc.layer(layer.id)?.canvas === canvas,
+      done() {
+        if (healing === me) healing = null;
+        if (doc._settle === me.settle) doc._settle = null;
+        showBusy(false);
+      },
+      settle(why, entry) {
+        me.done();
+        stopInpaint();
+        if (!me.live()) return false;
+        if (why === 'undo' && entry?.state === st.before) {
+          // undone before the fill was ready: the stroke goes away with its step
+          unpaint(U);
+          mark(U);
+          return true;
+        }
+        // needed now: work it out here
+        const d = new Uint8ClampedArray(job.img.data);
+        inpaint(d, job.cw, job.ch, job.hole, { avoid: job.avoid });
+        put(d);
+        return false;
+      },
+    };
+    healing = me;
+    doc._settle = me.settle;
+    showBusy(true, remove);
+    inpaintInWorker(job).then((data) => {
+      if (!data || healing !== me) return;
+      me.done();
+      if (!me.live()) return;
+      put(data);
+      P.emit('layers');
+      P.scheduleSave?.();
+    });
     P.redraw();
     return true;
   };

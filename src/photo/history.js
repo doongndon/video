@@ -1,6 +1,8 @@
 // Undo / redo for a photo document. Each entry holds a snapshot from doc.capture(): layer metadata
 // plus references to pixel canvases (which are never modified after capture, see doc.editPixels).
 
+import { unionRect } from './doc.js';
+
 export class History {
   constructor(doc, { budgetBytes = 900e6, states = 50 } = {}) {
     this.doc = doc;
@@ -20,9 +22,19 @@ export class History {
     return Math.max(1, Math.min(Math.round(this.states) || 50, byMemory, 1000));
   }
 
-  /** Record an edit: `before` is doc.capture() taken before changing anything. */
-  push(label, before) {
-    this.undoStack.push({ label, state: before });
+  /**
+   * Record an edit: `before` is doc.capture() taken before changing anything; `known`, when given,
+   * is where it changed the picture (null: unknown).
+   */
+  push(label, before, known = undefined) {
+    // where the step changed the picture (when known): undoing it redraws that part alone
+    const doc = this.doc;
+    const ours = before.revOf === doc.id;
+    const area = known !== undefined ? known : ours ? doc.changedSince(before.rev) : null;
+    // the step before is undone from the state this one started from: add what changed in between
+    const prev = this.undoStack[this.undoStack.length - 1];
+    if (prev) widen(prev, ours && prev.rev != null && before.rev >= prev.rev ? doc.changedSince(prev.rev, before.rev) : null);
+    this.undoStack.push({ label, state: before, area, rev: doc.rev });
     this.trim();
     this.redoStack = [];
     this.serial++;
@@ -45,8 +57,9 @@ export class History {
   undo() {
     const e = this.undoStack.pop();
     if (!e) return null;
-    this.redoStack.push({ label: e.label, state: this.doc.capture() });
-    this.doc.restore(e.state);
+    // a spot heal still being filled in is given up along with its step: there is nothing to redo
+    const dropped = this.doc.settle('undo', e);
+    this.swap(e, this.undoStack, dropped ? null : this.redoStack);
     this.emit();
     return e.label;
   }
@@ -54,10 +67,31 @@ export class History {
   redo() {
     const e = this.redoStack.pop();
     if (!e) return null;
-    this.undoStack.push({ label: e.label, state: this.doc.capture() });
-    this.doc.restore(e.state);
+    this.swap(e, this.redoStack, this.undoStack);
     this.emit();
     return e.label;
+  }
+
+  /**
+   * Go to entry e's state (taken off `from`) and put the way back on `to`. Each entry knows where
+   * its state differs from the one next to it (area) as of revision `rev`, so only that part of the
+   * picture is redrawn; whatever changed since without a step of its own is added.
+   */
+  swap(e, from, to) {
+    const doc = this.doc;
+    const since = e.area && e.rev != null ? doc.changedSince(e.rev) : null;
+    const area = since && unionRect(e.area, since);
+    // the entry the way back goes on top of is next to the state now
+    const next = to?.[to.length - 1];
+    if (next) widen(next, next.rev != null ? doc.changedSince(next.rev) : null);
+    const back = { label: e.label, state: doc.capture(), area };
+    doc.restore(e.state, area);
+    back.rev = doc.rev;
+    to?.push(back);
+    // the step now on top of `from` was next to the state just restored
+    const top = from[from.length - 1];
+    if (top) top.rev = doc.rev;
+    return back;
   }
 
   /**
@@ -91,4 +125,10 @@ export class History {
   emit() {
     for (const fn of this.listeners) fn();
   }
+}
+
+/** Grow an entry's area by `extra` (null: no longer known); it then counts from the state after it. */
+function widen(e, extra) {
+  e.area = e.area && extra ? unionRect(e.area, extra) : null;
+  e.rev = null;
 }

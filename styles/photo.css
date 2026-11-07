@@ -17,6 +17,9 @@ body.photo-mode #workspace, body.photo-mode #statusbar { display: none !importan
 .ph-stage { flex: 1; min-height: 0; position: relative; overflow: hidden; background: #1f2125; touch-action: none; user-select: none; -webkit-user-select: none; }
 .ph-view, .ph-over { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
 .ph-over { pointer-events: none; }
+/* a spot heal / remove stroke being filled in the background */
+.ph-stage.ph-busy { cursor: progress !important; }
+.ph-heal-busy { position: absolute; left: 50%; top: 12px; transform: translateX(-50%); display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 6px; background: var(--bg-3); border: 1px solid var(--line); color: var(--text-dim); font-size: var(--fs-s); pointer-events: none; z-index: 2; }
 .ph-status { height: calc(24px * var(--ui-scale)); display: flex; align-items: center; padding: 0 10px; background: var(--bg-2); border-top: 1px solid var(--line); color: var(--text-dim); font-size: var(--fs-xs); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; flex-shrink: 0; }
 
 /* welcome card */
@@ -514,6 +517,17 @@ body.mobile .ph-xpwrap { min-height: 200px; max-height: 40vh; }
 .ph-swhead .ph-twist svg { display: block; }
 body.mobile .ph-presetgrid { grid-template-columns: repeat(auto-fill, minmax(72px, 1fr)); gap: 6px; }
 body.mobile .ph-presetgrid.shapes { grid-template-columns: repeat(auto-fill, minmax(54px, 1fr)); }
+/* panel menu view sizes (Gradients, Patterns): 큰 축소판, 작은 목록, 큰 목록 */
+.ph-preset .ph-pname { display: none; }
+.ph-presetp.pv-large .ph-presetgrid { grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); }
+.ph-presetp.pv-large .ph-presetgrid.grad .ph-preset canvas { height: 36px; }
+.ph-presetp.pv-smallList .ph-presetgrid, .ph-presetp.pv-largeList .ph-presetgrid { grid-template-columns: minmax(0, 1fr); gap: 2px; }
+.ph-presetp.pv-smallList .ph-preset, .ph-presetp.pv-largeList .ph-preset { flex-direction: row; gap: 8px; line-height: 1.3; text-align: left; }
+.ph-presetp.pv-smallList .ph-preset .ph-pname, .ph-presetp.pv-largeList .ph-preset .ph-pname { display: block; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-s); color: var(--text); }
+.ph-presetp.pv-smallList .ph-presetgrid.grad .ph-preset canvas { width: 56px; height: 16px; flex: 0 0 auto; }
+.ph-presetp.pv-largeList .ph-presetgrid.grad .ph-preset canvas { width: 96px; height: 30px; flex: 0 0 auto; }
+.ph-presetp.pv-smallList .ph-preset.pat canvas { width: 20px; flex: 0 0 auto; }
+.ph-presetp.pv-largeList .ph-preset.pat canvas { width: 44px; flex: 0 0 auto; }
 
 /* Contextual Task Bar (상황별 작업 표시줄) */
 .ph-ctb { position: absolute; z-index: 30; display: flex; align-items: center; gap: 2px; max-width: calc(100% - 12px); padding: 4px; background: var(--bg-2); border: 1px solid var(--line-2); border-radius: 10px; box-shadow: 0 6px 20px rgba(0,0,0,.45); overflow-x: auto; scrollbar-width: none; touch-action: pan-x; user-select: none; -webkit-user-select: none; }
@@ -1029,6 +1043,26 @@ body.photo-mode:not(.mobile) .ph-side.collapsed { width: calc(38px * var(--ui-sc
 .ph-cdef { left: -2px; bottom: -8px; }
 .ph-cswap:hover, .ph-cdef:hover { color: var(--text); background: none; }
 .ph-cmain .cp { flex: 1; min-width: 0; gap: 4px; }
+/* Properties panel: 변형 (W / H / X / Y, angle, flips) */
+.ph-xform { display: grid; grid-template-columns: minmax(0, 1fr) 26px minmax(0, 1fr); gap: 4px 4px; align-items: center; }
+.ph-xf-f { display: flex; align-items: center; gap: 5px; min-width: 0; font-size: var(--fs-s); color: var(--text-dim); }
+.ph-xf-f > span { flex: 0 0 auto; min-width: 12px; }
+.ph-xf-f input.ph-num { flex: 1; min-width: 0; width: auto; }
+.ph-xlink { min-width: 0; width: 26px; padding: 0; justify-content: center; }
+.ph-xlink.on { background: var(--accent-soft); border-color: var(--accent); color: var(--value); }
+.ph-xf-row .ph-xf-f { flex: 0 1 140px; }
+/* Color panel views (panel menu): wheel, sliders, colour bar */
+.ph-cviews { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.ph-cwheel-box { display: flex; justify-content: center; }
+.ph-cwheel { width: 132px; height: 132px; cursor: crosshair; touch-action: none; }
+.ph-cs-row { display: grid; grid-template-columns: 14px minmax(0, 1fr) 48px 12px; align-items: center; gap: 6px; font-size: var(--fs-s); color: var(--text-dim); }
+.ph-cs-row b { font-weight: 600; }
+.ph-cs-row input.ph-num { width: 48px; min-height: 0; height: 22px; padding: 0 4px; }
+.ph-cs-row small { color: var(--text-faint); }
+.ph-cs-track { position: relative; height: 10px; border: 1px solid var(--line-2); cursor: pointer; touch-action: none; }
+.ph-cs-thumb { position: absolute; top: 100%; width: 0; height: 0; margin-left: -5px; border: 5px solid transparent; border-bottom-color: var(--text); border-top: 0; pointer-events: none; }
+.ph-cbar { display: block; width: 100%; height: 22px; border: 1px solid var(--line-2); cursor: crosshair; touch-action: none; }
+body.mobile .ph-cs-track { height: 18px; }
 .ph-panel.color .cp-sv { aspect-ratio: 220 / 90; border-radius: 0; }
 .ph-panel.color .cp-hue { height: 10px; border-radius: 0; }
 .ph-panel.color .cp-hex { width: 70px; height: calc(20px * var(--ui-scale)); min-height: 0; }

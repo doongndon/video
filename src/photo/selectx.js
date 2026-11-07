@@ -436,11 +436,68 @@ export class QuickSelector {
     }
   }
 
+  /**
+   * gradientOf, worked out only for the tiles inside a box the first time they are needed (the
+   * whole picture at the first dab made it stall on big documents). Returns the doc-size array.
+   */
+  gradIn(x0, y0, x1, y1) {
+    const { w, h, px } = this;
+    const T = 128;
+    const tw = Math.ceil(w / T);
+    if (!this.grad) {
+      this.grad = new Float32Array(w * h);
+      this.tiles = new Uint8Array(tw * Math.ceil(h / T));
+    }
+    const G = this.grad;
+    for (let ty = Math.floor(y0 / T); ty <= Math.floor(y1 / T); ty++) {
+      for (let tx = Math.floor(x0 / T); tx <= Math.floor(x1 / T); tx++) {
+        if (this.tiles[ty * tw + tx]) continue;
+        this.tiles[ty * tw + tx] = 1;
+        const ax = tx * T;
+        const ay = ty * T;
+        const bx = Math.min(w, ax + T) - 1;
+        const by = Math.min(h, ay + T) - 1;
+        // the luminance around the tile, as gradientOf keeps it
+        const lx = Math.max(0, ax - 1);
+        const ly = Math.max(0, ay - 1);
+        const lw = Math.min(w - 1, bx + 1) - lx + 1;
+        const lh = Math.min(h - 1, by + 1) - ly + 1;
+        const L = new Float32Array(lw * lh);
+        for (let y = 0; y < lh; y++) {
+          for (let x = 0; x < lw; x++) {
+            const i = (y + ly) * w + x + lx;
+            L[y * lw + x] = luma(px[i * 4], px[i * 4 + 1], px[i * 4 + 2]) * (px[i * 4 + 3] / 255);
+          }
+        }
+        for (let y = ay; y <= by; y++) {
+          const ym = (y > 0 ? y - 1 : y) - ly;
+          const yp = (y < h - 1 ? y + 1 : y) - ly;
+          const yc = y - ly;
+          for (let x = ax; x <= bx; x++) {
+            const xm = (x > 0 ? x - 1 : x) - lx;
+            const xp = (x < w - 1 ? x + 1 : x) - lx;
+            const xc = x - lx;
+            const a = L[ym * lw + xm];
+            const b = L[ym * lw + xc];
+            const c = L[ym * lw + xp];
+            const d = L[yc * lw + xm];
+            const f = L[yc * lw + xp];
+            const g2 = L[yp * lw + xm];
+            const hh = L[yp * lw + xc];
+            const k = L[yp * lw + xp];
+            const gx = c + 2 * f + k - a - 2 * d - g2;
+            const gy = g2 + 2 * hh + k - a - 2 * b - c;
+            G[y * w + x] = Math.min(1, Math.hypot(gx, gy) / 1020);
+          }
+        }
+      }
+    }
+    return G;
+  }
+
   /** One dab at (cx, cy) with radius r. Returns the changed box. */
   dab(cx, cy, r) {
     const { w, h, px, mask } = this;
-    if (!this.grad) this.grad = gradientOf(px, w, h);
-    const G = this.grad;
     r = Math.max(1, r);
     // the flood reaches a few brush sizes out (to the object's edges), more for small brushes
     const R = Math.min(r * 5, r * 3 + 150);
@@ -449,6 +506,8 @@ export class QuickSelector {
     const x1 = Math.min(w - 1, Math.ceil(cx + R));
     const y1 = Math.min(h - 1, Math.ceil(cy + R));
     if (x0 > x1 || y0 > y1) return null;
+    // the brush itself can reach past the flood's box on a big brush near the edge
+    const G = this.gradIn(Math.max(0, Math.min(x0, Math.floor(cx - r))), Math.max(0, Math.min(y0, Math.floor(cy - r))), Math.min(w - 1, Math.max(x1, Math.ceil(cx + r))), Math.min(h - 1, Math.max(y1, Math.ceil(cy + r))));
     // learn the colours near the brush centre; the edge threshold follows the texture under it
     const gs = [];
     const queue = [];

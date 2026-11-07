@@ -1,7 +1,7 @@
 // Selections: a doc-size canvas whose alpha is the selection amount. Selections are replaced, never
 // changed in place (undo keeps references to them). Also the marching-ants outline.
 
-import { makeCanvas } from './doc.js';
+import { makeCanvas, alphaBox } from './doc.js';
 
 const blank = (doc) => makeCanvas(doc.width, doc.height);
 
@@ -205,11 +205,15 @@ function softMaskCanvas(mask, w, h) {
   const out = img.data;
   const at = (xx, yy) => mask[Math.min(h - 1, Math.max(0, yy)) * w + Math.min(w - 1, Math.max(0, xx))];
   for (let yy = 0; yy < h; yy++) {
+    const inner = yy > 0 && yy < h - 1;
     for (let xx = 0; xx < w; xx++) {
       const i = yy * w + xx;
       const m = mask[i];
-      // pixels away from the outline keep their value; only the outline is filtered
-      const edge = at(xx - 1, yy) !== m || at(xx + 1, yy) !== m || at(xx, yy - 1) !== m || at(xx, yy + 1) !== m;
+      // pixels away from the outline keep their value; only the outline is filtered (away from the
+      // picture's border the neighbours are read directly, which is the same as at() there)
+      const edge = inner && xx > 0 && xx < w - 1
+        ? mask[i - 1] !== m || mask[i + 1] !== m || mask[i - w] !== m || mask[i + w] !== m
+        : at(xx - 1, yy) !== m || at(xx + 1, yy) !== m || at(xx, yy - 1) !== m || at(xx, yy + 1) !== m;
       if (!edge) {
         out[i * 4 + 3] = m ? 255 : 0;
         continue;
@@ -234,26 +238,9 @@ export function maskToCanvas(mask, w, h) {
   return c;
 }
 
-/** Bounding box of pixels with alpha > 0. */
+/** Bounding box of pixels with alpha > 0 (read from the edges inward, see doc.js alphaBox). */
 export function alphaBounds(c) {
-  const { width: w, height: h } = c;
-  const d = c.getContext('2d').getImageData(0, 0, w, h).data;
-  let x0 = w;
-  let y0 = h;
-  let x1 = -1;
-  let y1 = -1;
-  for (let y = 0; y < h; y++) {
-    const row = y * w * 4;
-    for (let x = 0; x < w; x++) {
-      if (d[row + x * 4 + 3]) {
-        if (x < x0) x0 = x;
-        if (x > x1) x1 = x;
-        y0 = Math.min(y0, y);
-        y1 = y;
-      }
-    }
-  }
-  return x1 < 0 ? null : { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 };
+  return alphaBox(c);
 }
 
 /**

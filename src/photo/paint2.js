@@ -337,13 +337,13 @@ export function installPaint2(P) {
   TOOL_GROUPS.find((g) => g[0] === 'clone').push('patternStamp');
 
   // ---- define pattern (kept in this browser, up to 24)
-  const saved = loadPref('photo.patterns', []);
-  for (const sp of saved) {
+  for (const sp of loadPref('photo.patterns', [])) {
     const img = new Image();
     img.onload = () => {
       const c = makeCanvas(img.width, img.height);
       c.getContext('2d').drawImage(img, 0, 0);
       userPatterns.set(sp.id, { name: sp.name, canvas: c });
+      P.emit('patterns');
     };
     img.src = sp.data;
   }
@@ -355,6 +355,8 @@ export function installPaint2(P) {
     const k = Math.min(1, 512 / Math.max(r.w, r.h));
     const c = makeCanvas(Math.max(1, Math.round(r.w * k)), Math.max(1, Math.round(r.h * k)));
     c.getContext('2d').drawImage(P.composite(), r.x, r.y, r.w, r.h, 0, 0, c.width, c.height);
+    // the list as kept now (the Patterns panel renames and deletes patterns in it)
+    const saved = loadPref('photo.patterns', []);
     const name = await promptDialog('패턴 정의', '이름', `내 패턴 ${saved.length + 1}`);
     if (!name) return;
     const id = definePattern(c, name.slice(0, 30));

@@ -415,9 +415,10 @@ export function buildHome(P, { newDoc, open, openFromVideo }) {
     for (const b of bar.querySelectorAll('.ph-hlay')) b.classList.toggle('on', b.dataset.lay === layout);
     quickBox.hidden = view !== 'home' || !!q2;
     const used = LIB.usage();
+    const cap = LIB.limit();
     storage.replaceChildren(
-      h('div.ph-hs-row', h('span', '저장 공간'), h('b', `${mb(used)} / ${mb(LIB.LIMIT)}`)),
-      h('div.ph-hs-bar', h('i', { style: { width: `${Math.min(100, (used / LIB.LIMIT) * 100).toFixed(1)}%` } })),
+      h('div.ph-hs-row', h('span', '저장 공간'), h('b', `${mb(used)} / ${mb(cap)}`)),
+      h('div.ph-hs-bar', h('i', { style: { width: `${Math.min(100, (used / cap) * 100).toFixed(1)}%` } })),
       h('small', '가득 차면 오래된 문서부터 지워집니다.'));
     // the title row of the view
     const trashN = LIB.trash().length;

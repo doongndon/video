@@ -1282,6 +1282,11 @@ export const TOOLS = [
   {
     id: 'move', name: '이동', key: 'V', icon: 'move', group: 'move', cursor: 'move',
     options: [['autoSelect', '자동 선택', 'bool', null, null, true], ['autoTarget', '대상', 'select', null, null, 'layer', [['layer', '레이어'], ['group', '그룹']]], ['showTransform', '변형 컨트롤 표시', 'bool', null, null, true]],
+    /** A double-click on text (Photoshop): the type tool takes over and edits it, all of it selected. */
+    dblclick(E, p) {
+      const l = E.layerAt(p, (x) => x.kind === 'text' && !x.locked);
+      if (l) E.editTextLayer?.(l);
+    },
     /** With auto-select: the layer a click picks (not the background under everything). */
     pick(E, p) {
       const doc = E.doc;

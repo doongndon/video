@@ -2,7 +2,7 @@
 // warp dialog.
 
 import { h, clamp } from '../util.js';
-import { showMenu, openModal } from '../ui/common.js';
+import { showMenu, openModal, loadPref, savePref } from '../ui/common.js';
 import { icon } from '../ui/icons.js';
 import { openFontPicker } from '../ui/font-picker.js';
 import { fontLabel } from '../fonts.js';
@@ -44,14 +44,17 @@ body.mobile .ph-sheet.open ~ .ph-textedit { top: 52px !important; bottom: auto !
 
 // ---------------------------------------------------------------- Paths panel
 
-function pathThumb(P, sps) {
-  const c = h('canvas.ph-thumb', { width: 40, height: 40 });
+// Panel Options: thumbnail size (0: none)
+const PATH_THUMBS = [[0, '없음'], [24, '작게'], [40, '중간'], [64, '크게']];
+function pathThumb(P, sps, n = 40) {
+  if (!n) return null;
+  const c = h('canvas.ph-thumb', { width: n, height: n, style: { width: `${n}px`, height: `${n}px` } });
   const doc = P.doc;
   const g = c.getContext('2d');
-  const s = Math.min(40 / doc.width, 40 / doc.height);
+  const s = Math.min(n / doc.width, n / doc.height);
   g.fillStyle = '#fff';
-  g.fillRect(0, 0, 40, 40);
-  g.translate((40 - doc.width * s) / 2, (40 - doc.height * s) / 2);
+  g.fillRect(0, 0, n, n);
+  g.translate((n - doc.width * s) / 2, (n - doc.height * s) / 2);
   g.scale(s, s);
   if (sps?.length) {
     g.fillStyle = '#777';
@@ -77,6 +80,31 @@ export function buildPathsPanel(P) {
     btn('plus', '새 패스', () => C().newPath()),
     btn('trash', '패스 삭제', () => C().deletePath()));
   const el = h('div.ph-panel.layers.paths', list, foot);
+  let thumbSize = loadPref('photo.pathThumb', 40);
+  // the panel menu (≡ on the dock's tab bar), as in Photoshop
+  P.panelMenus = P.panelMenus || {};
+  P.panelMenus.paths = () => {
+    const doc = P.doc;
+    const t = doc ? P.resolvePathTarget?.() : null;
+    const has = !!(doc && t && P.getPath?.().length);
+    return [
+      t?.kind === 'work' ? { label: '패스 저장…', action: () => C().savePath() } : { label: '새 패스…', disabled: !doc, action: () => C().newPath() },
+      { label: '패스 복제…', disabled: !t || t.kind === 'vmask' || t.kind === 'shape', action: () => C().duplicatePath() },
+      { label: '패스 삭제', disabled: !t || t.kind === 'shape', action: () => C().deletePath() },
+      '-',
+      { label: '작업 패스 만들기…', disabled: !doc?.selection, action: () => C().makeWorkPathDialog() },
+      '-',
+      { label: '선택 영역 만들기…', disabled: !has, action: () => C().makeSelectionDialog() },
+      { label: '패스 칠…', disabled: !has, action: () => C().fillPathDialog() },
+      { label: '패스 획…', disabled: !has, action: () => C().strokePathDialog() },
+      '-',
+      { label: '패널 옵션: 축소판 크기', submenu: PATH_THUMBS.map(([n, label]) => ({ label, checked: thumbSize === n, action: () => {
+        thumbSize = n;
+        savePref('photo.pathThumb', n);
+        render();
+      } })) },
+    ];
+  };
   const menuFor = (target) => [
     target.kind === 'work' ? { label: '패스 저장…', action: () => C().savePath() } : null,
     target.kind === 'saved' ? { label: '패스 복제', action: () => C().duplicatePath?.() } : null,
@@ -99,7 +127,7 @@ export function buildPathsPanel(P) {
     const t = P.resolvePathTarget?.();
     const row = (label, sps, target, extra = {}) => {
       const on = t && t.kind === target.kind && (t.id === target.id || t.layerId === target.layerId) && (target.kind !== 'work' || t.kind === 'work');
-      const r = h(`div.ph-layer${on ? '.on.active' : ''}`, { role: 'option', 'aria-selected': String(!!on) }, pathThumb(P, sps), h('span.ph-lname', extra.italic ? h('i', label) : label));
+      const r = h(`div.ph-layer${on ? '.on.active' : ''}`, { role: 'option', 'aria-selected': String(!!on) }, pathThumb(P, sps, thumbSize), h('span.ph-lname', extra.italic ? h('i', label) : label));
       r.addEventListener('click', () => {
         P.pathTarget = target;
         P.pathSel = { subs: new Set(), knots: new Set() };

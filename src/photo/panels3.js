@@ -428,13 +428,24 @@ export function buildAdjustmentsPanel(P) {
     return undefined;
   };
   const types = Object.entries(ADJUSTMENTS).filter(([k]) => k !== 'desaturate');
+  const looks = [h('div.ph-sub', '빠른 룩 (조정 레이어 묶음, 지우면 원래대로)'), h('div.ph-adjgrid', LOOKS.map(([n, items]) => h('button.small', { onclick: () => addLook(n, items) }, n)))];
+  const showLooks = () => { for (const x of looks) x.hidden = !loadPref('photo.adj.looks', true); };
+  showLooks();
+  // the panel menu (≡ on the dock's tab bar): how new adjustment layers are made (layercmds.js)
+  const toggle = (key, def, label, after) => ({ label, checked: loadPref(key, def), action: () => { savePref(key, !loadPref(key, def)); after?.(); } });
+  P.panelMenus = P.panelMenus || {};
+  P.panelMenus.adjustments = () => [
+    toggle('photo.adj.mask', true, '기본적으로 마스크 추가'),
+    toggle('photo.adj.clip', false, '기본적으로 레이어에 클립'),
+    '-',
+    toggle('photo.adj.looks', true, '빠른 룩 표시', showLooks),
+  ];
   return h('div.ph-panel.adjp',
     h('div.ph-sub', '조정 레이어 추가 (원본은 그대로)'),
     h('div.ph-adjgrid', types.map(([k, a]) => h('button.small', { onclick: () => (P.doc ? P.cmd.newAdjustLayer(k) : toast('문서가 없습니다')) }, a.name))),
     h('div.ph-sub', '칠 레이어'),
     h('div.ph-adjgrid', [['solid', '단색'], ['gradient', '그레이디언트'], ['pattern', '패턴']].map(([k, n]) => h('button.small', { onclick: () => (P.doc ? P.dialogs.fillLayerDialog(P, k) : toast('문서가 없습니다')) }, n))),
-    h('div.ph-sub', '빠른 룩 (조정 레이어 묶음, 지우면 원래대로)'),
-    h('div.ph-adjgrid', LOOKS.map(([n, items]) => h('button.small', { onclick: () => addLook(n, items) }, n))));
+    ...looks);
 }
 
 // ---------------------------------------------------------------- tool presets

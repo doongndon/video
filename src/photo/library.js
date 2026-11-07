@@ -55,6 +55,16 @@ export const get = (id) => items.find((x) => x.id === id) || null;
 export const recent = () => items.filter((x) => !x.deleted).sort((a, b) => b.time - a.time);
 export const trash = () => items.filter((x) => x.deleted).sort((a, b) => b.deleted - a.deleted);
 export const usage = () => items.reduce((s, x) => s + (x.bytes || 0), 0);
+/** The limit really used: LIMIT, or less when the browser gives this site little room (60% of its quota). */
+let realLimit = LIMIT;
+export const limit = () => realLimit;
+async function estimateLimit() {
+  try {
+    const est = await navigator.storage?.estimate?.();
+    if (est?.quota) realLimit = Math.min(LIMIT, est.quota * 0.6);
+  } catch { /* no estimate */ }
+  return realLimit;
+}
 
 // writes run one after another
 let chain = Promise.resolve();
@@ -68,6 +78,7 @@ export const ready = (async () => {
     const old = Date.now() - TRASH_DAYS * 864e5;
     const expired = items.filter((x) => x.deleted && x.deleted < old);
     if (expired.length) await purgeNow(expired.map((x) => x.id));
+    await estimateLimit();
   } catch (err) {
     console.warn('photo library unavailable', err);
   }
@@ -200,11 +211,7 @@ export function putSoon(P, docs) {
 /** Make room for `need` more bytes: removed documents go first, then the oldest closed ones. */
 async function room(P, need, keepId) {
   let used = usage();
-  let limit = LIMIT;
-  try {
-    const est = await navigator.storage?.estimate?.();
-    if (est?.quota) limit = Math.min(LIMIT, est.quota * 0.6);
-  } catch { /* no estimate */ }
+  const limit = await estimateLimit();
   const count = items.filter((x) => x.id !== keepId).length + 1;
   if (used + need <= limit && count <= MAX_ITEMS) return;
   const open = new Set(P.docs.map((d) => d.id));
