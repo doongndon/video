@@ -128,6 +128,9 @@ label.ph-prow > span:first-child { min-width: calc(76px * var(--ui-scale)); }
 
 /* history */
 .ph-panel.history { gap: 1px; padding: 4px; }
+/* a transform or a crop is open: the panels that change the document wait (session.js) */
+.ph-locked { opacity: .5; cursor: not-allowed; }
+.ph-locked * { cursor: not-allowed !important; }
 .ph-hrow { text-align: left; background: none; border: 1px solid transparent; border-radius: 4px; min-height: 0; height: calc(28px * var(--ui-scale)); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text-dim); }
 .ph-hrow.on { background: var(--sel); color: var(--text); }
 .ph-hrow.redo { opacity: 0.5; font-style: italic; }

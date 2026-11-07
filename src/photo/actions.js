@@ -264,7 +264,10 @@ export function installActions(P) {
     P.emit('actions');
   };
   C.newAction = async () => {
-    const name = await promptDialog('새 액션', '이름', `액션 ${actions.length + 1}`);
+    // Photoshop: 액션 1, 액션 2… (the first number no action in the set is named with yet)
+    let n = 1;
+    while (actions.some((a) => a.name === `액션 ${n}`)) n++;
+    const name = await promptDialog('새 액션', '이름', `액션 ${n}`);
     if (!name) return;
     const a = { id: newId(), name: name.slice(0, 40), steps: [] };
     actions.push(a);

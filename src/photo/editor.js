@@ -42,6 +42,7 @@ import { installCore2, arrangeMenus } from './core2.js';
 import { installLearn } from './learn.js';
 import { installTheme, buildHome, rememberFile, recentMenu, keepDoc } from './psui.js';
 import { installArtboards } from './artboards.js';
+import { installSessionLock, blockedWhileBusy } from './session.js';
 
 const isMobile = () => document.body.classList.contains('mobile');
 const ZOOMS = [0.02, 0.05, 0.1, 0.167, 0.25, 0.333, 0.5, 0.667, 1, 1.5, 2, 3, 4, 6, 8, 12, 16, 32];
@@ -91,6 +92,13 @@ const toolOpts = loadPref('photo.opts', {});
 if ((toolOpts._v || 0) < 2) {
   toolOpts.move = { ...(toolOpts.move || {}), autoSelect: true, showTransform: true };
   toolOpts._v = 2;
+  savePref('photo.opts', toolOpts);
+}
+// once: the options bar's 압력: 크기 starts off, as in Photoshop (it used to start on, which kept the
+// Brush Settings panel's size control from working)
+if (toolOpts._v < 3) {
+  for (const o of Object.values(toolOpts)) if (o && typeof o === 'object' && o.pressureSize === true) o.pressureSize = false;
+  toolOpts._v = 3;
   savePref('photo.opts', toolOpts);
 }
 
@@ -1748,6 +1756,7 @@ export function createPhotoEditor(root) {
     // on a ruler: its units
     if (P.viewExtrasContext?.(e)) return;
     e.preventDefault();
+    if (P.busy?.() === 'crop') return;
     showMenu(P.contextMenu(), e.clientX, e.clientY);
   });
   // files dropped on the photo editor open as documents (or as layers with Shift)
@@ -1776,6 +1785,8 @@ export function createPhotoEditor(root) {
 
   window.addEventListener('keydown', (e) => {
     if (!document.body.classList.contains('photo-mode') || menusOpen()) return;
+    // Esc that just closed a menu doesn't also cancel the transform or the crop
+    if (e.key === 'Escape' && e.defaultPrevented) return;
     const tag = e.target?.tagName;
     if (tag === 'TEXTAREA' || (tag === 'INPUT' && !['checkbox', 'radio', 'range', 'button', 'color'].includes(e.target.type)) || tag === 'SELECT' || e.target?.isContentEditable) return;
     if (document.querySelector('.modal-backdrop')) return;
@@ -1787,6 +1798,8 @@ export function createPhotoEditor(root) {
       e.preventDefault();
       e.stopPropagation();
     };
+    // a transform or a crop is open: only its own keys, zoom and the screen work (session.js)
+    if (blockedWhileBusy(P, e, mod)) return done();
     if (P.viewKeys?.(e, mod)) return done();
     if (k === 'Space') {
       // Space: hand tool while held; with Ctrl (⌘) or Alt the zoom tool (in / out)
@@ -2106,6 +2119,8 @@ export function createPhotoEditor(root) {
     { label: '잘라낸 레이어 (선택 영역)', action: () => P.cmd.layerVia(true), disabled: !P.doc?.selection },
     { label: '칠…', action: () => D.fillDialog(P) },
   ];
+  // while a transform or a crop is open, what would change the document waits (session.js)
+  installSessionLock(P, { panels });
 
   // ---------------------------------------------------------------- autosave
 
@@ -2783,15 +2798,36 @@ function installCommands(P) {
     if (!need()) return;
     const { pickFiles } = await import('../ui/project-panel.js');
     const files = await pickFiles({ accept: IO.OPEN_ACCEPT, multiple: true });
+    let last = null;
     for (const f of files) {
       try {
         const isPsd = /\.ps[db]$/i.test(f.name);
         const sub = isPsd || /\.mphoto$/i.test(f.name) ? await IO.openFile(f) : null;
         const c = sub ? sub.flatten() : await IO.canvasFromFile(f);
-        C.placeEmbeddedCanvas(c, f.name.replace(/\.[^.]+$/, ''), sub);
+        const doc = P.doc;
+        const before = doc.capture();
+        const top = doc.history.undoStack.at(-1);
+        const name = f.name.replace(/\.[^.]+$/, '');
+        C.placeEmbeddedCanvas(c, name, sub);
+        last = doc.history.undoStack.at(-1) !== top ? { doc, before, name } : null;
       } catch (err) {
         toast(`${f.name}: 가져오지 못했습니다 (${err.message || err})`);
       }
+    }
+    // Photoshop: the placed picture comes with a transform box; Enter places it, Esc takes it back
+    if (!last || last.doc !== P.doc || P.transform) return;
+    const doc = last.doc;
+    doc.history.undoStack.pop();
+    try {
+      const t = new Transformer(P, { mode: 'free' });
+      t.before = last.before;
+      t.keep = true;
+      t.label = `포함 가져오기: ${last.name}`;
+      P.transform = t;
+      P.emit('transform');
+      P.emit('history');
+    } catch {
+      P.commit(`포함 가져오기: ${last.name}`, last.before);
     }
   };
 }

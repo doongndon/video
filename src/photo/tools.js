@@ -69,9 +69,11 @@ function dab(size, hardness, color, hard = false) {
 
 /** Falloff weight of a dab at distance d from its centre (radius r, hardness h). */
 const falloff = (d, r, h) => (d >= r ? 0 : d <= r * h ? 1 : 1 - (d - r * h) / Math.max(1e-6, r * (1 - h)));
-// the blur and sharpen tools' 3×3 kernel: rows, then columns, then weights (they add up to 10)
+// the sharpen tool's 3×3 kernel: rows, then columns, then weights (they add up to 10)
 const taps = [0, 0, 0, -1, 1, -1, -1, 1, 1, 0, -1, 1, 0, 0, -1, 1, -1, 1];
 const tapW = [4, 1, 1, 1, 1, 0.5, 0.5, 0.5, 0.5];
+// the blur tool's 5×5 kernel: these weights across and down (256 in all)
+const B5 = [1, 4, 6, 4, 1];
 
 // ---------------------------------------------------------------- strokes (brush, pencil, eraser, mask, clone, heal)
 
@@ -109,6 +111,9 @@ export class Stroke {
       this.ox = this.layer.x;
       this.oy = this.layer.y;
     }
+    // Photoshop: on 배경, or with the layer's transparency locked, the eraser paints the background colour
+    const l = this.layer;
+    this.eraseToBg = mode === 'erase' && !mt && (l.lockAlpha || (doc.layers[0] === l && !l.parent && l.kind === 'raster' && l.name === '배경'));
     const tc = this.g.canvas;
     this.buf = takeStrokeBuffer(tc.width, tc.height);
     this.bg = this.buf.getContext('2d');
@@ -244,6 +249,17 @@ export class Stroke {
       if (this.maskInvert) v = 1 - v;
       g.globalAlpha = 1;
       mixIntoMask(g, this.buf, v, this.o.opacity ?? 1);
+    } else if (this.eraseToBg) {
+      // the stroke's coverage in the background colour
+      const t = this.tint || (this.tint = makeCanvas(tc.width, tc.height));
+      const tg = t.getContext('2d');
+      tg.globalCompositeOperation = 'copy';
+      tg.drawImage(this.buf, x, y, w, h, x, y, w, h);
+      tg.globalCompositeOperation = 'source-in';
+      tg.fillStyle = this.E.bg;
+      tg.fillRect(x, y, w, h);
+      g.globalCompositeOperation = this.layer.lockAlpha ? 'source-atop' : 'source-over';
+      g.drawImage(t, x, y, w, h, x, y, w, h);
     } else {
       // o.blend: the brush's mode in the options bar (a canvas operation, set by brushes.js)
       g.globalCompositeOperation = this.mode === 'erase' ? 'destination-out' : this.layer.lockAlpha ? 'source-atop' : this.o.blend || 'source-over';
@@ -450,7 +466,8 @@ class Retouch {
       this.mark();
       return;
     }
-    const step = Math.max(1, this.o.size * 0.2);
+    // the smudge drags the colour along in small steps (bigger ones leave stripes, one per dab)
+    const step = Math.max(1, this.o.size * (this.kind === 'smudge' ? 0.04 : 0.2));
     const d = dist(this.last, p);
     const n = Math.max(1, Math.floor(d / step));
     for (let i = 1; i <= n; i++) {
@@ -514,24 +531,39 @@ class Retouch {
     const tone = (l) => (range === 'shadows' ? (1 - l) * (1 - l) : range === 'highlights' ? l * l : 1 - (2 * l - 1) * (2 * l - 1));
     const hard = this.o.hardness ?? 0.5;
     const sel = this.E.doc.selection ? this.E.selAlpha(x0 + this.layer.x, y0 + this.layer.y, w, h) : null;
-    for (let y = 1; y < h - 1; y++) {
-      for (let x = 1; x < w - 1; x++) {
+    // the blur reads two pixels around (5×5), the others one
+    const m = this.kind === 'blur' ? 2 : 1;
+    for (let y = m; y < h - m; y++) {
+      for (let x = m; x < w - m; x++) {
         let wgt = falloff(Math.hypot(x0 + x + 0.5 - cx, y0 + y + 0.5 - cy), r, hard) * k;
         if (sel) wgt *= sel[y * w + x] / 255;
         if (wgt <= 0) continue;
         const o = (y * w + x) * 4;
         if (this.kind === 'blur' || this.kind === 'sharpen') {
-          // the 3×3 average, weighted by opacity (the colour of see-through pixels doesn't count)
+          // the average around (blur: 5×5, about as soft as one pass of Photoshop's; sharpen: 3×3),
+          // weighted by opacity (the colour of see-through pixels doesn't count)
           let sa = 0;
           avg[0] = avg[1] = avg[2] = 0;
-          for (let n = 0; n < 9; n++) {
-            const q = o + (taps[n] * w + taps[n + 9]) * 4;
-            const wa = tapW[n] * src[q + 3];
-            sa += wa;
-            for (let c = 0; c < 3; c++) avg[c] += src[q + c] * wa;
+          if (m === 2) {
+            for (let j = 0; j < 5; j++) {
+              for (let i = 0; i < 5; i++) {
+                const q = o + ((j - 2) * w + i - 2) * 4;
+                const wa = B5[j] * B5[i] * src[q + 3];
+                sa += wa;
+                for (let c = 0; c < 3; c++) avg[c] += src[q + c] * wa;
+              }
+            }
+            avg[3] = sa / 256;
+          } else {
+            for (let n = 0; n < 9; n++) {
+              const q = o + (taps[n] * w + taps[n + 9]) * 4;
+              const wa = tapW[n] * src[q + 3];
+              sa += wa;
+              for (let c = 0; c < 3; c++) avg[c] += src[q + c] * wa;
+            }
+            avg[3] = sa / 10;
           }
           for (let c = 0; c < 3; c++) avg[c] = sa > 0 ? avg[c] / sa : src[o + c];
-          avg[3] = sa / 10;
           for (let c = 0; c < 4; c++) {
             let v = this.kind === 'blur' ? avg[c] : src[o + c] + (src[o + c] - avg[c]) * 1.5;
             if (this.kind === 'sharpen' && this.o.protectDetail) {
@@ -661,7 +693,7 @@ const BRUSH_OPTS = [
   ['hardness', '경도', 'range', 0, 100, 70, '%'],
   ['opacity', '불투명도', 'range', 1, 100, 100, '%'],
   ['flow', '흐름', 'range', 1, 100, 100, '%'],
-  ['pressureSize', '펜 압력 → 크기', 'bool', null, null, true],
+  ['pressureSize', '펜 압력 → 크기', 'bool', null, null, false],
 ];
 
 export function brushOpts(o, E, extra = {}) {
@@ -1049,7 +1081,8 @@ const SAMPLE_ALL_R = ['sampleAll', '모든 레이어 샘플링', 'bool', null, n
 function retouchTool(id, name, key, icon, kind, extra = [], strengthLabel = '강도') {
   return {
     id, name, key, icon, group: 'retouch', cursor: 'brush',
-    options: [['size', '크기', 'range', 1, 500, 60], ['strength', strengthLabel, 'range', 1, 100, 50, '%'], ['hardness', '경도', 'range', 0, 100, 40, '%'], ...extra],
+    // Photoshop's order: the mode (or the range) before the strength (exposure, flow)
+    options: [['size', '크기', 'range', 1, 500, 60], ...extra.filter((x) => x[0] === 'mode' || x[0] === 'range'), ['strength', strengthLabel, 'range', 1, 100, 50, '%'], ['hardness', '경도', 'range', 0, 100, 40, '%'], ...extra.filter((x) => x[0] !== 'mode' && x[0] !== 'range')],
     down(E, p) {
       const mk = E.maskTarget?.()?.kind;
       if (mk === 'quick' || mk === 'channel') {
@@ -2606,8 +2639,9 @@ export const TOOLS = [
           doc.touch(l);
           this.d.floating = true;
         }
-        // on the top layer nothing covers the gradient: it is drawn straight over the view
-        E.float = { layerId: l.id, canvas: gc, x: 0, y: 0, preview: true, viewOnly: top };
+        // on the top layer nothing covers the gradient: it is drawn straight over the view (not in a
+        // grayscale document, where the picture is made grey as it is put together)
+        E.float = { layerId: l.id, canvas: gc, x: 0, y: 0, preview: true, viewOnly: top && doc.mode !== 'gray' };
         if (!top) doc.rev++;
         E.redraw();
         return;

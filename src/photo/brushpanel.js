@@ -32,7 +32,7 @@ const BAR_REST = [
   ['flow', '흐름', 'range', 1, 100, 100, '%'],
   ['airbrush', '에어브러시', 'bool', null, null, false],
   ['smoothing', '보정', 'range', 0, 100, 10, '%'],
-  ['pressureSize', '압력: 크기', 'bool', null, null, true],
+  ['pressureSize', '압력: 크기', 'bool', null, null, false],
 ];
 /** Options-bar settings of the brush (Photoshop's order: size, mode, opacity, flow, airbrush, smoothing, pressure). */
 export const BRUSH_BAR = [['size', '크기', 'range', 1, 1000, 30, 'px'], ['hardness', '경도', 'range', 0, 100, 70, '%'], MODE_OPT, ...BAR_REST];
@@ -817,7 +817,7 @@ export function installBrushPanels(P) {
 
     const SECTIONS = [
       ['tip', '브러시 모양', null], ['shape', '모양', 'shapeDyn'], ['scatter', '분산', 'scatterOn'], ['texture', '텍스처', 'textureOn'],
-      ['dual', '이중 브러시', 'dualOn'], ['color', '색상', 'colorDyn'], ['transfer', '전송', 'transferOn'], ['noise', '노이즈', 'noise'],
+      ['dual', '이중 브러시', 'dualOn'], ['color', '색상', 'colorDyn'], ['transfer', '전송', 'transferOn'], ['pose', '브러시 자세', 'poseOn'], ['noise', '노이즈', 'noise'],
       ['wet', '젖은 가장자리', 'wetEdges'], ['buildup', '효과 쌓기', 'airbrush'], ['smooth', '보정', 'smoothingOn'], ['protect', '텍스처 보호', 'protectTexture'],
     ];
     const secList = h('div.bp-sections', SECTIONS.map(([sid, name, flag]) => {
@@ -876,6 +876,11 @@ export function installBrushPanels(P) {
       case 'transfer':
         body.push(R('opacityJitter', '불투명도 지터', 0, 100), ...Ctrl('opacityCtrl', 'opacityFade'), R('minOpacity', '최소', 0, 100), R('flowJitter', '흐름 지터', 0, 100), ...Ctrl('flowCtrl', 'flowFade'), R('minFlow', '최소', 0, 100));
         if (o.pressureOpacity) body.push(h('div.bp-note', '옵션 막대의 "압력: 불투명도"가 켜져 있으면 불투명도는 펜 압력을 따릅니다'));
+        break;
+      case 'pose':
+        body.push(B('poseTiltXOn', '기울기 X 무시'), R('poseTiltX', '기울기 X', -100, 100, ''), B('poseTiltYOn', '기울기 Y 무시'), R('poseTiltY', '기울기 Y', -100, 100, ''),
+          B('poseRotOn', '회전 무시'), R('poseRot', '회전', 0, 360, '°'), B('posePressureOn', '압력 무시'), R('posePressure', '압력', 1, 100),
+          h('div.bp-note', '펜의 기울기·회전·압력 대신 여기 값을 씁니다 (마우스로도). 모양·전송의 조절을 펜 기울기, 회전, 펜 압력으로 두었을 때 효과가 보입니다'));
         break;
       case 'noise':
         body.push(B('noise', '노이즈'), h('div.bp-note', '부드러운 가장자리에 거친 알갱이를 더합니다 (단단한 팁에는 거의 차이가 없습니다)'));

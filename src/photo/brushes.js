@@ -383,7 +383,11 @@ class PixelBrush {
     this.fx = fx;
     this.layer = E.doc.active;
     this.before = E.doc.capture();
-    this.g = E.doc.editPixels(this.layer, { x: 0, y: 0, w: E.doc.width, h: E.doc.height });
+    // the layer as it was before the stroke (editPixels works on a copy): the colours are sampled and
+    // matched there, so the next dab doesn't see what this stroke has already erased or recoloured
+    const l = this.layer;
+    this.prev = l.canvas ? { g: l.canvas.getContext('2d'), x: l.x, y: l.y } : null;
+    this.g = E.doc.editPixels(l, { x: 0, y: 0, w: E.doc.width, h: E.doc.height });
     this.last = null;
   }
 
@@ -424,7 +428,10 @@ class PixelBrush {
         wt[y * w + x] = v;
       }
     }
-    if (this.fx({ d: img.data, w, h: hh, wt, cx: Math.round(cx - x0), cy: Math.round(cy - y0) }, this) !== false) g.putImageData(img, x0, y0);
+    const L = this.layer;
+    // (outside the old canvas: transparent)
+    const src = this.prev ? this.prev.g.getImageData(x0 + L.x - this.prev.x, y0 + L.y - this.prev.y, w, hh).data : new Uint8ClampedArray(w * hh * 4);
+    if (this.fx({ d: img.data, src, w, h: hh, wt, cx: Math.round(cx - x0), cy: Math.round(cy - y0) }, this) !== false) g.putImageData(img, x0, y0);
   }
 
   end() {
@@ -434,7 +441,8 @@ class PixelBrush {
 
 /** Pixels of the dab that match `ref` within tolerance t (optionally only those joined to the centre). */
 function matchMask(c, ref, t, contiguous, protect = null) {
-  const { d, w, h: hh, wt } = c;
+  // the colours before the stroke
+  const { src: d, w, h: hh, wt } = c;
   const m = new Uint8Array(w * hh);
   const ok = (i) => {
     if (!wt[i] || d[i * 4 + 3] === 0) return false;
@@ -468,9 +476,10 @@ function sampleRef(E, c, br) {
   if (o.sampling === 'bg') return hexRgb(E.bg);
   if (o.sampling === 'once' && br.ref) return br.ref;
   const i = (clamp(c.cy, 0, c.h - 1) * c.w + clamp(c.cx, 0, c.w - 1)) * 4;
-  if (c.d[i + 3] === 0) return br.ref || null;
-  const ref = [c.d[i], c.d[i + 1], c.d[i + 2]];
-  if (o.sampling === 'once') br.ref = ref;
+  if (c.src[i + 3] === 0) return br.ref || null;
+  const ref = [c.src[i], c.src[i + 1], c.src[i + 2]];
+  // (continuous: the last colour found stands in while the hotspot is over transparency)
+  br.ref = ref;
   return ref;
 }
 
@@ -1026,6 +1035,8 @@ export function installBrushTools(P) {
       const o = { ...E.opts(def.id), label: def.name };
       o.hardness = (o.hardness ?? 70) / 100;
       this.br = new PixelBrush(E, o, (c, br) => def.fx(E, c, br));
+      // Photoshop: the background eraser turns 배경 into 레이어 0 (it can hold transparency then)
+      if (def.erases) E.doc.freeBackground(E.doc.active);
       this.br.to(p);
     },
     move(E, p) {
@@ -1044,7 +1055,7 @@ export function installBrushTools(P) {
   });
 
   const bgEraser = pixelTool({
-    id: 'bgEraser', name: '배경 지우개', key: 'E', icon: 'bgEraser',
+    id: 'bgEraser', name: '배경 지우개', key: 'E', icon: 'bgEraser', erases: true,
     options: [['size', '크기', 'range', 1, 500, 60], ['hardness', '경도', 'range', 0, 100, 80, '%'], ['tolerance', '허용치', 'range', 1, 100, 25, '%'], SAMPLING, LIMITS, ['protect', '전경색 보호', 'bool', null, null, false]],
     fx(E, c, br) {
       const ref = sampleRef(E, c, br);
@@ -1069,7 +1080,8 @@ export function installBrushTools(P) {
       for (let i = 0; i < m.length; i++) {
         if (!m[i]) continue;
         const o = i * 4;
-        let [hh, s, l] = rgbToHsl(c.d[o], c.d[o + 1], c.d[o + 2]);
+        // from the colour before the stroke: dabs that overlap aim at the same result (no rings)
+        let [hh, s, l] = rgbToHsl(c.src[o], c.src[o + 1], c.src[o + 2]);
         if (mode === 'color' || mode === 'hue') hh = fh;
         if (mode === 'color' || mode === 'saturation') s = fs;
         if (mode === 'luminosity') l = fl;
@@ -1096,6 +1108,8 @@ export function installBrushTools(P) {
       const m = SEL.magicWand(doc, src, p.x, p.y, { tolerance: o.tolerance, contiguous: o.contiguous });
       if (!m) return undefined;
       const before = doc.capture();
+      // Photoshop: 배경 becomes 레이어 0 (it can hold transparency then)
+      doc.freeBackground(l);
       if (doc.selection) {
         const mg = m.getContext('2d');
         mg.globalCompositeOperation = 'destination-in';

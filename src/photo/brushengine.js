@@ -394,7 +394,7 @@ const clipTo = (r, W, H) => {
 
 /** How a setting follows the pen or the stroke (Photoshop's 조절 menu). */
 export const CONTROLS = [['off', '끔'], ['fade', '희미하게'], ['pressure', '펜 압력'], ['tilt', '펜 기울기']];
-export const ANGLE_CONTROLS = [...CONTROLS, ['initial', '초기 방향'], ['direction', '방향']];
+export const ANGLE_CONTROLS = [...CONTROLS, ['rotation', '회전'], ['initial', '초기 방향'], ['direction', '방향']];
 export const TEXTURE_MODES = [['multiply', '곱하기'], ['subtract', '빼기'], ['darken', '어둡게 하기'], ['overlay', '오버레이'], ['colorDodge', '색상 닷지'], ['colorBurn', '색상 번'], ['linearBurn', '선형 번'], ['hardMix', '하드 혼합'], ['linearHeight', '선형 높이'], ['height', '높이']];
 export const DUAL_MODES = [['multiply', '곱하기'], ['darken', '어둡게 하기'], ['overlay', '오버레이'], ['colorDodge', '색상 닷지'], ['colorBurn', '색상 번'], ['linearBurn', '선형 번'], ['hardMix', '하드 혼합'], ['linearHeight', '선형 높이']];
 
@@ -416,6 +416,8 @@ export const DYN = {
   colorDyn: false, colorEachTip: true, fgbgJitter: 0, fgbgCtrl: 'off', fgbgFade: 25, hueJitter: 0, satJitter: 0, briJitter: 0, purity: 0,
   // transfer
   transferOn: false, opacityJitter: 0, opacityCtrl: 'off', opacityFade: 25, minOpacity: 0, flowJitter: 0, flowCtrl: 'off', flowFade: 25, minFlow: 0,
+  // brush pose: a pen's tilt, rotation and pressure set by hand (Photoshop's 무시 / override)
+  poseOn: false, poseTiltXOn: false, poseTiltX: 0, poseTiltYOn: false, poseTiltY: 0, poseRotOn: false, poseRot: 0, posePressureOn: false, posePressure: 100,
   // the rest
   noise: false, wetEdges: false, airbrush: false, smoothingOn: true, smoothing: 10, protectTexture: false,
 };
@@ -442,18 +444,19 @@ export function normDyn(o) {
 /** True when the plain round brush would look the same (no dynamics at all). */
 export function isPlainBrush(o) {
   const D = normDyn(o);
-  return (o.tip || 'round') === 'round' && !D.angle && D.roundness >= 100 && !D.flipX && !D.flipY && !D.shapeDyn && !D.scatterOn && !D.textureOn && !D.dualOn && !D.colorDyn && !D.transferOn && !D.noise && !D.wetEdges && !D.airbrush && !o.pressureOpacity;
+  return (o.tip || 'round') === 'round' && !D.angle && D.roundness >= 100 && !D.flipX && !D.flipY && !D.shapeDyn && !D.scatterOn && !D.textureOn && !D.dualOn && !D.colorDyn && !D.transferOn && !D.noise && !D.wetEdges && !D.airbrush && !o.pressureOpacity && !(D.poseOn && D.posePressureOn);
 }
 
 // ---------------------------------------------------------------- pen state
 
 /** The pen as last seen (tilt is not passed through Stroke, so it is read here). */
-const pen = { tiltX: 0, tiltY: 0, type: 'mouse' };
+const pen = { tiltX: 0, tiltY: 0, twist: 0, type: 'mouse' };
 if (typeof window !== 'undefined') {
   const seen = (e) => {
     pen.type = e.pointerType;
     pen.tiltX = e.tiltX || 0;
     pen.tiltY = e.tiltY || 0;
+    pen.twist = e.twist || 0;
   };
   window.addEventListener('pointerdown', seen, { capture: true, passive: true });
   window.addEventListener('pointermove', seen, { capture: true, passive: true });
@@ -609,8 +612,15 @@ export function createBrushRun({ o, bo, mode, fg, bg, isAlive = () => true }) {
   let wetM = null;
   const sized = (c, w, h) => (c && c.width >= w && c.height >= h ? c : makeCanvas(Math.max(w, c?.width || 0, 32), Math.max(h, c?.height || 0, 32)));
 
-  const pressureOf = (st) => clamp(st.pressure ?? 1, 0.02, 1);
-  const tilt = () => (pen.type === 'pen' ? clamp(1 - Math.hypot(pen.tiltX, pen.tiltY) / 90, 0, 1) : 1);
+  // brush pose: what is set by hand stands in for the pen (with a mouse too)
+  const pose = (on, v, pv) => (D.poseOn && D[on] ? v : pv);
+  const posePressure = D.poseOn && D.posePressureOn ? clamp(D.posePressure / 100, 0.02, 1) : null;
+  const pressureOf = (st) => posePressure ?? clamp(st.pressure ?? 1, 0.02, 1);
+  const tilted = () => pen.type === 'pen' || (D.poseOn && (D.poseTiltXOn || D.poseTiltYOn));
+  // tilt in degrees (the pose's −100…100 is −90°…90°)
+  const tiltX = () => pose('poseTiltXOn', D.poseTiltX * 0.9, pen.tiltX);
+  const tiltY = () => pose('poseTiltYOn', D.poseTiltY * 0.9, pen.tiltY);
+  const tilt = () => (tilted() ? clamp(1 - Math.hypot(tiltX(), tiltY()) / 90, 0, 1) : 1);
   const ctrl = (kind, fade, st) => {
     switch (kind) {
       case 'fade': return Math.max(0, 1 - (st0.n - 1) / Math.max(1, fade));
@@ -640,7 +650,8 @@ export function createBrushRun({ o, bo, mode, fg, bg, isAlive = () => true }) {
       case 'initial': a += st0.initDir ?? st.dir ?? 0; break;
       case 'fade': a += TAU * (1 - ctrl('fade', D.angleFade, st)); break;
       case 'pressure': a += TAU * pressureOf(st); break;
-      case 'tilt': a += pen.type === 'pen' ? Math.atan2(pen.tiltY, pen.tiltX) : 0; break;
+      case 'tilt': a += tilted() ? Math.atan2(tiltY(), tiltX()) : 0; break;
+      case 'rotation': a += (pose('poseRotOn', D.poseRot, pen.twist) * Math.PI) / 180; break;
       default:
     }
     if (D.angleJitter) a += (rnd() * 2 - 1) * Math.PI * (D.angleJitter / 100);

@@ -813,7 +813,8 @@ function thumb(P, l, which = 'content') {
   const S = thumbSize || 40;
   const c = h('canvas.ph-thumb', { width: S, height: S, style: S !== 40 ? { width: `${S}px`, height: `${S}px` } : null });
   const doc = P.doc;
-  const key = `${l.rev}:${which}:${doc.width}x${doc.height}:${S}`;
+  const gray = doc.mode === 'gray';
+  const key = `${l.rev}:${which}:${doc.width}x${doc.height}:${S}:${gray}`;
   const cache = thumbCache.get(l)?.[which];
   if (cache?.key === key && cache.doc === doc.id) {
     c.getContext('2d').drawImage(cache.c, 0, 0);
@@ -903,6 +904,13 @@ function thumb(P, l, which = 'content') {
     if (ct) {
       g.scale(s, s);
       g.drawImage(ct.canvas, ct.x, ct.y);
+    }
+    // Image ▸ Mode ▸ Grayscale: the layers show grey, as the picture does
+    if (gray && ct) {
+      const img = g.getImageData(0, 0, S, S);
+      const d = img.data;
+      for (let i = 0; i < d.length; i += 4) d[i] = d[i + 1] = d[i + 2] = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+      g.putImageData(img, 0, 0);
     }
   }
   g.restore();

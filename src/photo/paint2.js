@@ -282,14 +282,14 @@ export function installPaint2(P) {
 
   // ---- paint bucket: colour or pattern
   const bucket = TOOL_BY_ID.bucket;
-  bucket.options = [['fill', '칠', 'select', null, null, 'fg', [['fg', '전경색'], ['pattern', '패턴']]], ['pattern', '패턴', 'select', null, null, 'checker', patternList], ...bucket.options];
+  bucket.options = [['fill', '칠', 'select', null, null, 'fg', [['fg', '전경색'], ['pattern', '패턴']]], ['pattern', '패턴', 'select', null, null, 'bricks', patternList], ...bucket.options];
   P.patternStyle = (g, id) => g.createPattern(patternCanvas(id), 'repeat');
 
   // ---- pattern stamp
   const stamp = {
     id: 'patternStamp', name: '패턴 도장', key: 'S', icon: 'patternStamp', group: 'retouch', cursor: 'brush',
     // Photoshop's order: brush, mode, opacity, flow, airbrush, pattern, aligned, impressionist
-    options: [...BRUSH_BAR.filter((x) => x[0] !== 'pressureSize'), ['pattern', '패턴', 'select', null, null, 'checker', patternList], ['scale', '패턴 크기 (%)', 'range', 10, 400, 100],
+    options: [...BRUSH_BAR.filter((x) => x[0] !== 'pressureSize'), ['pattern', '패턴', 'select', null, null, 'bricks', patternList], ['scale', '패턴 크기 (%)', 'range', 10, 400, 100],
       ['aligned', '정렬', 'bool', null, null, true], ['impressionist', '인상파 효과', 'bool', null, null, false], ['pressureSize', '압력: 크기', 'bool', null, null, false]],
     leadButtons() {
       return P.brushOptionButtons?.('patternStamp') || [];

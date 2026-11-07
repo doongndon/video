@@ -258,7 +258,7 @@ export function liquifyDialog(P) {
   const undo = [];
 
   // st.size is the brush diameter in image pixels (as in Photoshop)
-  const st = { tool: 'warp', size: Math.max(4, Math.round(Math.min(W, H) / 6)), pressure: 50, density: 50, rate: 80, stylus: false, showMask: true, showMesh: false, showImage: true, pinEdges: false };
+  const st = { tool: 'warp', size: Math.max(4, Math.round(Math.min(W, H) / 6)), pressure: 100, density: 50, rate: 80, stylus: false, showMask: true, showMesh: false, showImage: true, pinEdges: false };
   const face = { box: null, pts: null, v: Object.fromEntries(FACE.map(([k]) => [k, 0])) };
   const view = h('canvas.lq-view', { width: 1, height: 1 });
   const vg = view.getContext('2d');
@@ -548,38 +548,42 @@ export function liquifyDialog(P) {
         let sy = y;
         const rate = st.rate / 80;
         switch (st.tool) {
-          case 'warp':
-            sx -= vx * wgt * pr * 1.6;
-            sy -= vy * wgt * pr * 1.6;
+          case 'warp': {
+            // at full pressure what is under the brush's middle goes along with the pointer (as in
+            // Photoshop), never past it; lower pressures let it trail behind
+            const k = wgt * (1 - (1 - pr) * (1 - pr));
+            sx -= vx * k;
+            sy -= vy * k;
             break;
+          }
           case 'pushLeft': {
-            const k = wgt * pr * 0.8 * (alt ? -1 : 1);
+            const k = wgt * pr * 0.4 * (alt ? -1 : 1);
             sx -= vy * k;
             sy += vx * k;
             break;
           }
           case 'twirl': {
-            const a = wgt * pr * 0.08 * rate * (alt ? -1 : 1);
+            const a = wgt * pr * 0.04 * rate * (alt ? -1 : 1);
             sx = cx + dx * Math.cos(a) + dy * Math.sin(a) - 0.5;
             sy = cy - dx * Math.sin(a) + dy * Math.cos(a) - 0.5;
             break;
           }
           case 'pucker':
           case 'bloat': {
-            const k = 1 + (st.tool === 'pucker' ? 1 : -1) * (alt ? -1 : 1) * wgt * pr * 0.06 * rate;
+            const k = 1 + (st.tool === 'pucker' ? 1 : -1) * (alt ? -1 : 1) * wgt * pr * 0.03 * rate;
             sx = cx + dx * k - 0.5;
             sy = cy + dy * k - 0.5;
             break;
           }
           case 'reconstruct': {
-            const k = wgt * pr * 0.25 * rate;
+            const k = wgt * pr * 0.125 * rate;
             nD[p * 2] = old[p * 2] * (1 - k);
             nD[p * 2 + 1] = old[p * 2 + 1] * (1 - k);
             continue;
           }
           case 'smooth': {
             // toward the average of the neighbours: smooths a bumpy distortion, keeps a smooth one
-            const k = wgt * pr * 0.5 * rate;
+            const k = wgt * pr * 0.25 * rate;
             let ax = 0;
             let ay = 0;
             let cnt = 0;
