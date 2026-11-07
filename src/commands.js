@@ -26,7 +26,7 @@ import {
 import { quickApi } from './ui/quick-panel.js';
 import { aiApi } from './ui/ai-panel.js';
 import {
-  openPasteAttributesDialog, openRemoveAttributesDialog, openFrameHoldOptionsDialog, openMarkerEditor, openAddTracksDialog, openDeleteTracksDialog,
+  openPasteAttributesDialog, openRemoveAttributesDialog, openFrameHoldOptionsDialog, openMarkerEditor, openAddTracksDialog, openDeleteTracksDialog, renderInToOut,
 } from './ui/timeline-dialogs.js';
 
 const inSource = () => store.ui.focusPanel === 'source' && sourceApi.hasMedia?.();
@@ -360,6 +360,12 @@ export const commands = {
   rippleTrimNext: () => edit.rippleTrimToPlayhead('next'),
   closeGaps: () => edit.closeAllGaps(),
   toggleSnap: () => timelineApi.toggleSnap?.(),
+  // 시작에서 끝까지 효과 렌더링 (Enter) and 렌더링 파일 삭제
+  renderEffects: () => renderInToOut(),
+  deleteRenderFiles: () => import('./render-cache.js').then((m) => {
+    m.deleteRenderFiles();
+    toast('이 시퀀스의 렌더링 파일을 지웠습니다');
+  }),
   toggleLinked: () => {
     store.ui.linkedSelection = !store.ui.linkedSelection;
     toast(`연결된 선택 ${store.ui.linkedSelection ? '켬' : '끔'}`);

@@ -1330,6 +1330,23 @@ export function createMulticamPanel() {
     grid.replaceChildren(...cells.map((c) => c.cell));
   }
 
+  /** Every angle fits in the panel (rows by height too), as in Premiere's multi-camera view. */
+  function fitTiles(inner, n) {
+    if (!n) return;
+    const cols = Math.ceil(Math.sqrt(n));
+    const rows = Math.ceil(n / cols);
+    const r = grid.getBoundingClientRect();
+    const aw = (r.width - 16 - 6 * (cols - 1)) / cols;
+    const ah = (r.height - 16 - 6 * (rows - 1)) / rows;
+    const w = Math.max(48, Math.floor(ah > 30 ? Math.min(aw, ((ah - 6) * inner.width) / inner.height + 6) : aw));
+    const tpl = `repeat(${cols}, ${w}px)`;
+    if (grid.style.gridTemplateColumns !== tpl) {
+      grid.style.gridTemplateColumns = tpl;
+      grid.style.justifyContent = 'center';
+      for (const c of cells) c.cell.style.aspectRatio = `${inner.width} / ${inner.height}`;
+    }
+  }
+
   function draw() {
     if (!visible) return;
     const mc = current();
@@ -1342,6 +1359,7 @@ export function createMulticamPanel() {
       return;
     }
     build(mc);
+    fitTiles(mc.inner, cells.length);
     const { clip, inner } = mc;
     const angle = clip.multicam?.angle || 1;
     const mt = mediaTimeAt(clip, store.ui.playhead);

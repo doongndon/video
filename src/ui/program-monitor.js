@@ -15,6 +15,7 @@ import { h, clamp, uid, formatTimecode, parseTimecode, downloadBlob, modKey } fr
 import { fitCanvasToBox, loadPref, savePref, toast, dnd, inlineEdit, showMenu, openModal, formRow, menusOpen } from './common.js';
 import { icon, iconButton } from './icons.js';
 import { exportFrame, exportFrameCanvas } from '../export.js';
+import { previewFrame } from '../render-cache.js';
 import { openExportFrameDialog } from './export-dialog.js';
 import { motionPath, rawSetPathKey, setAutoKey } from '../motionkeys.js';
 import { extendMenu } from './menubar.js';
@@ -480,7 +481,10 @@ export function createProgramMonitor() {
       frame.height = hh;
     }
     const ctx = frame.getContext('2d');
-    compositor.render(ctx, s, store.ui.playhead, playback.provider, { scale: w / s.width, background: opts.grid ? null : undefined });
+    // rendered preview frames (Enter) play instead of composing the effects live
+    const pre = playback.playing && !opts.grid ? previewFrame(s, store.ui.playhead) : null;
+    if (pre) ctx.drawImage(pre, 0, 0, w, hh);
+    else compositor.render(ctx, s, store.ui.playhead, playback.provider, { scale: w / s.width, background: opts.grid ? null : undefined });
     if (cmp.on) drawRef(s, w, hh);
     empty.hidden = Object.keys(s.clips).length > 0;
     drawOverlay();

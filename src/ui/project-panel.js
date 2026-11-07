@@ -55,6 +55,7 @@ injectStyle('pp-style', `
 @keyframes pp-flash { 0% { box-shadow: inset 0 0 0 2px var(--value); } 100% { box-shadow: inset 0 0 0 2px transparent; } }
 .media-item .thumb.poster { position: relative; }
 .media-item.bin .twisty { display: grid; place-items: center; }
+.media-item.bin input.bin-name { flex: 1; min-width: 0; height: calc(20px * var(--ui-scale)); padding: 0 4px; font: inherit; font-weight: 600; }
 .project-list.grid .media-item .meta { overflow: hidden; text-overflow: ellipsis; }
 .project-list.cols .media-item:not(.bin) > .thumb, .project-list.cols .media-item:not(.bin) > .name, .pp-head > span:first-child, .pp-head > button:nth-child(2) { position: sticky; z-index: 1; background: var(--bg-3); }
 .project-list.cols .media-item:not(.bin) > .thumb, .pp-head > span:first-child { left: 0; }
@@ -210,7 +211,7 @@ export function createProjectPanel() {
   });
   const importBtn = iconButton('import', '파일 가져오기 (Ctrl+I)', () => importDialog(), { label: '가져오기', cls: 'boxed' });
   const binBtn = iconButton('folderPlus', '새 저장소(폴더) 만들기', () => newBin());
-  const newBtn = iconButton('plus', '새 항목 (시퀀스, 조정 레이어, 바 및 톤, 블랙 비디오, 색상 매트, 카운트다운 리더, 투명 비디오)', (e) => {
+  const newBtn = iconButton('plus', '새 항목 (시퀀스, 조정 레이어, 바 및 톤, 블랙 비디오, 색상 매트, 카운팅 리더, 투명 비디오)', (e) => {
     const r = e.currentTarget.getBoundingClientRect();
     showMenu(newItemMenu(), r.left, r.bottom + 2);
   }, { label: '새 항목', cls: 'boxed' });
@@ -250,7 +251,7 @@ export function createProjectPanel() {
   list.addEventListener('contextmenu', (e) => {
     if (e.target !== list) return;
     e.preventDefault();
-    showMenu([{ label: '가져오기…', key: 'Ctrl+I', action: importDialog }, { label: '새 저장소(폴더)…', action: newBin }, { label: '새 항목', submenu: newItemMenu }, '-', ...sortMenu()], e.clientX, e.clientY);
+    showMenu([{ label: '가져오기…', key: 'Ctrl+I', action: importDialog }, { label: '새 저장소', key: `${isMac ? '⌘' : 'Ctrl+'}/`, action: newBin }, { label: '새 항목', submenu: newItemMenu }, '-', ...sortMenu()], e.clientX, e.clientY);
   });
   list.addEventListener('keydown', (e) => {
     if ((e.key === 'Delete' || e.key === 'Backspace') && store.ui.selectedMedia.size) {
@@ -258,7 +259,7 @@ export function createProjectPanel() {
       e.stopPropagation();
       clearSelected();
     }
-    if (e.key === 'Enter' && store.ui.selectedMedia.size) openInSource([...store.ui.selectedMedia][0]);
+    if (e.key === 'Enter' && store.ui.selectedMedia.size) activate([...store.ui.selectedMedia][0]);
   });
 
   function newItemMenu() {
@@ -268,7 +269,7 @@ export function createProjectPanel() {
       { label: '바 및 톤…', action: openBarsToneDialog },
       { label: '블랙 비디오', action: () => select(createSyntheticMedia('color', { name: '블랙 비디오', color: '#000000' })) },
       { label: '색상 매트…', action: openColorMatteDialog },
-      { label: '범용 카운트다운 리더…', action: openCountingLeaderDialog },
+      { label: '범용 카운팅 리더…', action: openCountingLeaderDialog },
       { label: '투명 비디오', action: () => select(createTransparentVideo()) },
       '-',
       { group: '그래픽 (재생헤드 위치)' },
@@ -299,16 +300,62 @@ export function createProjectPanel() {
   }
 
   // ---- bins
-  async function newBin() {
-    const n = await promptDialog('새 저장소', '저장소 이름', `저장소 ${Object.keys(store.project.bins || {}).length + 1}`);
-    if (!n) return;
+  // the bin whose name is being typed in place ({ id, mark }), like Premiere's new bin
+  let naming = null;
+
+  /** 새 저장소: made at once with its name field ready to type (Premiere); selected items go in. */
+  function newBin() {
+    const taken = new Set(Object.values(store.project.bins || {}).map((b) => b.name));
+    let n = 1;
+    while (taken.has(n > 1 ? `새 저장소 ${n}` : '새 저장소')) n++;
     const id = uid('bin');
     const ids = [...store.ui.selectedMedia];
-    store.transact('저장소 만들기', () => {
+    const mark = store.undoMark();
+    store.transact('새 저장소', () => {
       store.project.bins = store.project.bins || {};
-      store.project.bins[id] = { id, name: n };
+      store.project.bins[id] = { id, name: n > 1 ? `새 저장소 ${n}` : '새 저장소' };
       for (const mid of ids) if (store.project.media[mid]) store.project.media[mid].bin = id;
     });
+    showPanel('project', { quiet: true });
+    renameBin(id, mark);
+  }
+
+  /** Type a bin's name in place: Enter or clicking away keeps it, Esc leaves the name as it was. */
+  function renameBin(id, mark = null) {
+    naming = { id, mark };
+    filter = '';
+    search.value = '';
+    render();
+    const input = list.querySelector('.media-item.bin input.bin-name');
+    if (!input) {
+      naming = null;
+      return;
+    }
+    input.focus();
+    input.select();
+    input.closest('.media-item').scrollIntoView({ block: 'nearest' });
+    // a click anywhere else keeps the name, even where the press does not move focus (timeline)
+    const away = (e) => {
+      if (e.target !== input) input.blur();
+    };
+    window.addEventListener('pointerdown', away, true);
+    naming.away = away;
+  }
+
+  function finishNaming(value) {
+    if (!naming) return;
+    const { id, mark, away } = naming;
+    naming = null;
+    window.removeEventListener('pointerdown', away, true);
+    const bin = store.project.bins?.[id];
+    const name = value?.trim();
+    if (bin && name && name !== bin.name) {
+      store.transact('저장소 이름 바꾸기', () => { store.project.bins[id].name = name; });
+      // a new bin and its first name are one undo step
+      if (mark && store.undoStack.length === mark.depth + 2) store.squashSince(mark, '새 저장소');
+    }
+    lastSig = '';
+    render();
   }
 
   function moveToBin(ids, binId) {
@@ -353,6 +400,19 @@ export function createProjectPanel() {
     if (!m || !img) return toast('이미지를 아직 불러오지 못했습니다');
     const [{ canvasFromImage }, { openInPhoto }] = await Promise.all([import('../photo/io.js'), import('../mode.js')]);
     await openInPhoto(canvasFromImage(img), m.name.replace(/\.[^.]+$/, ''), id);
+  }
+
+  /** Double-click / Enter on an item: a sequence opens in the timeline, a colour matte asks for its
+   * colour (Premiere), offline media asks for its file, the rest opens in the Source monitor. */
+  function activate(id) {
+    const m = store.project.media[id];
+    if (!m) return;
+    const st = mediaStatus(id);
+    if (m.kind === 'sequence') return store.openSequence(m.sequenceId);
+    if (m.kind === 'color') return isTransparentColor(m.color) ? null : changeColor(id);
+    if (m.kind === 'adjustment') return;
+    if (st === 'offline' || st === 'error') return relinkOne(fileIdOf(id));
+    openInSource(id);
   }
 
   function openInSource(id) {
@@ -466,6 +526,11 @@ export function createProjectPanel() {
   }
 
   function render() {
+    // typing a bin name: wait (a re-render would drop the field); finishNaming() renders
+    if (naming && list.querySelector('input.bin-name') === document.activeElement) {
+      lastSig = '';
+      return;
+    }
     const proj = store.project;
     const bins = proj.bins || {};
     const cols = useColumns();
@@ -500,7 +565,21 @@ export function createProjectPanel() {
   function renderBin(bin, count) {
     const closed = closedBins.has(bin.id) && !filter;
     const twisty = h('span.twisty', icon(closed ? 'chevronRight' : 'chevronDown', 14));
-    const el = h('div.media-item.bin', { title: `${bin.name} — 항목을 끌어다 놓아 넣기` }, twisty, h('div.name', icon('folder'), bin.name), h('div.meta', `${count}개`));
+    let label = bin.name;
+    if (naming?.id === bin.id) {
+      label = h('input.bin-name', { type: 'text', value: bin.name, 'aria-label': '저장소 이름', spellcheck: false });
+      let done = false;
+      const finish = (v) => { if (!done) { done = true; finishNaming(v); } };
+      label.addEventListener('keydown', (e) => {
+        e.stopPropagation();
+        if (e.isComposing) return;
+        if (e.key === 'Enter') finish(label.value);
+        else if (e.key === 'Escape') finish(null);
+      });
+      label.addEventListener('blur', () => finish(label.value));
+      for (const ev of ['click', 'pointerdown', 'dblclick', 'contextmenu']) label.addEventListener(ev, (e) => e.stopPropagation());
+    }
+    const el = h('div.media-item.bin', { title: `${bin.name} — 항목을 끌어다 놓아 넣기` }, twisty, h('div.name', icon('folder'), label), h('div.meta', `${count}개`));
     const toggle = () => {
       if (closedBins.has(bin.id)) closedBins.delete(bin.id);
       else closedBins.add(bin.id);
@@ -525,10 +604,7 @@ export function createProjectPanel() {
     el.addEventListener('contextmenu', (e) => {
       e.preventDefault();
       showMenu([
-        { label: '이름 바꾸기…', action: async () => {
-          const n = await promptDialog('저장소 이름 바꾸기', '이름', bin.name);
-          if (n) store.transact('저장소 이름 바꾸기', () => { if (store.project.bins[bin.id]) store.project.bins[bin.id].name = n; });
-        } },
+        { label: '이름 바꾸기', action: () => renameBin(bin.id) },
         { label: '저장소 삭제 (안의 항목은 남김)', action: () => deleteBin(bin.id) },
       ], e.clientX, e.clientY);
     });
@@ -634,12 +710,7 @@ export function createProjectPanel() {
       render();
       store.emit('media-selection');
     });
-    el.addEventListener('dblclick', () => {
-      if (m.kind === 'sequence') return store.openSequence(m.sequenceId);
-      if (m.kind === 'color' || m.kind === 'adjustment') return;
-      if (st === 'offline' || st === 'error') return relinkOne(fileIdOf(id));
-      openInSource(id);
-    });
+    el.addEventListener('dblclick', () => activate(id));
     el.addEventListener('dragstart', (e) => {
       if (!store.ui.selectedMedia.has(id)) {
         store.ui.selectedMedia.clear();
@@ -675,7 +746,7 @@ export function createProjectPanel() {
         { label: '(맨 위 — 저장소 밖)', checked: !m.bin, action: () => moveToBin(selIds, null) },
         ...bins.map((b) => ({ label: b.name, checked: m.bin === b.id, action: () => moveToBin(selIds, b.id) })),
         '-',
-        { label: '새 저장소 만들어 옮기기…', action: newBin },
+        { label: '새 저장소 만들어 옮기기', action: newBin },
       ] },
     ];
     if (m.kind === 'sequence') {
@@ -876,7 +947,7 @@ export function createProjectPanel() {
 }
 
 // 파일 ▸ 새로 만들기 (Premiere's File ▸ New), in Premiere's order
-const NEW_ORDER = ['프로젝트', '시퀀스', '클립에서', '저장소', '검색 저장소', '오프라인 파일', '조정 레이어', '바 및 톤', '블랙 비디오', '캡션', '색상 매트', '범용 카운트다운 리더', '투명 비디오'];
+const NEW_ORDER = ['프로젝트', '시퀀스', '클립에서', '저장소', '검색 저장소', '오프라인 파일', '조정 레이어', '바 및 톤', '블랙 비디오', '캡션', '색상 매트', '범용 카운팅 리더', '투명 비디오'];
 const newKey = (label) => String(label || '').replace(/\s+|…|\.\.\.|\(.*?\)/g, '');
 const newRank = (it) => {
   const k = newKey(it?.label);
@@ -890,7 +961,7 @@ const fileNewItems = () => [
   { label: '바 및 톤…', action: openBarsToneDialog },
   { label: '블랙 비디오', action: () => projectApi.reveal?.(createSyntheticMedia('color', { name: '블랙 비디오', color: '#000000' })) },
   { label: '색상 매트…', action: openColorMatteDialog },
-  { label: '범용 카운트다운 리더…', action: openCountingLeaderDialog },
+  { label: '범용 카운팅 리더…', action: openCountingLeaderDialog },
   { label: '투명 비디오', action: () => projectApi.reveal?.(createTransparentVideo()) },
 ];
 

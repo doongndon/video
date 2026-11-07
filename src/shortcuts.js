@@ -150,6 +150,11 @@ export function installShortcuts() {
       case 'F1': run = c.shortcuts; break;
       case 'Slash': run = shift ? c.shortcuts : c.markSelection; break;
       case 'Escape': run = c.deselectAll; break;
+      case 'Enter':
+      case 'NumpadEnter':
+        // 시작에서 끝까지 효과 렌더링; Enter on a button, list or menu keeps its own meaning
+        if (!mod && !alt && !shift && !e.defaultPrevented && !e.target?.closest?.('button, a, select, [role=button], [role=menuitem], [tabindex]:not(canvas), .project-list, .modal-backdrop')) run = c.renderEffects;
+        break;
       default:
         // multicam angles: 1-9 (top row or keypad)
         if (!mod && !alt && !shift && /^(Digit|Numpad)[1-9]$/.test(code)) {

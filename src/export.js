@@ -915,6 +915,33 @@ export async function exportFrameCanvas(t = store.ui.playhead) {
   return canvas;
 }
 
+/**
+ * Draw sequence frames for preview rendering (시작에서 끝까지 렌더링): frame numbers in, a JPEG per
+ * frame out through onFrame(i, blob). Returns false when cancelled (token.cancelled).
+ */
+export async function renderPreviewFrames(seq, frames, outW, token, onFrame) {
+  const canvas = document.createElement('canvas');
+  canvas.width = outW;
+  canvas.height = Math.max(2, Math.round((outW * seq.height) / seq.width));
+  const ctx = canvas.getContext('2d');
+  const compositor = new Compositor();
+  const provider = new ExportProvider(outW);
+  try {
+    await preloadFonts(seq);
+    for (let i = 0; i < frames.length; i++) {
+      if (token.cancelled) return false;
+      const t = frames[i] / seq.fps;
+      await provider.prepare(seq, t);
+      compositor.render(ctx, seq, t, provider, { scale: outW / seq.width });
+      const blob = await new Promise((res) => canvas.toBlob(res, 'image/jpeg', 0.88));
+      if (blob) await onFrame(i, blob);
+    }
+  } finally {
+    await provider.close();
+  }
+  return true;
+}
+
 // ---------------------------------------------------------------- GIF
 
 async function exportGifFrames(seq, start, end, outW, outH, fps, token, progress, maxQuality = false) {

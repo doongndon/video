@@ -101,9 +101,22 @@ const PREF = 'keymap.custom';
 let custom = loadPref(PREF, {}) || {};
 let byCombo = null;
 
+let released = null;
+
 function saveCustom() {
   savePref(PREF, custom);
   byCombo = null;
+  released = null;
+}
+
+/** Default keys of commands the person moved to another key (or cleared): they no longer run them. */
+function releasedKeys() {
+  if (!released) {
+    released = new Set();
+    if (Object.keys(custom).length) for (const x of menuCommands()) if (x.id in custom && x.key) released.add(normCombo(x.key));
+    for (const k of comboMap().keys()) released.delete(k);
+  }
+  return released;
 }
 
 /** A shortcut the person assigned to the menu item at `path` (labels) in `menu`, as shown. */
@@ -176,6 +189,8 @@ export function installKeymap() {
     // shortcuts the person assigned in the dialog come first
     const id = comboMap().get(combo);
     if (id) done = runItem(findCommand(id)?.item) || true;
+    // a default key whose command now has another key does nothing (as in Premiere)
+    else if (releasedKeys().has(combo)) done = true;
     else if (e.repeat) return;
     else if (combo === 'Shift+`') {
       toggleMaximize({ active: true });

@@ -185,7 +185,7 @@ export function openNewSequenceDialog() {
   });
 }
 
-/** Shared progress UI for items that are rendered into a file (바 및 톤, 카운트다운 리더). */
+/** Shared progress UI for items that are rendered into a file (바 및 톤, 카운팅 리더). */
 function generateWithProgress(modal, run) {
   const btn = modal.footer.querySelector('button.primary');
   const prog = modal.prog;
@@ -249,7 +249,7 @@ export function openBarsToneDialog() {
   });
 }
 
-/** 범용 카운트다운 리더: 8 → 2 countdown with a clock wipe and cue blips. */
+/** 범용 카운팅 리더: 8 → 2 countdown with a clock wipe and cue blips. */
 export async function openCountingLeaderDialog() {
   const { LEADER_DEFAULTS, LEADER_SECONDS } = await import('../generated-media.js');
   const s = store.seq;
@@ -266,7 +266,7 @@ export async function openCountingLeaderDialog() {
   const status = note('');
   const token = { cancelled: false };
   const modal = openModal({
-    title: '범용 카운트다운 리더 설정',
+    title: '범용 카운팅 리더 설정',
     width: '520px',
     body: [...size.rows,
       formRow('와이프 색상', c.wipe), formRow('배경 색상', c.background), formRow('선 색상', c.line), formRow('대상 색상', c.target), formRow('숫자 색상', c.numeral),

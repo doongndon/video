@@ -1,5 +1,5 @@
 // Generated project items like Premiere's 새 항목: HD 바 및 톤 (SMPTE colour bars + 1 kHz tone),
-// 범용 카운트다운 리더 (8 → 2 countdown with a clock wipe and cue blips) and 투명 비디오.
+// 범용 카운팅 리더 (8 → 2 countdown with a clock wipe and cue blips) and 투명 비디오.
 // Bars and leaders are rendered into a real video file (WebCodecs via mediabunny: MP4 H.264, else
 // WebM VP8) and imported, so playback, export and autosave treat them like any other file.
 
@@ -229,7 +229,7 @@ function leaderAudio(fps, o) {
   return buf;
 }
 
-/** 범용 카운트다운 리더: opts { width, height, fps, ...colours, blip flags, onProgress, token }. */
+/** 범용 카운팅 리더: opts { width, height, fps, ...colours, blip flags, onProgress, token }. */
 export async function createCountingLeader({ width = store.seq.width, height = store.seq.height, fps = store.seq.fps, onProgress, token, ...colours } = {}) {
   const o = { ...LEADER_DEFAULTS, ...colours };
   const [w, h] = fitSize(width, height, 1280);
@@ -239,7 +239,7 @@ export async function createCountingLeader({ width = store.seq.width, height = s
     audio: leaderAudio(fps, o),
     drawFrame: (ctx, t) => drawLeaderFrame(ctx, w, h, t, o),
   });
-  return importGenerated(blob, '범용 카운트다운 리더', '새 범용 카운트다운 리더');
+  return importGenerated(blob, '범용 카운팅 리더', '새 범용 카운팅 리더');
 }
 
 // ---------------------------------------------------------------- transparent video

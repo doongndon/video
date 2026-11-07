@@ -152,10 +152,15 @@ function splitAllAt(trackIds, t, exceptIds = new Set()) {
 function splitGroup(clips, t) {
   const newLink = uid('link');
   const rights = [];
+  // only one side of a linked pair is cut (overwrite on one track, Alt+razor): both halves stay
+  // linked to the uncut partner, as in Premiere
+  const ids = new Set(clips.map((c) => c.id));
+  const partial = (c) => c.linkId && Object.values(seq().clips).some((o) => o.linkId === c.linkId && !ids.has(o.id));
   for (const c of clips) {
+    const keep = partial(c);
     const r = rawSplit(c, t);
     if (r) {
-      if (c.linkId) r.linkId = newLink;
+      if (c.linkId && !keep) r.linkId = newLink;
       rights.push(r);
     }
   }
@@ -841,6 +846,43 @@ export function unlinkClips(ids) {
   });
 }
 
+/**
+ * Out of sync (Premiere's red numbers on a clip): seconds this clip sits later (+) or earlier (-)
+ * than its linked partner of the other kind from the same file, or 0 when in sync.
+ */
+export function syncOffset(c, s = seq()) {
+  if (!c?.linkId || !c.mediaId || c.hold || c.reverse) return 0;
+  const mates = Object.values(s.clips).filter((o) => o.linkId === c.linkId && o.id !== c.id && (o.kind === 'audio') !== (c.kind === 'audio') && o.mediaId === c.mediaId && !o.hold && !o.reverse && Math.abs(o.speed - c.speed) < 1e-6);
+  const p = mates.find((o) => o.start < clipEnd(c) && clipEnd(o) > c.start) || mates[0];
+  if (!p) return 0;
+  const d = (mediaTimeAt(p, c.start) - mediaTimeAt(c, c.start)) / c.speed;
+  return Math.abs(d) < fd() / 2 ? 0 : q(d);
+}
+
+/** 동기화 위치로 이동 / 밀어넣어 동기화 (Premiere's Move / Slip into Sync) for out-of-sync clips. */
+export function fixSync(ids, how = 'move') {
+  const s = seq();
+  const clips = ids.map((id) => s.clips[id]).filter((c) => c && syncOffset(c) && !isLocked(c.trackId));
+  if (!clips.length) return;
+  let short = 0;
+  store.transact(how === 'move' ? '동기화 위치로 이동' : '밀어넣어 동기화', () => {
+    for (const c of clips) {
+      const d = syncOffset(c);
+      if (!d) continue;
+      if (how === 'move') rawMoveClips([c.id], -d, 0, 0, { mode: 'overwrite' });
+      else {
+        // slip: the same place on the timeline shows the partner's frame (kept inside the file)
+        const m = media(c.mediaId);
+        const max = m && Number.isFinite(m.duration) ? m.duration - (sourceOut(c) - c.inPoint) : Infinity;
+        const want = c.inPoint + d * c.speed;
+        c.inPoint = clamp(want, 0, Math.max(0, max));
+        if (Math.abs(c.inPoint - want) > 1e-6) short++;
+      }
+    }
+  });
+  if (short) store.toast('파일 앞뒤 여유가 모자라 끝까지 밀어넣지 못했습니다. 클립을 조금 다듬은 뒤 다시 하세요');
+}
+
 export function renameClip(id, name) {
   store.transact('이름 바꾸기', () => {
     const c = seq().clips[id];
@@ -1070,6 +1112,8 @@ export function rawRetimeRemap(st) {
       const cNew = remapIntegral(mid, b) - remapIntegral(mid, a);
       ratio.push(cOld > MIN && cNew > MIN ? cOld / cNew : 1);
     }
+    // unchanged speeds (a drag back to where it began): exactly the old keys, no rounding drift
+    if (ratio.every((x) => Math.abs(x - 1) < 1e-9)) for (let i = 0; i < ratio.length; i++) ratio[i] = 1;
     // new positions: clip start stays at 0, stretches before it extend backwards, after it forwards
     const pos = new Array(pts.length);
     const z = pts.indexOf(0);
@@ -1492,9 +1536,10 @@ export function setTrackValue(trackId, key, value) {
 
 // ---------------------------------------------------------------- markers / in-out
 
-function makeMarker(t, props, n) {
+/** A new marker; like Premiere's it has no name until one is typed. */
+function makeMarker(t, props) {
   return {
-    id: uid('mk'), time: t, duration: Math.max(0, props.duration || 0), name: props.name ?? `마커 ${n + 1}`,
+    id: uid('mk'), time: t, duration: Math.max(0, props.duration || 0), name: props.name ?? '',
     color: props.color || '#4ade80', comment: props.comment || '', type: props.type || 'comment',
   };
 }
@@ -1506,7 +1551,7 @@ export function addMarker(t = store.ui.playhead, props = {}) {
   if (s.markers.some((m) => Math.abs(m.time - t) < EPS)) return null;
   let id = null;
   store.transact(props.type === 'chapter' ? '챕터 마커 추가' : '마커 추가', () => {
-    const mk = makeMarker(t, props, s.markers.length);
+    const mk = makeMarker(t, props);
     s.markers.push(mk);
     s.markers.sort((a, b) => a.time - b.time);
     id = mk.id;
@@ -1525,7 +1570,7 @@ export function addClipMarker(clipIds, t = store.ui.playhead, props = {}) {
       c.markers = c.markers || [];
       const tl = clamp(q(t) - c.start, 0, c.duration);
       if (c.markers.some((m) => Math.abs(m.time - tl) < EPS)) continue;
-      const mk = makeMarker(tl, props, c.markers.length);
+      const mk = makeMarker(tl, props);
       c.markers.push(mk);
       c.markers.sort((a, b) => a.time - b.time);
       out.push(mk.id);
@@ -1620,7 +1665,19 @@ export function updateSequenceSettings({ width, height, fps, name }) {
     if (name) s.name = name;
     s.width = width;
     s.height = height;
+    const fpsChanged = Math.abs(fps - s.fps) > 1e-6;
     s.fps = fps;
+    // a new frame rate: clip edges, markers and In / Out move to the nearest frame of the new rate
+    if (fpsChanged) {
+      for (const c of Object.values(s.clips)) {
+        const end = q(c.start + c.duration);
+        c.start = q(c.start);
+        c.duration = Math.max(fd(), end - c.start);
+      }
+      for (const m of s.markers || []) m.time = q(m.time);
+      if (s.inPoint != null) s.inPoint = q(s.inPoint);
+      if (s.outPoint != null) s.outPoint = q(s.outPoint);
+    }
     // keep relative positions of motion params
     for (const c of Object.values(s.clips)) {
       const motion = c.effects.find((e) => e.type === 'motion');
@@ -2136,6 +2193,39 @@ export function rawRateStretch(c, edge, newDuration) {
  * 선택한 편집점을 재생 헤드로 확장 (E): the nearer edge of each selected clip moves to the playhead
  * (a normal trim, limited by the media and the neighbouring clips).
  */
+function extendPointToPlayhead(clips, { edge, mode }, t) {
+  const s = seq();
+  const ripple = mode === 'ripple';
+  const partners = ripple ? [] : clips.map((c) => (edge === 'out' ? nextAdjacent(s, c) : prevAdjacent(s, c))).filter((p) => p && !isLocked(p.trackId));
+  if (!ripple && !partners.length) mode = 'normal';
+  const c0 = clips[0];
+  const want = edge === 'in' ? t - c0.start : t - clipEnd(c0);
+  let min = -Infinity;
+  let max = Infinity;
+  for (const c of clips) {
+    const lim = trimLimits(c, edge, { ripple, rolling: mode === 'rolling' });
+    min = Math.max(min, lim.min);
+    max = Math.min(max, lim.max);
+  }
+  for (const p of partners) {
+    const lim = trimLimits(p, edge === 'out' ? 'in' : 'out', { rolling: true });
+    min = Math.max(min, lim.min);
+    max = Math.min(max, lim.max);
+  }
+  // a ripple of the head keeps the clip where it starts: the frame at the playhead becomes its first
+  const d = min > max ? 0 : clamp(want, min, max);
+  if (Math.abs(d) < EPS) return 0;
+  store.transact('편집점을 재생 헤드로 확장', () => {
+    if (ripple) rawRippleTrim(clips, edge, d);
+    else {
+      for (const c of clips) rawTrimEdge(c, edge, d);
+      if (mode === 'rolling') for (const p of partners) rawTrimEdge(p, edge === 'out' ? 'in' : 'out', d);
+    }
+  });
+  if (ripple && edge === 'in') store.setPlayhead(c0.start);
+  return clips.length;
+}
+
 export function extendToPlayhead() {
   const t = q(store.ui.playhead);
   const s = seq();
@@ -2147,6 +2237,8 @@ export function extendToPlayhead() {
     store.toast('늘리거나 줄일 클립이나 편집점을 먼저 선택하세요');
     return 0;
   }
+  // a ripple (yellow) or rolling (both sides) edit point is extended the same way it was clicked
+  if (fromPoint && (fromPoint.mode === 'ripple' || fromPoint.mode === 'rolling')) return extendPointToPlayhead(clips, fromPoint, t);
   let n = 0;
   store.transact('편집점을 재생 헤드로 확장', () => {
     for (const c of clips) {

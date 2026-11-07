@@ -352,3 +352,57 @@ export function openDeleteTracksDialog() {
     ],
   });
 }
+
+// ---------------------------------------------------------------- 렌더링
+
+/**
+ * 시작에서 끝까지 효과 렌더링 (Enter): render the yellow / red stretches between In and Out (all of the
+ * sequence without them) with a progress window, then play the range like Premiere.
+ */
+export async function renderInToOut() {
+  const [{ renderRange, framesToRender, previewWidth, storeFrame }, { renderPreviewFrames }, { playback }] = await Promise.all([
+    import('../render-cache.js'), import('../export.js'), import('../playback.js'),
+  ]);
+  const seq = store.seq;
+  const [t0, t1] = renderRange(seq);
+  const todo = framesToRender(seq, t0, t1);
+  const playRange = () => {
+    store.setPlayhead(t0);
+    if (seq.inPoint != null || seq.outPoint != null) playback.playInToOut();
+    else playback.play(1);
+  };
+  if (!todo.length) {
+    toast('렌더링할 구간이 없습니다 (효과가 없는 구간은 렌더링 없이 재생됩니다)');
+    return playRange();
+  }
+  playback.stop?.();
+  const token = { cancelled: false };
+  const bar = h('div');
+  const label = h('div', `프레임 0 / ${todo.length}`);
+  const dlg = openModal({
+    title: '렌더링',
+    body: h('div', { style: { minWidth: '320px' } }, h('div', { style: { marginBottom: '8px' } }, `${formatTimecode(t0, seq.fps)} ~ ${formatTimecode(t1, seq.fps)} 효과 렌더링 중`), h('div.progress', bar), label),
+    buttons: [{ label: '취소', action: () => { token.cancelled = true; } }],
+    onClose: () => { token.cancelled = true; },
+  });
+  const started = performance.now();
+  let done = false;
+  try {
+    done = await renderPreviewFrames(seq, todo.map((x) => x.f), previewWidth(seq), token, async (i, blob) => {
+      storeFrame(seq, todo[i].f, todo[i].sig, blob);
+      if (i % 4 === 0 || i === todo.length - 1) {
+        bar.style.width = `${Math.round(((i + 1) / todo.length) * 100)}%`;
+        const left = ((performance.now() - started) / (i + 1)) * (todo.length - i - 1);
+        label.textContent = `프레임 ${i + 1} / ${todo.length} · 남은 시간 약 ${Math.ceil(left / 1000)}초`;
+        store.emit('render-files');
+        await new Promise((r) => setTimeout(r, 0));
+      }
+    });
+  } catch (err) {
+    console.error(err);
+    toast(`렌더링하지 못했습니다: ${err.message || err}`);
+  }
+  dlg.close();
+  store.emit('render-files');
+  if (done) playRange();
+}

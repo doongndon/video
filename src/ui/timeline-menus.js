@@ -40,6 +40,9 @@ extendMenu('클립', (items) => [
 ]);
 
 extendMenu('시퀀스', (items) => [...items,
+  { label: '시작에서 끝까지 효과 렌더링', key: 'Enter', action: c.renderEffects },
+  { label: '시작에서 끝까지 렌더링', action: c.renderEffects },
+  { label: '렌더링 파일 삭제', action: c.deleteRenderFiles },
   { label: '선택한 편집점을 재생 헤드로 확장', key: 'E', disabled: !has(), action: c.extendEdit },
   { label: '트랙 추가…', action: c.addTracks },
   { label: '트랙 삭제…', action: c.deleteTracks },

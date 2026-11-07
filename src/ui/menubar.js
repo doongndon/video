@@ -68,7 +68,7 @@ const norm = (s) => String(s || '').replace(/\s+|…|\.\.\.|\(.*?\)/g, '').toLow
  */
 const PLACE = {
   '파일': [
-    [/막대|톤|카운트다운|투명 비디오|색상 매트|블랙 비디오|조정 레이어|오프라인 파일|^저장소|검색 저장소|^캡션|^시퀀스|클립에서|^새 /, { into: '새로 만들기' }],
+    [/막대|톤|카운트다운|카운팅 리더|투명 비디오|색상 매트|블랙 비디오|조정 레이어|오프라인 파일|^저장소|검색 저장소|^캡션|^시퀀스|클립에서|^새 /, { into: '새로 만들기' }],
     [/^미디어|^프레임|^마커|^EDL|^XML|^AAF|^OMF|^오디오만|^동작 그래픽|^캡션 내보내기/, { into: '내보내기' }],
   ],
   '편집': [
@@ -398,7 +398,7 @@ function videoMenus() {
         ],
       } : null,
       '-',
-      { label: '활성화', key: 'Shift+E', checked: has() && sel()[0].enabled !== false, disabled: !has(), action: c.toggleEnable },
+      { label: '사용', key: 'Shift+E', checked: has() && sel()[0].enabled !== false, disabled: !has(), action: c.toggleEnable },
       { label: linkedSel() ? '연결 해제' : '연결', key: `${mod}L`, disabled: !has() || (!linkedSel() && sel().length < 2), action: c.linkToggle },
       c.group ? { label: '그룹', key: `${mod}G`, disabled: sel().length < 2, action: c.group } : null,
       c.ungroup ? { label: '그룹 해제', key: `${mod}Shift+G`, disabled: !sel().some((x) => x.groupId), action: c.ungroup } : null,

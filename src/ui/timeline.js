@@ -11,6 +11,7 @@ import {
 } from '../model.js';
 import { EFFECTS, TRANSITIONS } from '../effects.js';
 import { trackWindows } from '../compositor.js';
+import { renderSegments, renderedRuns } from '../render-cache.js';
 import { h, clamp, EPS, formatTimecode, parseTimecode, snapFrame, dbToGain, modKey } from '../util.js';
 import { showMenu, loadPref, savePref, fitCanvasToBox, promptDialog, toast, dnd, inlineEdit, uiScale } from './common.js';
 import { openSpeedDialog, openExtractAudioDialog } from './dialogs.js';
@@ -25,6 +26,8 @@ const RULER_H = 34;
 const MIN_TRACK_H = 24;
 const MAX_TRACK_H = 320;
 const DIVIDER_H = 6;
+// speed band drag: the speed is multiplied by this per pixel (100 % -> 200 % in about 70 px)
+const SPEED_PER_PX = 1.01;
 const SNAP_PX = 8;
 const EDGE_PX = 7;
 const EDGE_PX_TOUCH = 18;
@@ -692,6 +695,21 @@ export function createTimeline() {
       ctx.fillText('fx', labelX, y + nameH - fpx(4));
       labelX += fpx(15);
     }
+    // out of sync with its linked partner: a red box with the offset (Premiere)
+    const off = c.linkId && !ghost ? edit.syncOffset(c) : 0;
+    if (off && w > 30) {
+      const f = Math.round(off * fps());
+      const a = Math.abs(f);
+      const fr = Math.round(fps());
+      const txt = `${f > 0 ? '+' : '-'}${a < fr ? a : `${Math.floor(a / fr)}:${String(a % fr).padStart(2, '0')}`}`;
+      ctx.font = `bold ${fpx(11)}px system-ui, sans-serif`;
+      const tw = ctx.measureText(txt).width + 6;
+      ctx.fillStyle = '#d42a2a';
+      ctx.fillRect(labelX - 1, y + 1, tw, nameH - 2);
+      ctx.fillStyle = '#fff';
+      ctx.fillText(txt, labelX + 2, y + nameH - fpx(4));
+      labelX += tw + 3;
+    }
     ctx.fillStyle = '#fff';
     ctx.font = `${fpx(12)}px "Noto Sans KR", system-ui, sans-serif`;
     const showName = view.showNames[c.kind === 'audio' ? 'audio' : 'video'];
@@ -985,10 +1003,20 @@ export function createTimeline() {
       const a = xOf(s.inPoint ?? 0);
       const b = xOf(s.outPoint ?? sequenceDuration(s));
       ctx.fillStyle = 'rgba(90,150,240,0.45)';
-      ctx.fillRect(a, RULER_H - 8, b - a, 7);
+      ctx.fillRect(a, RULER_H - 8, b - a, 5);
       ctx.fillStyle = '#cfe2ff';
       if (s.inPoint != null) ctx.fillRect(a, RULER_H - 9, 2, 9);
       if (s.outPoint != null) ctx.fillRect(b - 2, RULER_H - 9, 2, 9);
+    }
+    // render bar (Premiere): yellow / red stretches with effects, green once rendered (Enter)
+    for (const seg of renderSegments(s)) {
+      const a = Math.max(-1, xOf(seg.t0));
+      const b = Math.min(W + 1, xOf(seg.t1));
+      if (b <= a) continue;
+      ctx.fillStyle = seg.level > 1 ? '#d9473f' : '#e3c13b';
+      ctx.fillRect(a, RULER_H - 3, b - a, 3);
+      ctx.fillStyle = '#3fb950';
+      for (const [r0, r1] of renderedRuns(s, seg)) ctx.fillRect(xOf(r0), RULER_H - 3, xOf(r1) - xOf(r0), 3);
     }
     // markers (range markers draw a bar over their length; chapter markers carry a notch)
     for (const mk of s.markers) {
@@ -1820,6 +1848,11 @@ export function createTimeline() {
             else dA = d;
           }
         }
+        // linked picture and sound move as a mirror image, as in Premiere: V1 -> V2 takes A1 -> A2
+        if (clips.some((c) => c.kind === 'audio') && clips.some((c) => c.kind !== 'audio')) {
+          if (drag.anchorKind === 'video') dA = dV;
+          else dV = dA;
+        }
         drag.dt = dt;
         drag.dV = dV;
         drag.dA = dA;
@@ -1944,7 +1977,8 @@ export function createTimeline() {
         const lo = drag.idx > 0 ? kf[drag.idx - 1].t + f : 0;
         const hi = drag.idx < kf.length - 1 ? kf[drag.idx + 1].t - f : r.c.duration;
         if (!e.shiftKey) k.t = clamp(snapFrame(drag.t0 + (x - drag.x0) / view.pps, fps()), Math.min(lo, hi), Math.max(lo, hi));
-        k.v = bandValue(drag.band, y, drag.bodyY, drag.bodyH);
+        // a speed keyframe only moves in time (its speed is set by dragging the band beside it)
+        if (!drag.band.log) k.v = bandValue(drag.band, y, drag.bodyY, drag.bodyH);
         if (selKey) selKey.t = k.t;
         drag.tooltip = `${fmtBandValue(drag.band, k.v)} · ${formatTimecode(r.c.start + k.t, fps())}`;
         drag.tipX = x;
@@ -1956,8 +1990,11 @@ export function createTimeline() {
         const r = bandParam(drag.clipId, drag.fxId, drag.key);
         if (!r) break;
         const p = r.p;
-        // move by the change of the value under the pointer, so the line follows the pointer
-        const vNow = bandValue(drag.band, bandY(drag.band, drag.v0, drag.bodyY, drag.bodyH) + (y - drag.y0), drag.bodyY, drag.bodyH);
+        // move by the change of the value under the pointer, so the line follows the pointer; speed
+        // (시간 다시 매핑) changes steadily whatever the track height: about 1 % per pixel at 100 %
+        const vNow = drag.band.log
+          ? clamp(Math.round(drag.v0 * SPEED_PER_PX ** (drag.y0 - y)), 1, drag.band.hi)
+          : bandValue(drag.band, bandY(drag.band, drag.v0, drag.bodyY, drag.bodyH) + (y - drag.y0), drag.bodyY, drag.bodyH);
         const d = vNow - drag.v0;
         const lo = drag.band.db ? -60 : drag.band.def.min ?? -Infinity;
         const hi = drag.band.db ? 15 : drag.band.def.max ?? Infinity;
@@ -2281,8 +2318,10 @@ export function createTimeline() {
         { label: '지우기 (빈자리 남김)', key: 'Del', action: () => edit.deleteSelection() },
         { label: '잔물결 삭제 (빈자리 당김)', key: 'Shift+Del', action: () => edit.deleteSelection({ ripple: true }) },
         '-',
-        { label: '클립 사용', checked: c.enabled !== false, key: 'Shift+E', action: () => edit.setEnabled(ids, !(c.enabled !== false)) },
+        { label: '사용', checked: c.enabled !== false, key: 'Shift+E', action: () => edit.setEnabled(ids, !(c.enabled !== false)) },
         c.linkId ? { label: '연결 해제 (영상/소리 따로)', key: 'Ctrl+L', action: () => edit.unlinkClips(ids) } : { label: '연결 (함께 움직이기)', key: 'Ctrl+L', disabled: ids.length < 2, action: () => edit.linkClips(ids) },
+        edit.syncOffset(c) ? { label: '동기화 위치로 이동', action: () => edit.fixSync([c.id], 'move') } : null,
+        edit.syncOffset(c) ? { label: '밀어넣어 동기화', action: () => edit.fixSync([c.id], 'slip') } : null,
         { label: '이름 바꾸기…', action: async () => { const n = await promptDialog('클립 이름 바꾸기', '이름', c.name); if (n != null) edit.renameClip(c.id, n); } },
         { label: '레이블 색상', submenu: LABEL_COLORS.map(([col, n]) => ({ label: n, swatch: col || 'transparent', checked: (c.label || '') === col, action: () => edit.setLabel([...edit.withLinked(ids)], col) })) },
         '-',
@@ -2576,6 +2615,7 @@ export function createTimeline() {
   }
 
   store.on('change', fullRefresh);
+  store.on('render-files', invalidate);
   store.on('selection', invalidate);
   store.on('tool', () => updateHover(-100, -100, {}));
   store.on('recording', renderHeaders);
