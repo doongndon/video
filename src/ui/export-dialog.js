@@ -239,7 +239,8 @@ export function openExportSettings({ mount = null } = {}) {
     warn.textContent = warnings.join(' ');
     warn.hidden = !warnings.length;
     // summary + estimate
-    const range0 = `${tc(o.range.start)} ~ ${tc(o.range.end)} (${(o.range.end - o.range.start).toFixed(1)}초)`;
+    // the second timecode names the last frame exported (Premiere's Out), the length is the whole range
+    const range0 = `${tc(o.range.start)} ~ ${tc(Math.max(o.range.start, o.range.end - 1 / s.fps))} (길이 ${tc(o.range.end - o.range.start)})`;
     const vDesc = encoded
       ? (encoding.value === 'quality' ? `화질 ${quality.selectedOptions[0]?.textContent.split(' ')[0]} (약 ${suggestedBitrate(f.video, w, hh, o._rate, quality.value).toFixed(1)} Mbps)` : `${encoding.value === 'constant' ? 'CBR' : 'VBR'} ${o.bitrate} Mbps`)
       : '';
@@ -471,7 +472,7 @@ export function openQuickExport(anchor, { moreSettings } = {}) {
     const f = FORMATS[format];
     const { w, h: hh } = outputSize(s, 1);
     ext.textContent = `.${f.ext}`;
-    summary.textContent = `${f.label} · ${w}×${hh} · ${s.fps} fps · ${tc(o.range.start)} ~ ${tc(o.range.end)}`;
+    summary.textContent = `${f.label} · ${w}×${hh} · ${s.fps} fps · ${tc(o.range.start)} ~ ${tc(Math.max(o.range.start, o.range.end - 1 / s.fps))} (길이 ${tc(o.range.end - o.range.start)})`;
     sizeEl.textContent = `약 ${formatBytes(estimateExportSize(o, s))}`;
     savePref('export.quick', preset.value);
   };
