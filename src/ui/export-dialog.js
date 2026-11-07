@@ -66,6 +66,17 @@ async function runExport({ o, fmt, baseName, token, setProg, status, silentNote,
   return result;
 }
 
+/** A render that stopped: cancelled by the person (not a failure), or failed with an error. */
+function exportFailed(err, token, status, setProg) {
+  if (token.cancelled) {
+    setProg(0);
+    status.textContent = '내보내기를 취소했습니다';
+    return;
+  }
+  console.error(err);
+  status.textContent = `내보내기 실패: ${err.message || err}`;
+}
+
 /** mount: lay the settings into that element (the 내보내기 mode page) instead of a dialog. */
 export function openExportSettings({ mount = null } = {}) {
   const s = store.seq;
@@ -77,7 +88,8 @@ export function openExportSettings({ mount = null } = {}) {
   const tc = (t) => formatTimecode(t, s.fps);
   const r0 = exportRange(hasInOut ? 'inout' : 'all');
   const customStart = h('input', { type: 'text', value: tc(r0.start), style: { width: '112px' }, 'aria-label': '시작 타임코드' });
-  const customEnd = h('input', { type: 'text', value: tc(r0.end), style: { width: '112px' }, 'aria-label': '끝 타임코드' });
+  // the 끝 (Out) timecode names the last frame exported, as in Premiere
+  const customEnd = h('input', { type: 'text', value: tc(Math.max(r0.start, r0.end - 1 / s.fps)), style: { width: '112px' }, 'aria-label': '끝 타임코드' });
   const customRow = formRow('시작 ~ 끝', customStart, h('span', '~'), customEnd);
   const scale = select(SCALE_OPTIONS, saved.scale || '1');
   const fps = select([['', `시퀀스와 같게 (${s.fps} fps)`], ['120', '120 fps'], ['60', '60 fps'], ['59.94', '59.94 fps'], ['50', '50 fps'], ['30', '30 fps'], ['29.97', '29.97 fps'], ['25', '25 fps'], ['24', '24 fps'], ['23.976', '23.976 fps'], ['15', '15 fps'], ['12', '12 fps'], ['10', '10 fps']], saved.fps || '');
@@ -131,7 +143,7 @@ export function openExportSettings({ mount = null } = {}) {
     if (range.value !== 'custom') return exportRange(range.value);
     const a = parseTimecode(customStart.value, s.fps);
     const b = parseTimecode(customEnd.value, s.fps);
-    return exportRange('custom', { start: a ?? 0, end: b ?? sequenceDuration(s) });
+    return exportRange('custom', { start: a ?? 0, end: b != null ? b + 1 / s.fps : sequenceDuration(s) });
   };
 
   const options = () => {
@@ -351,8 +363,7 @@ export function openExportSettings({ mount = null } = {}) {
           try {
             await runExport({ o, fmt: f, baseName: fileName.value || 'export', token, setProg, status, silentNote, importAfter: importAfter.box.checked });
           } catch (err) {
-            console.error(err);
-            status.textContent = `내보내기 실패: ${err.message || err}`;
+            exportFailed(err, token, status, setProg);
           } finally {
             running = false;
             btn.disabled = false;
@@ -536,8 +547,7 @@ export function openQuickExport(anchor, { moreSettings } = {}) {
     try {
       await runExport({ o, fmt: FORMATS[format], baseName: fileName.value.trim() || 'export', token, setProg, status, silentNote });
     } catch (err) {
-      console.error(err);
-      status.textContent = `내보내기 실패: ${err.message || err}`;
+      exportFailed(err, token, status, setProg);
     } finally {
       running = false;
       go.disabled = preset.disabled = fileName.disabled = false;

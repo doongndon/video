@@ -9,7 +9,7 @@ import { playback } from '../playback.js';
 import { commands as c } from '../commands.js';
 import * as edit from '../edit.js';
 import { guessKind } from '../media.js';
-import { sequenceDuration } from '../model.js';
+import { sequenceDuration, outFrameTime } from '../model.js';
 import { listProjects, currentProjectId, storedFile } from '../persist.js';
 import { appMode } from '../mode.js';
 import { showMenu, toast, loadPref, savePref, showPanel, isMaximized, toggleMaximize } from './common.js';
@@ -321,7 +321,7 @@ function buildExportPage() {
       h('div', h('span', '프레임 크기'), h('b', `${s.width} × ${s.height}`)),
       h('div', h('span', '프레임 속도'), h('b', `${s.fps} fps`)),
       h('div', h('span', '길이'), h('b', formatTimecode(dur, s.fps))),
-      ...(s.inPoint != null || s.outPoint != null ? [h('div', h('span', '시작/끝 표시'), h('b', `${formatTimecode(s.inPoint ?? 0, s.fps)} ~ ${formatTimecode(s.outPoint ?? dur, s.fps)}`))] : []));
+      ...(s.inPoint != null || s.outPoint != null ? [h('div', h('span', '시작/끝 표시'), h('b', `${formatTimecode(s.inPoint ?? 0, s.fps)} ~ ${formatTimecode(s.outPoint != null ? outFrameTime(s.outPoint, s.fps, s.inPoint) : dur, s.fps)}`))] : []));
     // fresh settings each time: the sequence may have changed
     mount.replaceChildren();
     openExportSettings({ mount });

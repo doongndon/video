@@ -367,7 +367,7 @@ export const LESSONS = [
         done: (s) => s.of('interview', 'video').some((c) => { const k = kfs(c, 'motion', 'scale'); return k.length >= 2 && new Set(k.map((x) => x.v)).size >= 2; }),
       },
       {
-        t: '베지어로 부드럽게', d: '효과 컨트롤 오른쪽 타임라인의 키프레임(◇)을 오른쪽 클릭하고 시간 보간 ▸ 베지어 (또는 감속·가속)를 고르세요. 모래시계 모양이 되면서 시작과 끝이 부드러워집니다.',
+        t: '베지어로 부드럽게', d: '효과 컨트롤 오른쪽 타임라인의 키프레임(◇)을 오른쪽 클릭하고 시간 보간 ▸ 베지어 (또는 천천히 들어오기·천천히 나가기)를 고르세요. 모래시계 모양이 되면서 시작과 끝이 부드러워집니다.',
         why: '선형은 기계처럼 일정하게, 베지어는 카메라맨이 줌하듯 천천히 시작하고 멈춥니다.', show: { panel: 'effectControls', sel: '.panel-body[data-panel="effectControls"] .kfd' },
         done: (s) => s.of('interview', 'video').some((c) => kfs(c, 'motion', 'scale').some((k) => k.interp && k.interp !== 'linear' && k.interp !== 'hold')),
       },

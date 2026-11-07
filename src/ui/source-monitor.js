@@ -10,6 +10,7 @@ import { fitRect, fitCanvasToBox, dnd, inlineEdit, showMenu, toast, menusOpen, l
 import { icon, iconButton } from './icons.js';
 import { extendMenu } from './menubar.js';
 import { fileIdOf, itemRange, isSubclip } from '../subclips.js';
+import { outFrameTime } from '../model.js';
 
 export const sourceApi = {};
 
@@ -66,8 +67,8 @@ export function createSourceMonitor() {
     iconButton('stepForward', '1프레임 앞으로 (→)', () => step(1)),
     iconButton('goOut', '끝 표시로 이동 (Shift+O)', () => goOut()),
     h('span.sep'),
-    iconButton('insert', '삽입: 재생헤드 위치에 끼워 넣고 뒤를 밀기 (,)', () => insert('insert'), { label: '삽입' }),
-    iconButton('overwrite', '덮어쓰기: 재생헤드 위치에 덮어 놓기 (.)', () => insert('overwrite'), { label: '덮어쓰기' }),
+    iconButton('insert', '삽입: 재생헤드(시퀀스에 시작 표시가 있으면 그 자리)에 끼워 넣고 뒤를 밀기 (,)', () => insert('insert'), { label: '삽입' }),
+    iconButton('overwrite', '덮어쓰기: 재생헤드(시퀀스에 시작 표시가 있으면 그 자리)에 덮어 놓기 (.)', () => insert('overwrite'), { label: '덮어쓰기' }),
     subBtn,
     h('span.t-side.end', dragVideo, dragAudio, safeBtn));
   const root = h('div.monitor', h('div.panel-toolbar', titleEl), view, info, scrubBar, transport);
@@ -259,7 +260,7 @@ export function createSourceMonitor() {
       o.ctx.fillStyle = 'rgba(255,255,255,0.8)';
       o.ctx.font = 'bold 13px sans-serif';
       if (m.inPoint != null && Math.abs(t - m.inPoint) < 0.5 / fps()) o.ctx.fillText('시작', 8, 18);
-      if (m.outPoint != null && Math.abs(t - m.outPoint) < 0.5 / fps()) o.ctx.fillText('끝', o.w - 24, 18);
+      if (m.outPoint != null && Math.abs(t - outFrameTime(m.outPoint, fps())) < 0.5 / fps()) o.ctx.fillText('끝', o.w - 24, 18);
     }
   }
 
@@ -271,7 +272,7 @@ export function createSourceMonitor() {
       const [lo, hi] = range();
       if (current() >= hi - 0.05) video.currentTime = toFile(m.inPoint ?? lo);
       // started at (or after) the Out point: play on past it, like Premiere
-      stopAtOut = m.outPoint == null || current() < m.outPoint - 0.5 / fps();
+      stopAtOut = m.outPoint == null || current() < m.outPoint - 1.5 / fps();
       video.playbackRate = elRate(1);
       video.play().catch(() => {});
     } else stop();
@@ -342,14 +343,33 @@ export function createSourceMonitor() {
   }
 
   const markIn = () => media() && media().kind !== 'image' && setMark('in', snapFrame(current(), fps()));
-  const markOut = () => media() && media().kind !== 'image' && setMark('out', snapFrame(current(), fps()));
+  // the Out frame is part of the range (Premiere): outPoint is the time just after it
+  const markOut = () => media() && media().kind !== 'image' && setMark('out', snapFrame(current(), fps()) + 1 / fps());
   const goIn = () => seek(inOf(media()));
-  const goOut = () => seek(outOf(media()));
+  const goOut = () => seek(media()?.outPoint != null ? outFrameTime(media().outPoint, fps(), inOf(media())) : outOf(media()));
   const clearIn = () => setMark('in', null);
   const clearOut = () => setMark('out', null);
 
   function insert(mode, opts = {}) {
     if (!mediaId || mediaStatus(mediaId) !== 'ready') return;
+    const s = store.seq;
+    const m = media();
+    if (opts.start == null && (s.inPoint != null || s.outPoint != null)) {
+      // 3점 편집 (Premiere): the sequence In / Out decide where the source goes, not the playhead
+      const timed = Number.isFinite(m.duration) && m.duration > 0;
+      const srcIn = timed ? inOf(m) : 0;
+      if (s.inPoint != null) {
+        opts = { ...opts, start: s.inPoint };
+        // sequence In and Out with no source Out: the sequence range sets the length
+        if (s.outPoint != null && m.outPoint == null && s.outPoint > s.inPoint) {
+          opts.inPoint = srcIn;
+          opts.outPoint = timed ? Math.min(range()[1], srcIn + (s.outPoint - s.inPoint)) : s.outPoint - s.inPoint;
+        }
+      } else if (timed) {
+        // only a sequence Out: back-timed, the source ends on the Out frame
+        opts = { ...opts, start: Math.max(0, s.outPoint - (outOf(m) - srcIn)) };
+      }
+    }
     edit.placeMedia(mediaId, { mode, ...opts });
     // move the playhead to the end of the edit, like an NLE
     const sel = store.selectedClips();
@@ -491,7 +511,7 @@ export function createSourceMonitor() {
       // stop at the Out point (or at the end of a subclip)
       if (stopAtOut && m?.outPoint != null && t >= m.outPoint && t - m.outPoint < 0.25 && shuttleRate <= 1) {
         video.pause();
-        video.currentTime = toFile(m.outPoint);
+        video.currentTime = toFile(outFrameTime(m.outPoint, fps()));
       } else if (isSubclip(m) && t >= hi) {
         video.pause();
         video.currentTime = toFile(hi);

@@ -8,7 +8,7 @@ import { store } from '../store.js';
 import { playback } from '../playback.js';
 import { Compositor } from '../compositor.js';
 import * as edit from '../edit.js';
-import { clipEnd, clipsOnTrack, videoTracks, sequenceDuration, evalEffect, editPoints, setParamValue } from '../model.js';
+import { clipEnd, clipsOnTrack, videoTracks, sequenceDuration, outFrameTime, evalEffect, editPoints, setParamValue } from '../model.js';
 import { evalMask, evalMaskPath, setMaskPath, editMask, pathPolyline } from '../masks.js';
 import { EFFECTS } from '../effects.js';
 import { h, clamp, uid, formatTimecode, parseTimecode, downloadBlob, modKey } from '../util.js';
@@ -121,7 +121,7 @@ export function createProgramMonitor() {
     iconButton('stepBack', '1프레임 뒤로 (←)', () => playback.step(-1)),
     playBtn,
     iconButton('stepForward', '1프레임 앞으로 (→)', () => playback.step(1)),
-    iconButton('goOut', '끝 표시로 이동 (Shift+O)', () => { playback.stop(); store.setPlayhead(store.seq.outPoint ?? sequenceDuration(store.seq)); }),
+    iconButton('goOut', '끝 표시로 이동 (Shift+O)', () => { playback.stop(); const s = store.seq; store.setPlayhead(s.outPoint != null ? outFrameTime(s.outPoint, s.fps, s.inPoint) : sequenceDuration(s)); }),
     h('span.sep'),
     iconButton('lift', '들어내기: 시작~끝 구간을 지우고 빈자리 남김 (;)', () => edit.liftExtract(false)),
     iconButton('extract', '추출: 시작~끝 구간을 지우고 당기기 (\')', () => edit.liftExtract(true)),
@@ -1764,7 +1764,7 @@ export function createProgramMonitor() {
       // goes into the new title's text box, not to the editor's single-key shortcuts
       e.preventDefault();
       const [sx, sy] = screenToSeq(px, py);
-      edit.addTextClip({ x: sx, y: sy });
+      edit.addTextClip({ x: sx, y: sy, point: true });
       store.setTool('select');
       store.emit('reveal-effect-controls', { focusText: true });
       return;

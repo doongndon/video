@@ -276,8 +276,9 @@ export function createEssentialGraphicsPanel() {
   const tcInput = (label) => h('input.tc', { type: 'text', 'aria-label': label, title: `${label} (타임코드 또는 프레임 수)` });
   const preRoll = tcInput('사전 롤');
   const postRoll = tcInput('사후 롤');
-  const easeIn = tcInput('감속');
-  const easeOut = tcInput('가속');
+  // Premiere's Korean names: 가속 (Ease-In, speeding up at the start), 감속 (Ease-Out, slowing to a stop)
+  const easeIn = tcInput('가속');
+  const easeOut = tcInput('감속');
   for (const el of [preRoll, postRoll, easeIn, easeOut]) el.addEventListener('keydown', (e) => e.stopPropagation());
   let measure = null;
 
@@ -314,7 +315,7 @@ export function createEssentialGraphicsPanel() {
       h('div.row', rollOn.el, rollDir),
       h('div.row', startOff.el, endOff.el),
       h('div.row', h('span', '사전 롤'), preRoll, h('span', '사후 롤'), postRoll),
-      h('div.row', h('span', '감속'), easeIn, h('span', '가속'), easeOut));
+      h('div.row', h('span', '가속'), easeIn, h('span', '감속'), easeOut));
     styleSec.append(h('h4', '마스터 스타일'), h('div.row', styleSel,
       iconButton('up', '스타일 속성을 마스터 스타일로 보내기 (이 스타일을 쓴 모든 텍스트가 바뀝니다)', pushMasterStyle),
       iconButton('reset', '마스터 스타일과 동기화 (바꾼 모양을 스타일대로 되돌리기)', syncMasterStyle),

@@ -2,7 +2,7 @@
 // with scrubbable values and stopwatch keyframing on the left and, when the panel is wide enough, a
 // timeline view (타임라인 보기) on the right with the keyframes of every property. Keyframes can be
 // marquee-selected, dragged (Alt: copies them), copied / pasted at the playhead, deleted, and given
-// Premiere's temporal interpolations (선형 · 베지어 · 자동 베지어 · 연속 베지어 · 정지 · 감속 · 가속)
+// Premiere's temporal interpolations (선형 · 베지어 · 자동 베지어 · 연속 베지어 · 정지 · 천천히 들어오기 · 천천히 나가기)
 // or one of 32 easing curves; the twirl next to a property opens its value graph and velocity graph
 // with draggable bezier handles. Effects can be selected, reordered by dragging, copied onto other
 // clips, reset, switched off, saved as presets and given masks (타원 / 4점 다각형 / 펜). Colour
@@ -707,6 +707,7 @@ export function createEffectControls({ only = null } = {}) {
     let groupIndex = -1;
     let open = true;
     for (const pdef of def.params) {
+      if (pdef.hidden) continue;
       if ((pdef.group || null) !== group) {
         group = pdef.group || null;
         groupIndex++;
@@ -879,7 +880,7 @@ export function createEffectControls({ only = null } = {}) {
       const t = clamp(store.ui.playhead - clip.start, 0, clip.duration);
       for (const pdef of def.params) {
         const p = f.params[pdef.key];
-        if (!p) continue;
+        if (!p || pdef.hidden) continue;
         const v = defaultParamValue(pdef, store.seq);
         const val = v && typeof v === 'object' ? deepClone(v) : v;
         if (isAnimated(p) && typeof val === 'number') setParamValue(p, val, t, fd());

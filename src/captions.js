@@ -152,8 +152,11 @@ export function createCaptionTrack(cues, label = '자막') {
     const lastVideoIdx = s.tracks.findLastIndex((t) => t.kind === 'video');
     s.tracks.splice(lastVideoIdx + 1, 0, track);
     renameTracks(s);
+    // cue times land on whole frames (like Premiere's caption import), so later cuts leave no slivers
+    const fr = (t) => Math.round(t * s.fps) / s.fps;
     for (const cue of cues) {
-      const c = createClip(s, { kind: 'text', trackId: track.id, name: cue.text.split('\n')[0].slice(0, 40), start: cue.start, duration: Math.max(0.2, cue.end - cue.start) });
+      const start = fr(cue.start);
+      const c = createClip(s, { kind: 'text', trackId: track.id, name: cue.text.split('\n')[0].slice(0, 40), start, duration: Math.max(fr(0.2), fr(cue.end) - start) });
       const tx = c.effects.find((e) => e.type === 'text');
       tx.params.content.value = cue.text;
       tx.params.size.value = Math.round(s.height * 0.05);

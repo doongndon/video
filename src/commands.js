@@ -6,7 +6,7 @@ import { playback } from './playback.js';
 import * as edit from './edit.js';
 import { createSyntheticMedia, importFiles, mediaStatus, runtime, peakInRange } from './media.js';
 import { saveProjectFile, openProjectFile, clearSession, relinkFromFiles, setAutosave, saveProjectNow } from './persist.js';
-import { createProject, clipEnd, clipsOnTrack, editPoints, sequenceDuration, videoTracks, mediaTimeAt, EFFECT_FIXED_TYPES } from './model.js';
+import { createProject, clipEnd, clipsOnTrack, editPoints, sequenceDuration, outFrameTime, videoTracks, mediaTimeAt, sourceOut, EFFECT_FIXED_TYPES } from './model.js';
 import { snapFrame, EPS } from './util.js';
 import { sourceApi } from './ui/source-monitor.js';
 import { loadSampleProject } from './sample.js';
@@ -56,21 +56,32 @@ function nudge(frames) {
   store.transact('1프레임 이동', () => edit.rawMoveClips(ids, frames / seq().fps, 0, 0, { mode: 'overwrite' }));
 }
 
+/**
+ * 프레임 일치 (F), as in Premiere: the selected clip under the playhead, else the topmost targeted
+ * track's clip (else any track's) opens in the Source Monitor at the same frame, with the source
+ * In / Out set to the part the timeline clip uses.
+ */
 function matchFrame() {
   const s = seq();
   const t = store.ui.playhead;
-  for (const tr of videoTracks(s).slice().reverse().concat(s.tracks.filter((x) => x.kind === 'audio'))) {
-    const c = clipsOnTrack(s, tr.id).find((x) => t >= x.start && t < clipEnd(x) && x.mediaId);
-    if (!c) continue;
-    const m = store.project.media[c.mediaId];
-    if (!m || ['color', 'adjustment', 'sequence', 'lut'].includes(m.kind)) continue;
-    store.ui.sourceMediaId = c.mediaId;
-    store.ui.sourceSeek = mediaTimeAt(c, t);
-    store.emit('source');
-    showPanel('source');
-    return;
+  const usable = (x) => {
+    const m = x && t >= x.start && t < clipEnd(x) && x.mediaId && store.project.media[x.mediaId];
+    return !!m && !['color', 'adjustment', 'sequence', 'lut'].includes(m.kind);
+  };
+  const order = videoTracks(s).slice().reverse().concat(s.tracks.filter((x) => x.kind === 'audio'));
+  const onTracks = (tracks) => tracks.map((tr) => clipsOnTrack(s, tr.id).find(usable)).find(Boolean);
+  const c = sel().find(usable) || onTracks(order.filter((tr) => tr.targeted)) || onTracks(order);
+  if (!c) return toast('재생헤드 아래에 원본을 열 수 있는 클립이 없습니다');
+  const m = store.project.media[c.mediaId];
+  if (Number.isFinite(m.duration) && m.duration > 0 && !c.hold) {
+    const a = Math.max(0, Math.min(c.inPoint, sourceOut(c)));
+    const b = Math.min(m.duration, Math.max(c.inPoint, sourceOut(c)));
+    if (b > a) store.transact('프레임 일치', () => { m.inPoint = a; m.outPoint = b; });
   }
-  toast('재생헤드 아래에 원본을 열 수 있는 클립이 없습니다');
+  store.ui.sourceMediaId = c.mediaId;
+  store.ui.sourceSeek = mediaTimeAt(c, t);
+  store.emit('source');
+  showPanel('source');
 }
 
 async function resetProjectState() {
@@ -368,7 +379,7 @@ export const commands = {
   markOut: () => (inSource() ? sourceApi.markOut() : edit.setSequenceInOut('out', store.ui.playhead)),
   markClip: () => edit.markClip(),
   goIn: () => (inSource() ? sourceApi.goIn() : (playback.stop(), store.setPlayhead(seq().inPoint ?? 0))),
-  goOut: () => (inSource() ? sourceApi.goOut() : (playback.stop(), store.setPlayhead(seq().outPoint ?? sequenceDuration(seq())))),
+  goOut: () => (inSource() ? sourceApi.goOut() : (playback.stop(), store.setPlayhead(seq().outPoint != null ? outFrameTime(seq().outPoint, seq().fps, seq().inPoint) : sequenceDuration(seq())))),
   clearIn: () => (inSource() ? sourceApi.clearIn() : edit.setSequenceInOut('in', null)),
   clearOut: () => (inSource() ? sourceApi.clearOut() : edit.setSequenceInOut('out', null)),
   clearInOut: () => (inSource() ? sourceApi.clearInOut() : store.transact('시작/끝 지우기', () => { seq().inPoint = null; seq().outPoint = null; })),

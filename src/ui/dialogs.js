@@ -340,7 +340,8 @@ export async function openRollCrawlDialog() {
   const easeIn = tc(prev.easeIn);
   const easeOut = tc(prev.easeOut);
   const timing = h('div', { style: { display: 'grid', gap: '6px' } },
-    formRow('사전 롤', pre), formRow('감속', easeIn), formRow('가속', easeOut), formRow('사후 롤', post));
+    // Premiere's Korean names: 가속 (Ease-In, speeding up at the start), 감속 (Ease-Out, slowing to a stop)
+    formRow('사전 롤', pre), formRow('가속', easeIn), formRow('감속', easeOut), formRow('사후 롤', post));
   const sync = () => {
     const still = dir.value === 'still';
     for (const el of [startOff.box, endOff.box, pre, post, easeIn, easeOut]) el.disabled = still;
@@ -355,7 +356,7 @@ export async function openRollCrawlDialog() {
       formRow('유형', dir),
       formRow('', h('div', { style: { display: 'grid', gap: '4px' } }, startOff.el, endOff.el)),
       timing,
-      note('클립 길이 동안 위치에 키프레임을 넣어 움직입니다 (엔딩 크레딧, 뉴스 자막 띠 등). 사전 롤·사후 롤은 움직이기 전·후에 멈춰 있는 시간, 감속·가속은 천천히 출발하고 멈추는 시간입니다. 시간은 타임코드나 프레임 수로 넣으세요.'),
+      note('클립 길이 동안 위치에 키프레임을 넣어 움직입니다 (엔딩 크레딧, 뉴스 자막 띠 등). 사전 롤·사후 롤은 움직이기 전·후에 멈춰 있는 시간, 가속·감속은 천천히 출발하고 멈추는 시간입니다. 시간은 타임코드나 프레임 수로 넣으세요.'),
     ],
     buttons: [
       { label: '취소' },
@@ -395,7 +396,7 @@ export async function openSubclipDialog(sourceId, { inPoint, outPoint } = {}) {
   openModal({
     title: '하위 클립 만들기',
     body: [formRow('이름', name), formRow('', restrict.el),
-      note(`${formatTimecode(a, fps)} ~ ${formatTimecode(b, fps)} (길이 ${formatTimecode(b - a, fps)}) 구간이 프로젝트 패널에 새 항목으로 생깁니다. 원본 파일을 그대로 쓰므로 용량이 늘지 않습니다.`),
+      note(`${formatTimecode(a, fps)} ~ ${formatTimecode(Math.max(a, b - 1 / fps), fps)} (길이 ${formatTimecode(b - a, fps)}) 구간이 프로젝트 패널에 새 항목으로 생깁니다. 원본 파일을 그대로 쓰므로 용량이 늘지 않습니다.`),
       a === lo && b === hi && !m.subclipOf ? h('div.note.warn', '시작·끝 표시가 없어 클립 전체로 만듭니다. 소스 모니터에서 I·O로 구간을 표시하면 그 부분만 하위 클립이 됩니다.') : null],
     buttons: [{ label: '취소' }, {
       label: '확인', primary: true, action: () => {
@@ -425,7 +426,8 @@ export async function openEditSubclipDialog(id) {
   const fps = master.fps || store.seq.fps;
   const name = h('input', { type: 'text', value: m.name, style: { width: '100%' } });
   const start = h('input', { type: 'text', value: formatTimecode(m.subIn, fps), style: { width: '120px' } });
-  const end = h('input', { type: 'text', value: formatTimecode(m.subOut, fps), style: { width: '120px' } });
+  // 끝 is the subclip's last frame (inclusive, as in Premiere); subOut is the time just after it
+  const end = h('input', { type: 'text', value: formatTimecode(Math.max(m.subIn, m.subOut - 1 / fps), fps), style: { width: '120px' } });
   const restrict = check(m.restrictTrims !== false, '하위 클립 경계로 트리밍 제한');
   openModal({
     title: '하위 클립 편집',
@@ -438,7 +440,8 @@ export async function openEditSubclipDialog(id) {
     buttons: [{ label: '취소' }, {
       label: '확인', primary: true, action: () => {
         const a = parseTimecode(start.value, fps);
-        const b = parseTimecode(end.value, fps);
+        const last = parseTimecode(end.value, fps);
+        const b = last == null ? null : last + 1 / fps;
         if (a == null || b == null || b <= a) {
           toast('시작이 끝보다 앞이어야 합니다');
           return false;
@@ -848,15 +851,17 @@ export function openExtractAudioDialog({ mediaId, clipId = null } = {}) {
     return;
   }
   const fmtT = (t) => formatTimecode(t, m.fps || s.fps);
+  // the Out timecode names the last frame of a range (Premiere includes it)
+  const lastFrame = (a, b) => fmtT(Math.max(a, b - 1 / (m.fps || s.fps)));
   const ranges = [['all', `파일 전체 (${fmtT(m.duration || 0)})`]];
   let clipRange = null;
   if (clip) {
     const a = Math.min(clip.inPoint, sourceOut(clip));
     const b = Math.max(clip.inPoint, sourceOut(clip));
     clipRange = [a, b];
-    ranges.unshift(['clip', `이 클립이 쓰는 부분 (${fmtT(a)} ~ ${fmtT(b)})`]);
+    ranges.unshift(['clip', `이 클립이 쓰는 부분 (${fmtT(a)} ~ ${lastFrame(a, b)})`]);
   }
-  if (m.inPoint != null || m.outPoint != null) ranges.push(['inout', `소스 시작~끝 표시 (${fmtT(m.inPoint ?? 0)} ~ ${fmtT(m.outPoint ?? m.duration)})`]);
+  if (m.inPoint != null || m.outPoint != null) ranges.push(['inout', `소스 시작~끝 표시 (${fmtT(m.inPoint ?? 0)} ~ ${lastFrame(m.inPoint ?? 0, m.outPoint ?? m.duration)})`]);
   const range = select(ranges, ranges[0][0]);
   const format = select(AUDIO_FILE_FORMATS.map((f) => [f.id, f.label]), 'wav');
   const addToProject = check(true, '프로젝트 패널에 오디오 항목으로 추가');

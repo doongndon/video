@@ -205,7 +205,7 @@ export function findEffect(clip, type) {
 //     v: 960,            // value: numbers interpolate; strings, colours and objects step at each key
 //     interp: 'bezier',  // Premiere temporal interpolation of this key (키프레임 ▸ 시간 보간); missing = 'linear':
 //                        //   'linear' 선형 · 'bezier' 베지어 · 'autoBezier' 자동 베지어 ·
-//                        //   'continuousBezier' 연속 베지어 · 'hold' 정지 · 'easeIn' 감속 · 'easeOut' 가속
+//                        //   'continuousBezier' 연속 베지어 · 'hold' 정지 · 'easeIn' 천천히 들어오기 · 'easeOut' 천천히 나가기
 //     inSpeed: 0,        // bezier handle speed entering / leaving the key in value units per second
 //     outSpeed: 0,       //   (the slope of the value graph = the value of the velocity graph at the key)
 //     inInf: 33.33,      // handle influence in percent (0.1..100) of the previous / next segment's length
@@ -218,8 +218,8 @@ export function findEffect(clip, type) {
 // Sides of a key: "in" faces the previous key, "out" the next key.
 //   linear            both sides linear (a linear side's handle lies on the straight segment)
 //   hold              out side keeps the value until the next key; in side linear
-//   easeIn  (감속)    in side bezier with speed inSpeed ?? 0 and influence inInf ?? 33.33; out side linear
-//   easeOut (가속)    out side bezier with speed outSpeed ?? 0 and influence outInf ?? 33.33; in side linear
+//   easeIn  (천천히 들어오기) in side bezier with speed inSpeed ?? 0 and influence inInf ?? 33.33; out side linear
+//   easeOut (천천히 나가기)   out side bezier with speed outSpeed ?? 0 and influence outInf ?? 33.33; in side linear
 //   bezier            each side has its own speed and influence (broken handles allowed); a missing
 //                     speed falls back to the automatic one
 //   continuousBezier  both sides share one speed (outSpeed ?? inSpeed ?? automatic), own influences
@@ -237,8 +237,8 @@ export const KF_INTERP = [
   ['autoBezier', '자동 베지어', 'Auto Bezier'],
   ['continuousBezier', '연속 베지어', 'Continuous Bezier'],
   ['hold', '정지', 'Hold'],
-  ['easeIn', '감속', 'Ease In'],
-  ['easeOut', '가속', 'Ease Out'],
+  ['easeIn', '천천히 들어오기', 'Ease In'],
+  ['easeOut', '천천히 나가기', 'Ease Out'],
 ];
 
 export const DEFAULT_INFLUENCE = 100 / 3;
@@ -416,7 +416,7 @@ function clearHandles(k) {
 
 /**
  * Set the temporal interpolation of key i (Premiere: 키프레임 오른쪽 클릭 ▸ 시간 보간 / 효과 컨트롤의 그래프).
- * Bezier types start from the smooth automatic speeds (or keep handles already set); 감속 / 가속 flatten the
+ * Bezier types start from the smooth automatic speeds (or keep handles already set); 천천히 들어오기 / 나가기 flatten the
  * in / out side. A named easing curve on this key, and on the previous key when the in side becomes a
  * curve, is cleared so the interpolation is what shapes the motion.
  */
@@ -754,6 +754,14 @@ export function sequenceDuration(seq) {
   return end;
 }
 
+/**
+ * Time of the Out frame of an In/Out range. outPoint is stored as the range's end (the time just
+ * after the Out frame, which Premiere includes), so the frame itself starts one frame earlier.
+ */
+export function outFrameTime(outPoint, fps, inPoint = 0) {
+  return Math.max(inPoint ?? 0, Math.round((outPoint - 1 / fps) * fps) / fps);
+}
+
 export function linkedClips(seq, clip) {
   if (!clip.linkId) return [clip];
   return Object.values(seq.clips).filter((c) => c.linkId === clip.linkId);
@@ -816,10 +824,17 @@ export function editPoints(seq, trackIds = null) {
 
 export function clampTransitionDuration(seq, clip, edge, d) {
   const fd = 1 / seq.fps;
+  // how much of a clip the transitions at its head / tail cover (one on a cut covers half of each
+  // clip): as in Premiere, a transition can't run into the one at the clip's other end
+  const head = (c) => (c.transIn ? c.transIn.duration / (prevAdjacent(seq, c) ? 2 : 1) : 0);
+  const tail = (c) => {
+    const next = nextAdjacent(seq, c);
+    return next?.transIn ? next.transIn.duration / 2 : c.transOut?.duration || 0;
+  };
   if (edge === 'in') {
     const prev = prevAdjacent(seq, clip);
-    const max = prev ? 2 * Math.min(prev.duration, clip.duration) : clip.duration;
-    return clamp(d, fd, max);
+    const max = prev ? 2 * Math.min(prev.duration - head(prev), clip.duration - tail(clip)) : clip.duration - tail(clip);
+    return clamp(d, fd, Math.max(fd, max));
   }
-  return clamp(d, fd, clip.duration);
+  return clamp(d, fd, Math.max(fd, clip.duration - head(clip)));
 }

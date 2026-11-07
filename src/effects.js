@@ -113,6 +113,9 @@ export const EFFECTS = {
       // 텍스트로 마스크: the glyphs become a window onto the tracks below
       { key: 'textMask', label: '텍스트로 마스크', type: 'bool', default: false, group: '모양', hint: '글자 모양으로 아래 트랙의 영상이 보이고 나머지는 가려집니다' },
       { key: 'maskInvert', label: '마스크 반전', type: 'bool', default: false, group: '모양', hint: '글자 부분만 뚫어서 아래 트랙을 가립니다' },
+      // titles made by clicking with the type tool start at the click (Premiere's point text): the
+      // clip position is the first line's baseline at its 정렬 side instead of the text box centre
+      { key: 'point', label: '포인트 텍스트', type: 'bool', default: false, hidden: true },
     ],
   },
   fill: {
@@ -432,6 +435,7 @@ export const TRANSITIONS = {
   ...MORE_TRANSITIONS,
   constantPower: { name: '지속 가감속 (자연스러운 페이드)', kind: 'audio', category: '크로스페이드' },
   constantGain: { name: '지속 게인 (직선 페이드)', kind: 'audio', category: '크로스페이드' },
+  exponentialFade: { name: '지수 페이드 (로그 곡선)', kind: 'audio', category: '크로스페이드' },
 };
 
 // Premiere's video transition folders, in its order

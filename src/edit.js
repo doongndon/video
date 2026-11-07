@@ -317,7 +317,7 @@ export function setSourcePatch(trackId) {
 }
 
 /** Create a text clip at the playhead on the first free video track. */
-export function addTextClip({ start = store.ui.playhead, x, y, content } = {}) {
+export function addTextClip({ start = store.ui.playhead, x, y, content, point = false } = {}) {
   const s = seq();
   start = q(start);
   const dur = DEFAULT_STILL_DURATION;
@@ -334,7 +334,13 @@ export function addTextClip({ start = store.ui.playhead, x, y, content } = {}) {
     const motion = c.effects.find((e) => e.type === 'motion');
     if (x != null) motion.params.posX.value = Math.round(x);
     if (y != null) motion.params.posY.value = Math.round(y);
-    if (content) c.effects.find((e) => e.type === 'text').params.content.value = content;
+    const tp = c.effects.find((e) => e.type === 'text').params;
+    if (content) tp.content.value = content;
+    if (point) {
+      // a click with the type tool: left-aligned text whose first line starts at the click, as in Premiere
+      tp.point.value = true;
+      tp.align.value = 'left';
+    }
     s.clips[c.id] = c;
     store.selectClips([c.id]);
     return c.id;
@@ -1161,7 +1167,10 @@ export function pasteAttributes(sources, targetIds, opts = {}) {
         const m = sourceClip.effects.find((x) => x.type === e.type);
         if (!m) return e;
         changed = true;
-        return { ...prep(m), id: e.id };
+        const out = { ...prep(m), id: e.id };
+        // hidden values (a title's point-text origin) belong to the clip, not to its look
+        for (const pd of EFFECTS[e.type].params) if (pd.hidden && e.params[pd.key]) out.params = { ...out.params, [pd.key]: e.params[pd.key] };
+        return out;
       });
       for (const e of sourceClip.effects) {
         if (EFFECTS[e.type]?.fixed || !effectFitsClip(e.type, c.kind)) continue;
@@ -1560,6 +1569,11 @@ export function removeMarker(id) {
   });
 }
 
+/**
+ * 시작 / 종료 표시 at time t. As in Premiere the Out frame is part of the range: seq.outPoint keeps
+ * the range's end (the time just after the Out frame), so In 00:00:00:00 and Out 00:00:04:29 at
+ * 30 fps is 5 seconds long.
+ */
 export function setSequenceInOut(which, t) {
   const s = seq();
   store.transact(which === 'in' ? '시작 표시' : '끝 표시', () => {
@@ -1567,7 +1581,7 @@ export function setSequenceInOut(which, t) {
       s.inPoint = t == null ? null : q(t);
       if (s.inPoint != null && s.outPoint != null && s.outPoint <= s.inPoint) s.outPoint = null;
     } else {
-      s.outPoint = t == null ? null : q(t);
+      s.outPoint = t == null ? null : q(q(t) + fd());
       if (s.inPoint != null && s.outPoint != null && s.outPoint <= s.inPoint) s.inPoint = null;
     }
   });

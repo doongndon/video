@@ -824,7 +824,7 @@ export function createProjectPanel() {
     const rows = [
       ['이름', m.name], ['종류', isSubclip(m) ? `하위 클립 (${store.project.media[m.subclipOf]?.name || '마스터 없음'})` : KIND_NAMES[m.kind] || m.kind], ['상태', statusName],
       ['길이', dur != null ? formatTimecode(dur, fps) : '—'],
-      isSubclip(m) ? ['하위 클립 구간', `${formatTimecode(m.subIn, fps)} ~ ${formatTimecode(m.subOut, fps)}${m.restrictTrims === false ? '' : ' (트리밍 제한)'}`] : null,
+      isSubclip(m) ? ['하위 클립 구간', `${formatTimecode(m.subIn, fps)} ~ ${formatTimecode(Math.max(m.subIn, m.subOut - 1 / fps), fps)}${m.restrictTrims === false ? '' : ' (트리밍 제한)'}`] : null,
       ['화면 크기', m.width ? `${m.width} × ${m.height}` : '—'], ['프레임 속도', m.fps ? `${m.fps} fps` : '—'], ['소리', m.hasAudio ? '있음' : '없음'],
       ['파일 크기', m.size ? formatBytes(m.size) : '—'], ['파일 형식', m.mime || '—'], ['오류 내용', rt?.error || '—'],
       m.posterTime != null ? ['포스터 프레임', formatTimecode(m.posterTime, fps)] : null,

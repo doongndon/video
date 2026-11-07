@@ -240,11 +240,11 @@ export function createTimeline() {
       const t = row.track;
       // source patching (Premiere's V1 / A1 source indicators): where insert / overwrite from the source go
       const patchedHere = !s.patchOff?.[t.kind] && (t.patched || (!hasPatch(t.kind) && edit.sourceTrack(t.kind)?.id === t.id));
-      const srcIdx = list(t.kind).findIndex((x) => x.id === t.id) + 1;
       const patch = h(`button.src-patch${patchedHere ? '.on' : ''}`, {
         title: `소스 패치: 소스에서 삽입(,)·덮어쓰기(.)할 때 ${t.kind === 'video' ? '영상' : '소리'}이 들어갈 트랙입니다. 클릭해서 이 트랙으로 옮기고, 켜진 표시를 다시 누르면 끕니다.`,
         'aria-pressed': String(patchedHere), onclick: () => edit.setSourcePatch(t.id),
-      }, patchedHere ? `${t.kind === 'video' ? 'V' : 'A'}${srcIdx}` : '');
+        // the indicator names the source's own track (V1 / A1) on whichever timeline track it is patched to
+      }, patchedHere ? (t.kind === 'video' ? 'V1' : 'A1') : '');
       const lockBtn = h(`button.lock${t.locked ? '.on' : ''}`, { title: t.locked ? '트랙 잠금 풀기' : '트랙 잠그기 (편집 막기)', 'aria-pressed': String(!!t.locked), onclick: () => edit.setTrackFlag(t.id, 'locked') }, icon(t.locked ? 'lock' : 'unlock'));
       const name = h(`span.tname${t.targeted ? '.targeted' : ''}`, { title: '트랙 대상 지정: 붙여넣기·편집점 추가·편집점 이동이 이 트랙에 적용됩니다 (클릭해서 켜기/끄기)', 'aria-pressed': String(!!t.targeted), onclick: () => edit.setTrackFlag(t.id, 'targeted') }, t.name);
       const items = [patch, lockBtn, name];

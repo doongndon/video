@@ -665,6 +665,16 @@ export class Compositor {
       eachLine((line, x, y) => ctx.fillText(line, x, y));
     }
     const src = { img: c, w, h, fit: false };
+    if (p.point) {
+      // point text: the clip position is the first line's baseline, at its left end (정렬 왼쪽),
+      // middle or right end; cx / cy is where the box centre lies from there
+      const ox = p.align === 'center' ? margin + bw / 2 : p.align === 'right' ? margin + bw - pad - stroke - 2 : margin + pad + stroke + 2;
+      measure.textBaseline = 'middle';
+      const base = measure.measureText(lines[0] || ' ').alphabeticBaseline;
+      const oy = margin + pad + stroke + 2 + lineH / 2 + (Number.isFinite(base) ? -base : p.size * 0.35);
+      src.cx = w / 2 - ox;
+      src.cy = h / 2 - oy;
+    }
     if (this.textCache.size > 80) this.textCache.clear();
     this.textCache.set(key, src);
     return src;
@@ -675,7 +685,7 @@ export class Compositor {
     const tl = t - clip.start;
     if (clip.kind === 'text' || clip.kind === 'shape') {
       const src = this.getSourceSafe(clip, t, tl);
-      return src ? { w: src.w, h: src.h, fit: false } : null;
+      return src ? { w: src.w, h: src.h, fit: false, cx: src.cx || 0, cy: src.cy || 0 } : null;
     }
     if (clip.kind === 'color') return { w: this.seq.width, h: this.seq.height, fit: false };
     const m = this.provider?.media(clip.mediaId);
@@ -833,6 +843,7 @@ export class Compositor {
         ctx.translate(corr.x, corr.y);
       }
     }
+    if (src.cx || src.cy) ctx.translate(src.cx || 0, src.cy || 0);
     if (img === src.img) img = mip(img, onScreenWidth(ctx, src.w));
     if (img === src.img && src.inner) {
       const r = src.inner;
@@ -1448,8 +1459,9 @@ export class Compositor {
     const sin = Math.sin(rad);
     const hw = (size.w * sx) / 2;
     const hh = (size.h * s) / 2;
-    const ax = m.anchorX || 0;
-    const ay = m.anchorY || 0;
+    // point text lies off its origin (the clip position) by cx / cy source pixels
+    const ax = (m.anchorX || 0) - (size.cx || 0) * sx;
+    const ay = (m.anchorY || 0) - (size.cy || 0) * s;
     return [[-hw, -hh], [hw, -hh], [hw, hh], [-hw, hh]].map(([x, y]) => {
       const lx = x - ax;
       const ly = y - ay;
@@ -1598,7 +1610,7 @@ function roundRectPath(ctx, x, y, w, h, r) {
 function padSource(src, W, H) {
   const w = Math.max(W, src.w);
   const h = Math.max(H, src.h);
-  return { img: src.img, w, h, fit: false, inner: { x: (w - src.w) / 2, y: (h - src.h) / 2, w: src.w, h: src.h } };
+  return { img: src.img, w, h, fit: false, cx: src.cx, cy: src.cy, inner: { x: (w - src.w) / 2, y: (h - src.h) / 2, w: src.w, h: src.h } };
 }
 
 function roundRect(ctx, x, y, w, h, r) {

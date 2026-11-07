@@ -292,9 +292,13 @@ class Playback extends Emitter {
 
   playInToOut() {
     const s = store.seq;
-    if (s.inPoint == null || s.outPoint == null) return this.play(1);
-    store.setPlayhead(s.inPoint);
-    this.play(1, { start: s.inPoint, end: s.outPoint });
+    if (s.inPoint == null && s.outPoint == null) return this.play(1);
+    // a missing In is the sequence start, a missing Out its end (outPoint is the end of the Out frame)
+    const start = s.inPoint ?? 0;
+    const end = s.outPoint ?? sequenceDuration(s);
+    if (end <= start) return this.play(1);
+    store.setPlayhead(start);
+    this.play(1, { start, end, inOut: true });
   }
 
   /**
@@ -366,7 +370,8 @@ class Playback extends Emitter {
       if (this.rate > 0 && t >= end) {
         if (this.loop && end > start) t = start;
         else {
-          t = end;
+          // 시작에서 종료까지 재생 stops on the Out frame (it is part of the range)
+          t = this.range?.inOut ? Math.max(start, end - 1 / seq.fps) : end;
           store.ui.playhead = t;
           this.stop();
           store.emit('playhead');
@@ -873,7 +878,8 @@ export function audioTransitionGain(seq, clip, t) {
     const p = clamp((t - w.start) / Math.max(1e-6, w.end - w.start), 0, 1);
     const isIncoming = w.b?.id === clip.id;
     const x = w.a && w.b ? (isIncoming ? p : 1 - p) : w.edge === 'in' ? p : 1 - p;
-    g *= w.type === 'constantGain' ? x : Math.sin((x * Math.PI) / 2);
+    // 지속 게인: straight line · 지수 페이드: straight in dB (−60 dB → 0 dB) · 지속 가감속: equal power
+    g *= w.type === 'constantGain' ? x : w.type === 'exponentialFade' ? (x <= 0 ? 0 : 10 ** (3 * (x - 1))) : Math.sin((x * Math.PI) / 2);
   }
   return g;
 }
