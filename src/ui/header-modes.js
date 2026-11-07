@@ -16,7 +16,7 @@ import { showMenu, toast, loadPref, savePref, showPanel, isMaximized, toggleMaxi
 import { icon } from './icons.js';
 import { allWorkspaces, currentWorkspace, applyWorkspace, resetWorkspace, saveWorkspaceAs, workspaceMenuItem } from './workspaces.js';
 import { pickFiles, importAny } from './project-panel.js';
-import { openExportSettings } from './export-dialog.js';
+import { openExportSettings, openQuickExport } from './export-dialog.js';
 import { buildHomePage, newProjectDialog, ago } from './home.js';
 
 const MODES = [['import', '가져오기'], ['edit', '편집'], ['export', '내보내기']];
@@ -405,7 +405,8 @@ export function initHeaderModes() {
   const wsMenu = iconBtn('workspace', '작업 영역 (Alt+Shift+1~9로 바꾸기)', openWorkspaceMenu, { 'aria-haspopup': 'menu' });
   wsMenu.classList.add('hm-ws-menu');
   const wsName = h('span.hm-ws-name', { onclick: () => openWorkspaceMenu(wsMenu), title: '작업 영역' });
-  const quickBtn = iconBtn('share', '빠른 내보내기 (편집 화면에서 바로 파일 만들기)', () => (appMode.isPhoto() ? appMode.P?.exportDialog() : openExportSettings()));
+  // Premiere's 빠른 내보내기: a small pop-up under the button (its 내보내기 설정 열기… goes to the full settings)
+  const quickBtn = iconBtn('share', '빠른 내보내기', (b) => (appMode.isPhoto() ? appMode.P?.exportDialog() : openQuickExport(b, { moreSettings: () => c.exportMedia() })), { 'aria-haspopup': 'dialog' });
   const fullBtn = iconBtn('maximize', '전체 화면 (다시 누르거나 Esc로 돌아가기)', toggleFullscreen);
   header = h('header#pr-header', { 'aria-label': '헤더 표시줄' },
     h('nav.hm-modes', { 'aria-label': '모드' }, homeBtn, ...MODES.map(([id, label]) => btn(id, label))),

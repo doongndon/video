@@ -34,6 +34,38 @@ const heading = (text) => h('div', { style: { fontWeight: '700', margin: '12px 0
 let support = null; // encodable codecs, checked once
 const supportReady = () => support || (support = Promise.all([encodableVideoCodecs(1920, 1080), encodableAudioCodecs()]).then(([v, a]) => ({ v, a })).catch(() => ({ v: {}, a: {} })));
 
+/**
+ * Render with exportSequence, then save the file (and import it when asked). The progress bar,
+ * status line and missing-sound note are elements of the calling dialog or pop-up.
+ */
+async function runExport({ o, fmt, baseName, token, setProg, status, silentNote, importAfter = false }) {
+  const result = await exportSequence({
+    ...o,
+    baseName,
+    token,
+    onProgress: (p, label) => {
+      setProg(p);
+      status.textContent = label || '';
+    },
+  });
+  const name = `${baseName}.${fmt.ext}`;
+  setProg(1);
+  status.textContent = `${name} 완성 · ${formatBytes(result.blob.size)} · ${result.info}`;
+  if (result.warnings?.length) {
+    silentNote.textContent = `소리를 풀지 못해 이 파일은 소리 없이 들어갔습니다 — ${result.warnings.join(' / ')}. 다른 브라우저(예: Chrome)에서 내보내면 소리가 들어갈 수 있습니다.`;
+    silentNote.hidden = false;
+  }
+  if (importAfter && fmt.ext !== 'zip') {
+    const file = new File([result.blob], name, { type: result.blob.type });
+    importFiles([file]).then((ids) => { if (ids.length) toast(`${name}을(를) 프로젝트에 가져왔습니다`); });
+  }
+  if (await downloadBlob(result.blob, name)) {
+    status.textContent = `${name} 저장 · ${formatBytes(result.blob.size)} · ${result.info}`;
+    toast(result.warnings?.length ? `${name} 파일을 내보냈습니다 (일부 소리 빠짐)` : `${name} 파일을 내보냈습니다`);
+  }
+  return result;
+}
+
 /** mount: lay the settings into that element (the 내보내기 mode page) instead of a dialog. */
 export function openExportSettings({ mount = null } = {}) {
   const s = store.seq;
@@ -317,30 +349,7 @@ export function openExportSettings({ mount = null } = {}) {
           btn.disabled = true;
           const setProg = (p) => { prog.firstChild.style.width = `${Math.round(clamp(p, 0, 1) * 100)}%`; };
           try {
-            const result = await exportSequence({
-              ...o,
-              baseName: fileName.value || 'export',
-              token,
-              onProgress: (p, label) => {
-                setProg(p);
-                status.textContent = label || '';
-              },
-            });
-            const name = `${fileName.value || 'export'}.${f.ext}`;
-            setProg(1);
-            status.textContent = `${name} 완성 · ${formatBytes(result.blob.size)} · ${result.info}`;
-            if (result.warnings?.length) {
-              silentNote.textContent = `소리를 풀지 못해 이 파일은 소리 없이 들어갔습니다 — ${result.warnings.join(' / ')}. 다른 브라우저(예: Chrome)에서 내보내면 소리가 들어갈 수 있습니다.`;
-              silentNote.hidden = false;
-            }
-            if (importAfter.box.checked && f.ext !== 'zip') {
-              const file = new File([result.blob], name, { type: result.blob.type });
-              importFiles([file]).then((ids) => { if (ids.length) toast(`${name}을(를) 프로젝트에 가져왔습니다`); });
-            }
-            if (await downloadBlob(result.blob, name)) {
-              status.textContent = `${name} 저장 · ${formatBytes(result.blob.size)} · ${result.info}`;
-              toast(result.warnings?.length ? `${name} 파일을 내보냈습니다 (일부 소리 빠짐)` : `${name} 파일을 내보냈습니다`);
-            }
+            await runExport({ o, fmt: f, baseName: fileName.value || 'export', token, setProg, status, silentNote, importAfter: importAfter.box.checked });
           } catch (err) {
             console.error(err);
             status.textContent = `내보내기 실패: ${err.message || err}`;
@@ -400,5 +409,149 @@ export function openExportFrameDialog() {
         },
       },
     ],
+  });
+}
+
+// ---------------------------------------------------------------- quick export
+
+/** Premiere's 빠른 내보내기 사전 설정: H.264 at the sequence's size and frame rate. */
+const QUICK_PRESETS = [
+  { id: 'high', name: '소스 일치 - 적응형 고속 비트레이트', quality: 'high', audioBitrate: 320 },
+  { id: 'medium', name: '소스 일치 - 적응형 중간 비트레이트', quality: 'medium', audioBitrate: 192 },
+  { id: 'low', name: '소스 일치 - 적응형 낮은 비트레이트', quality: 'low', audioBitrate: 128 },
+];
+let quickPop = null;
+
+/**
+ * 빠른 내보내기 (the header's share button): a small pop-up under the button with 파일 이름 및 위치,
+ * 사전 설정, 예상 파일 크기 and 내보내기; moreSettings() opens the full 내보내기 settings.
+ */
+export function openQuickExport(anchor, { moreSettings } = {}) {
+  if (quickPop) {
+    quickPop.close();
+    return;
+  }
+  const s = store.seq;
+  const tc = (t) => formatTimecode(t, s.fps);
+  const fileName = h('input', { type: 'text', value: (s.name || '시퀀스').replace(/[\\/:*?"<>|]+/g, '_'), 'aria-label': '파일 이름' });
+  const ext = h('span.qe-ext', '.mp4');
+  const preset = select(QUICK_PRESETS.map((p) => [p.id, p.name]), loadPref('export.quick', 'high'));
+  preset.setAttribute('aria-label', '사전 설정');
+  const summary = note();
+  const sizeEl = h('b');
+  const prog = h('div.progress', { hidden: true }, h('div'));
+  const status = note('');
+  const silentNote = h('div.note.warn', { hidden: true });
+  const token = { cancelled: false };
+  let running = false;
+  let format = 'h264';
+
+  const options = () => {
+    const p = QUICK_PRESETS.find((x) => x.id === preset.value) || QUICK_PRESETS[0];
+    return {
+      format, scale: 1, fps: null, quality: p.quality, bitrate: null, keyframeInterval: 0, maxQuality: false,
+      // like Premiere, a marked In / Out range is what gets exported
+      range: exportRange('inout'),
+      audio: true, sampleRate: 48000, channels: 2, audioBitrate: p.audioBitrate, loudness: null,
+    };
+  };
+  const update = () => {
+    const o = options();
+    const f = FORMATS[format];
+    const { w, h: hh } = outputSize(s, 1);
+    ext.textContent = `.${f.ext}`;
+    summary.textContent = `${f.label} · ${w}×${hh} · ${s.fps} fps · ${tc(o.range.start)} ~ ${tc(o.range.end)}`;
+    sizeEl.textContent = `약 ${formatBytes(estimateExportSize(o, s))}`;
+    savePref('export.quick', preset.value);
+  };
+  preset.addEventListener('change', update);
+  // typing a file name must not reach the editor's shortcuts
+  fileName.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') go.click();
+    if (e.key !== 'Escape' && e.key !== 'Tab') e.stopPropagation();
+  });
+
+  const more = h('button', { type: 'button', title: '형식, 프레임 크기, 비트레이트, 오디오 등 모든 설정' }, '내보내기 설정 열기…');
+  const go = h('button.primary', { type: 'button' }, '내보내기');
+  const el = h('div.qe-pop', { role: 'dialog', 'aria-label': '빠른 내보내기' },
+    h('div.qe-title', '빠른 내보내기'),
+    h('div.qe-sub', s.name || '시퀀스'),
+    h('label.qe-label', '파일 이름 및 위치'),
+    h('div.qe-file', fileName, ext),
+    note('브라우저의 다운로드 폴더에 저장됩니다'),
+    h('label.qe-label', '사전 설정'),
+    preset,
+    summary,
+    h('div.note', '예상 파일 크기: ', sizeEl),
+    prog, status, silentNote,
+    h('div.qe-buttons', more, go));
+  document.body.append(el);
+  const r = anchor.getBoundingClientRect();
+  const w = el.offsetWidth;
+  el.style.left = `${clamp(r.right - w, 4, window.innerWidth - w - 4)}px`;
+  el.style.top = `${r.bottom + 4}px`;
+
+  const close = () => {
+    if (running) return;
+    el.remove();
+    document.removeEventListener('pointerdown', outside, true);
+    document.removeEventListener('keydown', onKey, true);
+    quickPop = null;
+  };
+  // a press outside closes it (not while a file is being made)
+  const outside = (e) => { if (!el.contains(e.target) && !anchor.contains(e.target)) close(); };
+  const onKey = (e) => {
+    if (e.key !== 'Escape') return;
+    e.stopPropagation();
+    if (running) token.cancelled = true;
+    else close();
+  };
+  document.addEventListener('pointerdown', outside, true);
+  document.addEventListener('keydown', onKey, true);
+  quickPop = { close };
+
+  more.addEventListener('click', () => {
+    if (running) {
+      token.cancelled = true;
+      return;
+    }
+    close();
+    moreSettings ? moreSettings() : openExportSettings();
+  });
+  go.addEventListener('click', async () => {
+    if (running) return;
+    const o = options();
+    if (o.range.end - o.range.start <= 0) {
+      status.textContent = '내보낼 구간이 비어 있습니다. 타임라인에 클립을 놓으세요.';
+      return;
+    }
+    running = true;
+    token.cancelled = false;
+    silentNote.hidden = true;
+    prepareSoundCapture();
+    go.disabled = preset.disabled = fileName.disabled = true;
+    more.textContent = '취소';
+    prog.hidden = false;
+    const setProg = (p) => { prog.firstChild.style.width = `${Math.round(clamp(p, 0, 1) * 100)}%`; };
+    try {
+      await runExport({ o, fmt: FORMATS[format], baseName: fileName.value.trim() || 'export', token, setProg, status, silentNote });
+    } catch (err) {
+      console.error(err);
+      status.textContent = `내보내기 실패: ${err.message || err}`;
+    } finally {
+      running = false;
+      go.disabled = preset.disabled = fileName.disabled = false;
+      more.textContent = '내보내기 설정 열기…';
+    }
+  });
+
+  update();
+  fileName.focus();
+  fileName.select();
+  // a browser that cannot make H.264 makes WebM (VP9) instead
+  supportReady().then((sup) => {
+    if (sup.v.avc !== false || !el.isConnected) return;
+    format = sup.v.vp9 !== false ? 'vp9' : format;
+    update();
   });
 }

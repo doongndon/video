@@ -1326,6 +1326,15 @@ export function deleteSequence(id) {
   store.emit('sequence');
 }
 
+/** Premiere's default name for a new nest: 중첩 시퀀스 01, 02 … (the first number not in use). */
+export function nextNestName() {
+  const names = new Set(Object.values(store.project.sequences).map((x) => x.name));
+  for (let i = 1; ; i++) {
+    const n = `중첩 시퀀스 ${String(i).padStart(2, '0')}`;
+    if (!names.has(n)) return n;
+  }
+}
+
 /**
  * Nest: move the selected clips into a new sequence and replace them with a nested-sequence clip.
  */
@@ -1346,7 +1355,7 @@ export function nestSelection(name) {
   const minV = usedV.length ? Math.min(...usedV) : 0;
   const minA = usedA.length ? Math.min(...usedA) : 0;
   const nested = createSequence({
-    name: name || `중첩 시퀀스 ${String(Object.keys(store.project.sequences).length).padStart(2, '0')}`,
+    name: name || nextNestName(),
     width: s.width, height: s.height, fps: s.fps,
     videoTracks: Math.max(3, (usedV.length ? Math.max(...usedV) - minV : 0) + 1),
     audioTracks: Math.max(3, (usedA.length ? Math.max(...usedA) - minA : 0) + 1),

@@ -304,15 +304,27 @@ export function createEffectControls({ only = null } = {}) {
   }
   // (on the next frame: a rebuild can toggle the scrollbar, which would resize the panel again)
   let resizeQueued = false;
-  new ResizeObserver(() => {
-    if (resizeQueued) return;
+  // a hidden panel (another tab in front, closed, or another workspace) skips the work and catches up once shown
+  let shown = true;
+  let stale = false;
+  new ResizeObserver((entries) => {
+    const r = entries[entries.length - 1].contentRect;
+    shown = r.width > 0 && r.height > 0;
+    if (!shown || resizeQueued) return;
     resizeQueued = true;
     requestAnimationFrame(() => {
       resizeQueued = false;
-      if (layout()) rebuild();
+      const catchUp = stale;
+      stale = false;
+      if (layout() || (catchUp && signature() !== sig)) rebuild();
       else update();
     });
   }).observe(scroller);
+  /** Store listener that waits while the panel is hidden. */
+  const whenShown = (fn) => (...args) => {
+    if (shown || dragging) return fn(...args);
+    stale = true;
+  };
 
   function setTimelineView(on) {
     showTimeline = on;
@@ -410,14 +422,18 @@ export function createEffectControls({ only = null } = {}) {
       scroller.append(h('div.ec-group.ec-row', { title: audio.name || '연결된 오디오' }, '오디오'));
       for (const fx of audio.effects) scroller.append(buildEffect(audio, fx));
     }
-    // default mask target: the last mask-like effect on the clip
+    syncMaskTarget(c);
+    buildFoot(c);
+    update();
+    scroller.scrollTop = top;
+  }
+
+  /** Default mask target (the last mask-like effect on the clip) and a stale mask selection cleared. */
+  function syncMaskTarget(c) {
     const masks = c.effects.filter((fx) => MASK_TYPES.has(fx.type));
     if (masks.length && !masks.some((fx) => fx.id === store.ui.maskFxId)) setMaskTarget(masks[masks.length - 1].id);
     const ms = store.ui.maskSel;
     if (ms && (ms.clipId !== c.id || !findFx(c.id, ms.fxId)?.masks?.some((m) => m.id === ms.maskId))) selectMask(null);
-    buildFoot(c);
-    update();
-    scroller.scrollTop = top;
   }
 
   /** Single-effect panel (Lumetri 색상): the clip's effect of type `only`, or a button that adds it. */
@@ -1103,7 +1119,19 @@ export function createEffectControls({ only = null } = {}) {
         store.commit();
         afterDrag();
       });
-      slider.addEventListener('dblclick', () => mutate(`${pdef.label} 재설정`, c, fx, (f) => edit.rawSetParam(store.seq.clips[c.id], f, key, pdef.default)));
+      // the clicks of a double-click on the track move the value first: they fold into the one 재설정 step
+      let clickMark = null;
+      let lastDown = 0;
+      slider.addEventListener('pointerdown', (e) => {
+        if (e.timeStamp - lastDown > 600) clickMark = store.undoMark();
+        lastDown = e.timeStamp;
+      });
+      slider.addEventListener('dblclick', () => {
+        const label = `${pdef.label} 재설정`;
+        mutate(label, c, fx, (f) => edit.rawSetParam(store.seq.clips[c.id], f, key, pdef.default));
+        if (clickMark) store.squashSince(clickMark, label);
+        clickMark = null;
+      });
       updaters.push(() => {
         const p = getP();
         if (p && !begun) slider.value = evalParam(p, tLocal(c.id));
@@ -2930,10 +2958,15 @@ export function createEffectControls({ only = null } = {}) {
     addEffectAt(c.id, payload.type, pos.index);
   });
 
-  store.on('selection', rebuild);
-  store.on('change', onChange);
-  store.on('playhead', update);
-  store.on('mask-target', update);
+  store.on('selection', whenShown(rebuild));
+  // the Program monitor's mask handles follow the selected clip even while this panel is hidden
+  if (!only) store.on('selection', () => {
+    const c = !shown && !store.selection.transition && currentClip();
+    if (c) syncMaskTarget(c);
+  });
+  store.on('change', whenShown(onChange));
+  store.on('playhead', whenShown(update));
+  store.on('mask-target', whenShown(update));
   window.addEventListener('montage:uiscale', () => requestAnimationFrame(update));
   if (!only) store.on('reveal-effect-controls', (opts) => {
     showPanel('effectControls');

@@ -1160,7 +1160,10 @@ export function createTimeline() {
       const x0 = xOf(tw.start);
       const x1 = Math.max(x0 + 4, xOf(tw.end));
       if (x >= x0 && x <= x1 && y >= ry && y <= ry + Math.min(row.h - 3, 22)) {
-        return { area: 'transition', row, t, transition: tw };
+        // its edges drag the length (Premiere), unless the box is too short to tell them apart
+        const ep = Math.min(EDGE_PX, (x1 - x0) / 3);
+        const zone = x - x0 <= ep && tw.a ? 'start' : x1 - x <= ep && (tw.b || !tw.a) ? 'end' : null;
+        return { area: 'transition', row, t, transition: tw, zone };
       }
     }
     const clips = clipsOnTrack(s, row.track.id);
@@ -1307,7 +1310,14 @@ export function createTimeline() {
     }
 
     if (hit.area === 'transition' && (tool === 'select' || tool === 'ripple' || tool === 'rolling')) {
-      store.selectTransition(hit.transition.clip.id, hit.transition.edge);
+      const tw = hit.transition;
+      store.selectTransition(tw.clip.id, tw.edge);
+      if (hit.zone) {
+        const key = tw.edge === 'in' ? 'transIn' : 'transOut';
+        store.begin('전환 길이');
+        // a transition on a cut grows on both sides; one at a clip's open end only on the inside
+        drag = { type: 'transDur', clipId: tw.clip.id, edge: tw.edge, x0: x, d0: tw.clip[key].duration, k: (hit.zone === 'end' ? 1 : -1) * (tw.a && tw.b ? 2 : 1) };
+      }
       return;
     }
 
@@ -1521,8 +1531,9 @@ export function createTimeline() {
       // a clip from a subclip (하위 클립) slips only inside the subclip's range
       const lo = x2.subclip?.restrict ? x2.subclip.in : 0;
       const hi = x2.subclip?.restrict ? Math.min(x2.subclip.out, m?.duration ?? Infinity) : m?.duration;
-      min = Math.max(min, -(x2.inPoint - lo) / rate);
-      if (m && Number.isFinite(hi)) max = Math.min(max, (hi - (x2.inPoint + contentTime(x2, x2.duration))) / rate);
+      // as in Premiere the frames follow the pointer: dragging right shows earlier frames (In moves earlier)
+      max = Math.min(max, (x2.inPoint - lo) / rate);
+      if (m && Number.isFinite(hi)) min = Math.max(min, -(hi - (x2.inPoint + contentTime(x2, x2.duration))) / rate);
     }
     if (min > max) min = max = 0;
     store.begin('밀어넣기 (슬립)');
@@ -1840,12 +1851,24 @@ export function createTimeline() {
         autoScroll(x);
         break;
       }
+      case 'transDur': {
+        edit.setTransitionDuration(drag.clipId, drag.edge, Math.max(1 / fps(), drag.d0 + ((x - drag.x0) / view.pps) * drag.k));
+        const c = s.clips[drag.clipId];
+        const tr = c?.[drag.edge === 'in' ? 'transIn' : 'transOut'];
+        if (tr) {
+          drag.tooltip = `전환 길이 ${formatTimecode(tr.duration, fps())}`;
+          drag.tipX = x;
+          drag.tipY = y;
+        }
+        store.changed();
+        break;
+      }
       case 'slip': {
         const delta = clamp(snapFrame((x - drag.x0) / view.pps, fps()), drag.min, drag.max);
         const inc = delta - drag.applied;
         for (const id of drag.ids) {
           const c = s.clips[id];
-          if (c) c.inPoint += inc * c.speed;
+          if (c) c.inPoint -= inc * c.speed;
         }
         drag.applied = delta;
         drag.tooltip = `슬립 ${delta >= 0 ? '+' : '-'}${formatTimecode(Math.abs(delta), fps())}`;
@@ -2037,6 +2060,7 @@ export function createTimeline() {
       case 'bandKey':
       case 'rampKey':
       case 'marker':
+      case 'transDur':
         // trims and slips preview the edit frame in the Program monitor; put the playhead back
         if (d.restorePlayhead != null) store.setPlayhead(d.restorePlayhead);
         // a speed band (시간 다시 매핑) keeps the linked video/audio in step
@@ -2093,6 +2117,7 @@ export function createTimeline() {
       else if (tool === 'track') cursor = 'e-resize';
       else if (tool === 'trackBack') cursor = 'w-resize';
     } else if (hit.area === 'track' && (tool === 'track' || tool === 'trackBack')) cursor = tool === 'track' ? 'e-resize' : 'w-resize';
+    else if (hit.area === 'transition' && hit.zone && (tool === 'select' || tool === 'ripple' || tool === 'rolling')) cursor = 'ew-resize';
     canvas.style.cursor = cursor;
     requestDraw();
   }
@@ -2132,7 +2157,22 @@ export function createTimeline() {
       }
       store.emit('reveal-effect-controls');
     }
-    if (hit.area === 'transition') store.emit('reveal-effect-controls');
+    // Premiere: a double-click on a transition asks for its length (전환 지속 시간 설정)
+    if (hit.area === 'transition') {
+      store.emit('reveal-effect-controls');
+      askTransitionDuration(hit.transition);
+    }
+  }
+
+  /** 전환 지속 시간 설정: type a timecode or a frame count. */
+  async function askTransitionDuration(tw) {
+    const s = store.seq;
+    const key = tw.edge === 'in' ? 'transIn' : 'transOut';
+    const c = s.clips[tw.clip.id];
+    if (!c?.[key]) return;
+    const v = await promptDialog('전환 지속 시간 설정', '지속 시간 (타임코드 또는 프레임 수)', formatTimecode(c[key].duration, s.fps));
+    const d = v != null ? parseTimecode(v, s.fps) : null;
+    if (d) store.transact('전환 길이', () => edit.setTransitionDuration(c.id, tw.edge, d));
   }
 
   /** Long press with a finger = right click (iOS has no native long-press context menu). */
@@ -2185,14 +2225,7 @@ export function createTimeline() {
     if (hit.area === 'transition') {
       store.selectTransition(hit.transition.clip.id, hit.transition.edge);
       showMenu([
-        { label: '전환 길이 정하기…', action: async () => {
-          const c = store.seq.clips[hit.transition.clip.id];
-          const key = hit.transition.edge === 'in' ? 'transIn' : 'transOut';
-          if (!c?.[key]) return;
-          const v = await promptDialog('전환 길이', '길이 (타임코드 또는 프레임 수)', formatTimecode(c[key].duration, s.fps));
-          const d = v != null ? parseTimecode(v, s.fps) : null;
-          if (d) store.transact('전환 길이', () => edit.setTransitionDuration(c.id, hit.transition.edge, d));
-        } },
+        { label: '전환 지속 시간 설정…', action: () => askTransitionDuration(hit.transition) },
         { label: '전환 삭제', key: 'Del', action: () => edit.deleteSelection() },
       ], e.clientX, e.clientY);
       return;
@@ -2272,7 +2305,7 @@ export function createTimeline() {
         '-',
         // same path as the menus and Shift+D, so the transition picked with '기본 전환으로 설정' is used
         { label: '기본 전환 넣기', key: 'Shift+D', action: () => import('../commands.js').then(({ commands }) => commands.applyDefaultTransitions()) },
-        { label: '중첩 (하나로 묶기)…', action: async () => { const n = await promptDialog('중첩 시퀀스 이름', '이름', `중첩 시퀀스 ${Object.keys(store.project.sequences).length}`); if (n != null) edit.nestSelection(n); } },
+        { label: '중첩 (하나로 묶기)…', action: async () => { const n = await promptDialog('중첩 시퀀스 이름', '이름', edit.nextNestName()); if (n != null) edit.nestSelection(n); } },
         c.kind === 'nest' ? { label: '중첩 시퀀스 열기', action: () => store.openSequence(store.project.media[c.mediaId]?.sequenceId) } : null,
         isMc && mcInner ? { label: '멀티캠 앵글', submenu: videoTracks(mcInner).map((tr, i) => ({ label: `앵글 ${i + 1} (${tr.name})`, key: String(i + 1), checked: c.multicam.angle === i + 1, action: () => {
           store.setPlayhead(Math.max(store.ui.playhead, c.start));

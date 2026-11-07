@@ -903,6 +903,17 @@ body.photo-mode #pr-header, body.mobile #pr-header { display: none; }
 #pr-header .hm-ws-name:hover { color: var(--text); }
 #pr-header .hm-icon { min-height: 0; width: calc(28px * var(--ui-scale)); height: calc(24px * var(--ui-scale)); padding: 0; display: inline-grid; place-items: center; background: none; border-color: transparent; color: var(--text-dim); flex-shrink: 0; }
 #pr-header .hm-icon:hover { background: var(--bg-5); color: var(--text); }
+/* 빠른 내보내기 pop-up under the header button */
+.qe-pop { position: fixed; z-index: 1000; width: min(340px, calc(100vw - 8px)); box-sizing: border-box; background: #262a31; border: 1px solid #4c5361; border-radius: 7px; padding: 12px 14px; box-shadow: 0 10px 28px rgba(0,0,0,.55); display: flex; flex-direction: column; gap: 6px; }
+.qe-pop .qe-title { font-weight: 700; }
+.qe-pop .qe-sub { color: var(--text-dim); font-size: var(--fs-s); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-bottom: 4px; }
+.qe-pop .qe-label { color: var(--text-dim); font-size: var(--fs-s); margin-top: 4px; }
+.qe-pop .qe-file { display: flex; align-items: center; gap: 4px; }
+.qe-pop .qe-file input { flex: 1; min-width: 0; }
+.qe-pop .qe-ext { color: var(--text-faint); }
+.qe-pop select { width: 100%; }
+.qe-pop .note { margin: 0; }
+.qe-pop .qe-buttons { display: flex; justify-content: space-between; gap: 8px; margin-top: 6px; }
 
 /* ---------------- full-area pages (홈, 가져오기, 내보내기) over the panels */
 .hm-page { position: absolute; inset: 0; z-index: 45; background: var(--bg); display: flex; min-height: 0; outline: none; overflow: hidden; }

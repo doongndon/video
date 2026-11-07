@@ -335,7 +335,7 @@ export const commands = {
   autoReframe: () => openReframeDialog(),
   nest: async () => {
     if (!sel().length) return toast('중첩할 클립을 선택하세요');
-    const n = await promptDialog('중첩 시퀀스 이름', '이름', `중첩 시퀀스 ${Object.keys(store.project.sequences).length}`);
+    const n = await promptDialog('중첩 시퀀스 이름', '이름', edit.nextNestName());
     if (n != null) edit.nestSelection(n);
   },
   addEdit: () => edit.addEdit(),

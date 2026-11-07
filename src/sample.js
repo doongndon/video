@@ -57,7 +57,15 @@ function setParam(clip, fxType, key, value, kf) {
 }
 
 export async function loadSampleProject() {
-  store.loadProject(createProject('샘플 프로젝트'));
+  // a second copy gets its own name (샘플 프로젝트 2 …) so the home screen can tell them apart
+  let names = new Set();
+  try {
+    const { listProjects } = await import('./persist.js');
+    names = new Set((await listProjects()).map((r) => r.name));
+  } catch { /* storage unavailable */ }
+  let name = '샘플 프로젝트';
+  for (let i = 2; names.has(name); i++) name = `샘플 프로젝트 ${i}`;
+  store.loadProject(createProject(name));
   const s = store.seq;
   s.name = '샘플 시퀀스';
   const [v1, v2, v3] = videoTracks(s);
