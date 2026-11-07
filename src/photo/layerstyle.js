@@ -364,12 +364,33 @@ export function layerStyleDialog(P, start = 'blending') {
   let raf = 0;
   let swTimer = 0;
   let dlg = null;
+  // while a slider (or the shadow on the picture) is being dragged the picture shows a quicker,
+  // smaller rendering of the effects; letting go draws them at full quality
+  let held = false;
+  const onHold = () => { held = true; };
+  const onLetGo = () => {
+    held = false;
+    if (doc._fxDraft && !raf) raf = requestAnimationFrame(apply);
+  };
+  window.addEventListener('pointerdown', onHold, true);
+  window.addEventListener('pointerup', onLetGo, true);
+  window.addEventListener('pointercancel', onLetGo, true);
+  const unhold = () => {
+    window.removeEventListener('pointerdown', onHold, true);
+    window.removeEventListener('pointerup', onLetGo, true);
+    window.removeEventListener('pointercancel', onLetGo, true);
+    if (doc._fxDraft?.id === l.id) doc._fxDraft = null;
+  };
   const apply = () => {
     raf = 0;
+    doc._fxDraft = held && preview ? { id: l.id } : null;
     writeLayer(l, doc, preview ? st : orig);
     l._styled = null;
     l._cache = null;
+    // the pixels stay as they are: keep their measured bounds (reading a big layer again takes a while)
+    const ob = l._ob?.rev === l.rev ? l._ob : null;
     doc.touch(l);
+    if (ob) ob.rev = l.rev;
     P.redraw();
   };
   const changed = () => {
@@ -975,11 +996,12 @@ export function layerStyleDialog(P, start = 'blending') {
     buttons: [
       { label: '취소' },
       { label: '새 스타일…', action: newStyle },
-      { label: '확인', primary: true, action: () => { cancelAnimationFrame(raf); preview = true; apply(); ok = true; P.commit('레이어 스타일', before); } },
+      { label: '확인', primary: true, action: () => { cancelAnimationFrame(raf); preview = true; held = false; apply(); ok = true; P.commit('레이어 스타일', before); } },
     ],
     onClose: () => {
       cancelAnimationFrame(raf);
       clearTimeout(swTimer);
+      unhold();
       if (!ok) {
         doc.restore(before);
         P.afterHistory();

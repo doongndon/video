@@ -496,6 +496,13 @@ function hueSat(d, p) {
   const H0 = +p.hue || 0;
   const S0 = +p.saturation || 0;
   const L0 = +p.lightness || 0;
+  // worked out once (this loop runs for every pixel of a big photo): hues in turns (0…1)
+  const ss0 = clamp(S0, -100, 100) / 100;
+  const ls0 = clamp(L0, -100, 100) / 100;
+  const cHue = (((H0 % 360) + 360) % 360) / 360;
+  const cSat = clamp(S0, 0, 100) / 100;
+  const shift = cHue;
+  const T = 1 / 3;
   for (let i = 0; i < n; i += 4) {
     const r = d[i] / 255;
     const g = d[i + 1] / 255;
@@ -505,34 +512,37 @@ function hueSat(d, p) {
     let l = (max + min) / 2;
     const dd = max - min;
     let s = dd ? (l > 0.5 ? dd / (2 - max - min) : dd / (max + min)) : 0;
-    let h = 0;
-    if (dd) {
-      h = max === r ? (g - b) / dd + (g < b ? 6 : 0) : max === g ? (b - r) / dd + 2 : (r - g) / dd + 4;
-      h *= 60;
-    }
-    let dh = H0;
-    let ds = S0;
-    let dl = L0;
+    let h1 = 0;
+    if (dd) h1 = (max === r ? (g - b) / dd + (g < b ? 6 : 0) : max === g ? (b - r) / dd + 2 : (r - g) / dd + 4) / 6;
+    let dh = 0;
+    let ss = ss0;
+    let ls = ls0;
     if (act.length && dd > 0.004) {
       // colour ranges only touch coloured pixels (a grey has no hue)
       const cw = Math.min(1, dd / 0.08);
+      let ds = S0;
+      let dl = L0;
       for (const a of act) {
-        const w = rangeWeight(h, a.b) * cw;
+        const w = rangeWeight(h1 * 360, a.b) * cw;
         if (!w) continue;
         dh += a.h * w;
         ds += a.s * w;
         dl += a.l * w;
       }
+      ss = clamp(ds, -100, 100) / 100;
+      ls = clamp(dl, -100, 100) / 100;
     }
+    let hh;
     if (colorize) {
-      h = ((H0 % 360) + 360) % 360;
-      s = clamp(S0, 0, 100) / 100;
+      hh = cHue;
+      s = cSat;
     } else {
-      h = (((h + dh) % 360) + 360) % 360;
-      const ss = clamp(ds, -100, 100) / 100;
-      s = clamp(ss >= 0 ? s + (1 - s) * ss * s * 1.5 + s * ss * 0.5 : s * (1 + ss), 0, 1);
+      hh = h1 + shift;
+      if (dh) hh = (((hh + dh / 360) % 1) + 1) % 1;
+      else if (hh >= 1) hh -= 1;
+      s = ss >= 0 ? s + (1 - s) * ss * s * 1.5 + s * ss * 0.5 : s * (1 + ss);
+      s = s < 0 ? 0 : s > 1 ? 1 : s;
     }
-    const ls = clamp(dl, -100, 100) / 100;
     l = ls >= 0 ? l + (1 - l) * ls : l * (1 + ls);
     if (s <= 0) {
       d[i] = d[i + 1] = d[i + 2] = l * 255;
@@ -540,19 +550,17 @@ function hueSat(d, p) {
     }
     const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
     const pp = 2 * l - q;
-    const hh = h / 360;
-    d[i] = hue2(pp, q, hh + 1 / 3) * 255;
-    d[i + 1] = hue2(pp, q, hh) * 255;
-    d[i + 2] = hue2(pp, q, hh - 1 / 3) * 255;
+    const k6 = (q - pp) * 6;
+    // hue2 for the three channels, written out
+    let t = hh + T;
+    if (t > 1) t -= 1;
+    d[i] = (t < 1 / 6 ? pp + k6 * t : t < 0.5 ? q : t < 2 / 3 ? pp + k6 * (2 / 3 - t) : pp) * 255;
+    t = hh;
+    d[i + 1] = (t < 1 / 6 ? pp + k6 * t : t < 0.5 ? q : t < 2 / 3 ? pp + k6 * (2 / 3 - t) : pp) * 255;
+    t = hh - T;
+    if (t < 0) t += 1;
+    d[i + 2] = (t < 1 / 6 ? pp + k6 * t : t < 0.5 ? q : t < 2 / 3 ? pp + k6 * (2 / 3 - t) : pp) * 255;
   }
-}
-function hue2(p, q, t) {
-  if (t < 0) t += 1;
-  if (t > 1) t -= 1;
-  if (t < 1 / 6) return p + (q - p) * 6 * t;
-  if (t < 1 / 2) return q;
-  if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
-  return p;
 }
 
 function colorBalance(d, p) {

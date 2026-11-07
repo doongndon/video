@@ -55,6 +55,7 @@ body.ph-picking .ph-stage, body.ph-picking .ph-stage canvas { cursor: crosshair 
 .ph-band { position: fixed; pointer-events: none; overflow: hidden; }
 .ph-band path { fill: none; stroke: #fff; stroke-width: 1.5; filter: drop-shadow(0 0 1px rgba(0,0,0,.8)); }
 .ph-band path.d { stroke-dasharray: 6 5; }
+.ph-band path.hit { stroke: transparent; stroke-width: 14; filter: none; pointer-events: stroke; cursor: nwse-resize; touch-action: none; }
 .modal-backdrop.peeking .ph-pin { pointer-events: auto; }
 .nf { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 12px; min-height: 300px; }
 .nf-list { display: flex; flex-direction: column; gap: 4px; }

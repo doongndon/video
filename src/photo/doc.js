@@ -9,7 +9,7 @@
 import { loadFontFor, isWebFont } from '../fonts.js';
 import { applyAdjustment, applyFilter } from './adjust.js';
 import { compositeOnto, setCompositeClip, BLEND_MODES as BM } from './blend.js';
-import { stylePasses, fxPad, hasFx, normalizeFx, fxUsesGlobalLight, fxDocAnchored } from './styles.js';
+import { stylePasses, fxPad, hasFx, normalizeFx, fxUsesGlobalLight, fxDocAnchored, scaleFx } from './styles.js';
 import { boxGradient, paintPattern } from './resources.js';
 
 /** [id, Korean label, canvas op] — kept for older callers; see blend.js for the grouped list. */
@@ -190,6 +190,14 @@ export class PhotoDoc {
     return this.layers.findIndex((l) => l.id === id);
   }
 
+  /** A 배경 layer given a layer mask becomes 레이어 0, as in Photoshop (a background has no mask). Raw. */
+  freeBackground(l) {
+    if (!l || l !== this.layers[0] || l.parent || l.kind !== 'raster' || l.name !== '배경') return;
+    l.name = '레이어 0';
+    l.locked = false;
+    l.lockPos = false;
+  }
+
   /** Photoshop's name for a new layer: 레이어 1, 레이어 2… (one more than the highest number in use). */
   nextLayerName() {
     let n = 0;
@@ -210,7 +218,7 @@ export class PhotoDoc {
       // so finding their bounds again (opaqueBounds) needn't read the whole canvas
       const k = layer._ob;
       if (k && rect && layer.kind === 'raster' && k.canvas === layer.canvas) {
-        const was = k.rev === layer.rev ? k.b || { x: 0, y: 0, w: 0, h: 0 } : k.hintRev === layer.rev ? k.hint : null;
+        const was = k.rev === layer.rev ? k.b || { x: 0, y: 0, w: 0, h: 0 } : k.hintRev === layer.rev ? k.hint : k.seedRev === layer.rev ? k.seed : null;
         k.hint = was && unionRect(was, { x: Math.floor(rect.x - layer.x) - 1, y: Math.floor(rect.y - layer.y) - 1, w: Math.ceil(rect.w) + 2, h: Math.ceil(rect.h) + 2 });
         k.hintRev = was ? layer.rev + 1 : -1;
       }
@@ -575,7 +583,9 @@ export class PhotoDoc {
     layer.x = x0;
     layer.y = y0;
     this.touch(layer, quiet && same ? { x: 0, y: 0, w: 0, h: 0 } : null);
-    if (ob !== undefined) Object.defineProperty(layer, '_ob', { value: { canvas: c, rev: layer.rev, b: ob && { x: ob.x + dx, y: ob.y + dy, w: ob.w, h: ob.h } }, enumerable: false, configurable: true, writable: true });
+    // only a later touch with the changed part may use it: a caller that draws on the copy without
+    // one (applying a mask, a fill) leaves the bounds unknown, to be read again
+    if (ob !== undefined) Object.defineProperty(layer, '_ob', { value: { canvas: c, rev: -1, b: null, seedRev: layer.rev, seed: ob ? { x: ob.x + dx, y: ob.y + dy, w: ob.w, h: ob.h } : { x: 0, y: 0, w: 0, h: 0 } }, enumerable: false, configurable: true, writable: true });
     return c.getContext('2d');
   }
 
@@ -763,6 +773,16 @@ export class PhotoDoc {
       } else ctx.drawImage(float.canvas, float.x, float.y);
     }
     ctx.restore();
+    // Image ▸ Mode ▸ Grayscale: what is painted, pasted or typed afterwards shows (and saves) grey too
+    if (this.mode === 'gray') {
+      const r = clip ? clipToDoc(clip, ctx.canvas.width, ctx.canvas.height) : { x: 0, y: 0, w: ctx.canvas.width, h: ctx.canvas.height };
+      if (r) {
+        const img = ctx.getImageData(r.x, r.y, r.w, r.h);
+        const d = img.data;
+        for (let i = 0; i < d.length; i += 4) d[i] = d[i + 1] = d[i + 2] = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+        ctx.putImageData(img, r.x, r.y);
+      }
+    }
   }
 
   drawable(l, o) {
@@ -915,7 +935,9 @@ export class PhotoDoc {
     const maskLate = fxOn && maskOn && !!l.maskHidesFx;
     const vmaskLate = fxOn && vmaskOn && !!l.vmaskHidesFx;
     const light = fxOn && fxUsesGlobalLight(fx) ? `${this.globalAngle ?? 120},${this.globalAltitude ?? 30}` : '';
-    const parts = { extraKey, cx: c.x, cy: c.y, w: c.canvas.width, h: c.canvas.height, fx: fxOn ? `${JSON.stringify(fx)}${maskLate ? 'M' : ''}${vmaskLate ? 'V' : ''}` : '', fill: '', light };
+    // while a Layer Style slider is dragged the layer's effects are worked out smaller (_fxDraft)
+    const draft = fxOn && this._fxDraft?.id === l.id;
+    const parts = { extraKey, cx: c.x, cy: c.y, w: c.canvas.width, h: c.canvas.height, fx: fxOn ? `${JSON.stringify(fx)}${maskLate ? 'M' : ''}${vmaskLate ? 'V' : ''}${draft ? 'D' : ''}` : '', fill: '', light };
     const key = styledKey(l.rev, parts);
     if (l._styled?.key === key) return l._styled.out;
     const pad = fxOn ? fxPad(fx) : 0;
@@ -952,10 +974,27 @@ export class PhotoDoc {
     let out;
     if (!fxOn) out = { canvas: body, x: ox, y: oy };
     else {
-      const passes = stylePasses(body, fx, {
+      // a draft works on a copy of about a million pixels and scales the effects back up
+      const k = draft ? Math.min(1, Math.sqrt(1e6 / (body.width * body.height))) : 1;
+      const small = k < 0.75 ? makeCanvas(Math.max(1, Math.round(body.width * k)), Math.max(1, Math.round(body.height * k))) : body;
+      const kx = small.width / body.width;
+      if (small !== body) {
+        const sg = small.getContext('2d');
+        sg.imageSmoothingQuality = 'low';
+        sg.drawImage(body, 0, 0, small.width, small.height);
+      }
+      let passes = stylePasses(small, small === body ? fx : scaleFx(fx, kx), {
         fg: o?.fg, bg: o?.bg, globalAngle: this.globalAngle ?? 120, globalAltitude: this.globalAltitude ?? 30,
-        docBox: { x: -ox, y: -oy, w: this.width, h: this.height }, origin: { x: (l.x || 0) - ox, y: (l.y || 0) - oy },
+        docBox: { x: -ox * kx, y: -oy * kx, w: this.width * kx, h: this.height * kx }, origin: { x: ((l.x || 0) - ox) * kx, y: ((l.y || 0) - oy) * kx },
       });
+      if (small !== body) {
+        passes = passes.map((p) => {
+          if (p.kind === 'body') return { ...p, canvas: body };
+          const big = makeCanvas(body.width, body.height);
+          big.getContext('2d').drawImage(p.canvas, 0, 0, body.width, body.height);
+          return { ...p, canvas: big };
+        });
+      }
       if (maskLate || vmaskLate) {
         for (const p of passes) {
           const g = p.canvas.getContext('2d');
@@ -1137,7 +1176,22 @@ export class PhotoDoc {
     const key = `${sig}|${own}|${ctx.canvas.width}`;
     let out = l._cache?.key === key ? l._cache.canvas : null;
     // its own settings changed since it was last drawn in full (a slider being dragged): quickly
-    if (!out && o.draft && ctx === o.root && l._fullOwn && l._fullOwn !== own && this.drawAdjustmentDraft(ctx, l, o)) return undefined;
+    if (!out && o.draft && ctx === o.root && l._fullOwn && l._fullOwn !== own) {
+      const d = o.draft;
+      if (!d.prep) {
+        if (this.drawAdjustmentDraft(ctx, l, o)) return undefined;
+      } else if (d.ready && LOCAL_ADJ.has(l.adjust.type) && !blendIfTests(l.blendIf) && ctx.canvas.width * ctx.canvas.height > 2e6) {
+        // the changes stopped: the full picture is made a strip at a time between frames (one long
+        // pause froze the screen), the quick one stays until it is ready
+        const running = l._adjJob?.key === key;
+        const below = running ? null : cloneCanvas(ctx.canvas);
+        if (this.drawAdjustmentDraft(ctx, l, o)) {
+          if (below) this.adjustInStrips(below, l, key, own, o);
+          d.waiting = true;
+          return undefined;
+        }
+      }
+    }
     if (!out) {
       l._fullOwn = own;
       const src = ctx.canvas;
@@ -1213,6 +1267,48 @@ export class PhotoDoc {
     }
     d.used = true;
     return true;
+  }
+
+  /**
+   * Work out a per-pixel adjustment layer over `below` (the picture under it) in strips of about a
+   * million pixels, one per task, then keep it as the layer's cache and call o.draft.ready. A newer
+   * change of the layer's settings (or a newer job) stops it.
+   */
+  adjustInStrips(below, l, key, own, o) {
+    const job = { key };
+    Object.defineProperty(l, '_adjJob', { value: job, enumerable: false, configurable: true, writable: true });
+    const W = below.width;
+    const H = below.height;
+    const out = makeCanvas(W, H);
+    const og = out.getContext('2d');
+    const bg = below.getContext('2d', { willReadFrequently: true });
+    const rows = Math.max(16, Math.floor(1e6 / W));
+    const { type } = l.adjust;
+    const params = { ...l.adjust.params, _fg: o.fg, _bg: o.bg };
+    const ready = o.draft.ready;
+    let y = 0;
+    const step = () => {
+      if (l._adjJob !== job || `${JSON.stringify(l.adjust)}|${l.mask ? l.rev : 0}` !== own) return;
+      const hh = Math.min(rows, H - y);
+      const img = bg.getImageData(0, y, W, hh);
+      applyAdjustment(img, type, params);
+      og.putImageData(img, 0, y);
+      y += hh;
+      if (y < H) return void setTimeout(step, 0);
+      if (l.mask && l.mask.enabled) {
+        og.globalCompositeOperation = 'destination-in';
+        og.drawImage(maskAlpha(this, l.mask), 0, 0);
+      }
+      if (l.vmask?.subpaths?.length && vectorMaskRenderer) {
+        og.globalCompositeOperation = 'destination-in';
+        og.drawImage(vectorMaskRenderer(this, l.vmask), 0, 0);
+      }
+      l._adjJob = null;
+      l._cache = { key, canvas: out };
+      l._fullOwn = own;
+      ready();
+    };
+    setTimeout(step, 0);
   }
 
   /** An adjustment layer over just one rectangle (per-pixel adjustments only), not cached. */

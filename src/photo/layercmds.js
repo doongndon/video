@@ -1109,6 +1109,7 @@ export function installLayerCommands(P) {
         g.drawImage(d.selection.canvas, 0, 0);
       }
       l.mask = { canvas: c, x: 0, y: 0, enabled: true, linked: true };
+      d.freeBackground(l);
       if (mode === 'revealSel' || mode === 'hideSel') d.selection = null;
       l._styled = null;
       d.touch(l);
@@ -1166,6 +1167,7 @@ export function installLayerCommands(P) {
       const m = makeCanvas(d.width, d.height);
       m.getContext('2d').drawImage(px, 0, 0);
       l.mask = { canvas: m, x: 0, y: 0, enabled: true, linked: true };
+      d.freeBackground(l);
       d.touch(l);
     });
   };

@@ -64,6 +64,7 @@ export function filterGalleryDialog(P) {
     return c;
   };
   let timer = 0;
+  let checker = null;
   const draw = () => {
     clearTimeout(timer);
     busy.hidden = false;
@@ -73,7 +74,19 @@ export function filterGalleryDialog(P) {
         view.width = out.width;
         view.height = out.height;
         const g = view.getContext('2d');
-        g.clearRect(0, 0, view.width, view.height);
+        // the transparency grid only under the picture; around it the plain grey of Photoshop's preview
+        if (!checker) {
+          const t = makeCanvas(16, 16);
+          const tg = t.getContext('2d');
+          tg.fillStyle = '#fff';
+          tg.fillRect(0, 0, 16, 16);
+          tg.fillStyle = '#ccc';
+          tg.fillRect(0, 0, 8, 8);
+          tg.fillRect(8, 8, 8, 8);
+          checker = g.createPattern(t, 'repeat');
+        }
+        g.fillStyle = checker;
+        g.fillRect(0, 0, view.width, view.height);
         g.drawImage(out, 0, 0);
       } catch (err) {
         toast(String(err.message || err));

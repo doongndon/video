@@ -80,6 +80,9 @@ body.photo-mode #workspace, body.photo-mode #statusbar { display: none !importan
 label.ph-prow > span:first-child { min-width: calc(76px * var(--ui-scale)); }
 .ph-prow input[type=range] { flex: 1; min-width: 80px; }
 .ph-prow .inline { display: inline-flex; align-items: center; gap: 6px; }
+/* a field's name stays on one line (the artboard's 크기 broke into 크 / 기 beside its long list) */
+.ph-prow > .ph-opt > span:first-child { white-space: nowrap; flex-shrink: 0; }
+.ph-prow > .ph-opt > select { min-width: 0; }
 .ph-prow button.on { background: var(--accent-soft); border-color: var(--accent); color: var(--value); }
 .ph-ptext { width: 100%; resize: vertical; min-height: 60px; }
 
@@ -404,7 +407,7 @@ body.mobile .ph-ai .ph-aistyles button, body.mobile .ph-ai .ph-aichips button { 
 .ph-gal { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr) minmax(220px, 0.9fr); gap: 12px; min-height: 0; max-height: min(72vh, 680px); }
 .ph-gal-left, .ph-gal-mid, .ph-gal-right { min-width: 0; min-height: 0; display: flex; flex-direction: column; gap: 8px; }
 .ph-gal-mid, .ph-gal-right { overflow-y: auto; }
-.ph-gal-viewwrap { position: relative; flex: 1; min-height: 200px; display: grid; place-items: center; background: repeating-conic-gradient(#3a3d44 0% 25%, #2c2f35 0% 50%) 50% / 16px 16px; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.ph-gal-viewwrap { position: relative; flex: 1; min-height: 200px; display: grid; place-items: center; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
 .ph-gal-view { max-width: 100%; max-height: 100%; touch-action: none; cursor: grab; }
 .ph-gal-busy { position: absolute; right: 8px; bottom: 8px; padding: 2px 8px; border-radius: 10px; background: rgba(0,0,0,.6); color: #fff; font-size: var(--fs-xs); }
 .ph-gal-busy[hidden] { display: none; }
@@ -742,6 +745,8 @@ body.photo-mode .ph-stage { background: var(--ps-pasteboard, #282828); }
 .ph-lname { font-size: var(--fs-s); }
 .ph-badge.fx { font-family: Georgia, 'Times New Roman', serif; font-style: italic; font-weight: 700; color: var(--text-dim); }
 .ph-subrow { border-bottom-color: var(--line); }
+.ph-fxrow { min-height: 22px; gap: 0; }
+.ph-fxglyph { font-family: Georgia, 'Times New Roman', serif; font-weight: 700; color: var(--text-dim); }
 .ph-lfoot { justify-content: flex-end; gap: 1px; padding: 3px 6px; background: var(--bg-2); border-top: 1px solid var(--line); }
 .ph-lfoot .ph-ibtn { width: calc(26px * var(--ui-scale)); height: calc(24px * var(--ui-scale)); }
 .ph-fxbtn { font: italic 700 13px Georgia, 'Times New Roman', serif; }
@@ -978,7 +983,9 @@ body.photo-mode:not(.mobile) #menubar .ph-topicons { order: 3; display: inline-f
 body.photo-mode:not(.mobile) .ph-opts { gap: 6px; padding: 0 6px; min-height: calc(32px * var(--ui-scale)); height: calc(32px * var(--ui-scale)); border-bottom: 1px solid var(--ps-gutter); overflow-y: hidden; }
 body.photo-mode:not(.mobile) .ph-opts .ph-opt { gap: 4px; font-size: var(--fs-s); color: var(--text-dim); }
 body.photo-mode:not(.mobile) .ph-opts .ph-opt select { height: calc(20px * var(--ui-scale)); padding: 0 2px 0 5px; font-size: var(--fs-s); max-width: 150px; }
-body.photo-mode:not(.mobile) .ph-opts .ph-num { width: calc(46px * var(--ui-scale)); height: calc(20px * var(--ui-scale)); padding: 0 4px !important; font-size: var(--fs-s); }
+body.photo-mode:not(.mobile) .ph-opts .ph-num { width: calc(46px * var(--ui-scale)); height: calc(20px * var(--ui-scale)); padding: 0 4px !important; font-size: var(--fs-s); -moz-appearance: textfield; }
+/* no spin arrows in the options bar (as in Photoshop): they hid the 4th digit of sizes like 1920 */
+body.photo-mode:not(.mobile) .ph-opts .ph-num::-webkit-inner-spin-button, body.photo-mode:not(.mobile) .ph-opts .ph-num::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
 body.photo-mode:not(.mobile) .ph-opts button.small, body.photo-mode:not(.mobile) .ph-opts button.primary { min-height: 0; height: calc(22px * var(--ui-scale)); padding: 0 7px; font-size: var(--fs-s); }
 body.photo-mode:not(.mobile) .ph-opts input[type=checkbox] { margin: 0; width: 13px; height: 13px; }
 body.photo-mode:not(.mobile) .ph-opts input[type=range] { width: calc(80px * var(--ui-scale)); }

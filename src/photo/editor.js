@@ -253,6 +253,15 @@ export function createPhotoEditor(root) {
         return b;
       }));
       G.el.hidden = !live.length;
+      // more tabs than fit: keep the one shown in view (a panel opened from 창 was hidden past the edge)
+      requestAnimationFrame(() => {
+        const on = bar.querySelector('button.on');
+        if (!on || bar.scrollWidth <= bar.clientWidth) return;
+        const a = bar.getBoundingClientRect();
+        const b = on.getBoundingClientRect();
+        if (b.right > a.right) bar.scrollLeft += b.right - a.right;
+        else if (b.left < a.left) bar.scrollLeft -= a.left - b.left;
+      });
       G.el.style.flex = G.size && G !== dock.groups[dock.groups.length - 1] ? `0 0 ${G.size}px` : '';
       // on phones a panel lives in the sheet while it is open there
       if (G.cur && body.firstChild !== panels[G.cur].el && !panels[G.cur].el.closest('.ph-sheet.open')) body.replaceChildren(panels[G.cur].el);
@@ -546,8 +555,14 @@ export function createPhotoEditor(root) {
   /** Photoshop's tab title: "이름 @ 66.7%(레이어 1, RGB/8) *". */
   const tabTitle = (d) => {
     if (isMobile()) return `${d.name}${d.saved ? '' : ' *'}`;
-    const a = d.layer(d.activeId) || d.layers[d.layers.length - 1];
-    const what = d === P.doc && P.editMask ? '레이어 마스크/8' : d.quickMask ? '빠른 마스크/8' : 'RGB/8';
+    let a = d.layer(d.activeId) || d.layers[d.layers.length - 1];
+    // an alpha channel or a single colour channel being looked at names itself (no layer)
+    const ch = d._ch;
+    const alpha = ch?.active && d.channels?.find((c) => c.id === ch.active);
+    const one = !alpha && ch?.comps?.size === 1 && !ch.alpha?.size ? { r: '빨강', g: '녹색', b: '파랑' }[[...ch.comps][0]] : null;
+    if (alpha || one) a = null;
+    const mode = { gray: '회색', duotone: '이중톤', indexed: '인덱스', bitmap: '비트맵' }[d.mode] || 'RGB';
+    const what = alpha ? `${alpha.name}/8` : one ? `${one}/8` : d === P.doc && P.editMask ? '레이어 마스크/8' : d.quickMask ? '빠른 마스크/8' : `${mode}/8`;
     return `${d.name} @ ${Math.round((d.view?.zoom || 1) * 1000) / 10}%(${a ? `${a.name}, ` : ''}${what})${d.saved ? '' : ' *'}`;
   };
   function renderTabs() {
@@ -652,11 +667,23 @@ export function createPhotoEditor(root) {
   let checker = null;
   let draftTimer = 0;
   let draftFull = false;
-  P.composite = () => {
+  // the composite holds a quick draft of an adjustment being changed (screen only)
+  let compDraft = false;
+  /**
+   * The whole picture (doc size). forView: for drawing on screen, where a quick draft of an
+   * adjustment being changed will do; everything else (copy merged, sampling, export) gets it exact.
+   */
+  P.composite = (forView = false) => {
     const doc = P.doc;
     if (comp.width !== doc.width || comp.height !== doc.height) {
       comp.width = doc.width;
       comp.height = doc.height;
+      compRev = -1;
+    }
+    if (compDraft && !forView) {
+      compDraft = false;
+      clearTimeout(draftTimer);
+      draftFull = true;
       compRev = -1;
     }
     // a view-only float (a live preview on the top layer) is drawn over the view in draw(), not here
@@ -690,13 +717,20 @@ export function createPhotoEditor(root) {
         // for the part on screen (doc.js); the whole picture follows once the changes stop
         const v = doc.view;
         const dpr = window.devicePixelRatio || 1;
-        const draft = draftFull || !v ? null : { scale: v.zoom * dpr, rect: { x: (-off.x - v.x) / v.zoom, y: (-off.y - v.y) / v.zoom, w: view.width / dpr / v.zoom, h: view.height / dpr / v.zoom } };
+        // ('prep': the changes stopped; a big picture is then worked out in strips, see adjustInStrips)
+        const full = () => {
+          draftFull = true;
+          compRev = -1;
+          P.redraw();
+        };
+        const draft = !forView || draftFull === true || !v ? null : { scale: v.zoom * dpr, rect: { x: (-off.x - v.x) / v.zoom, y: (-off.y - v.y) / v.zoom, w: view.width / dpr / v.zoom, h: view.height / dpr / v.zoom }, prep: draftFull === 'prep', ready: () => P.doc === doc && full() };
         draftFull = false;
         doc.render(comp.getContext('2d'), { float: fl, fg: P.fg, bg: P.bg, draft });
-        if (draft?.used) {
+        compDraft = !!draft?.used;
+        if (draft?.used && !draft.waiting) {
           clearTimeout(draftTimer);
           draftTimer = setTimeout(() => {
-            draftFull = true;
+            draftFull = 'prep';
             compRev = -1;
             P.redraw();
           }, 300);
@@ -732,7 +766,7 @@ export function createPhotoEditor(root) {
    * Drawn whole over the document area it looks the same, at a fraction of the cost.
    */
   P.viewSource = (scale) => {
-    const src = P.composite();
+    const src = P.composite(true);
     if (mipDirty === 'all') {
       mips.length = 0;
       mipDirty = null;
@@ -879,7 +913,7 @@ export function createPhotoEditor(root) {
     const w = doc.width * v.zoom;
     const hh = doc.height * v.zoom;
     // transparency checkerboard
-    const full = P.composite();
+    const full = P.composite(true);
     const shown = P.displayCanvas ? P.displayCanvas(full) : full;
     // zoomed out, a smaller copy of the picture looks the same and draws much faster
     const src = shown === full ? P.viewSource(v.zoom * dpr) : shown;
@@ -2872,7 +2906,7 @@ function buildMenus(P) {
       ] },
     ],
     '이미지': () => [
-      { label: '모드', disabled: no(), submenu: [{ label: 'RGB 색상', checked: P.doc?.mode !== 'gray', action: () => toast('RGB 색상 모드입니다 (회색 음영으로 바꾼 레이어는 다시 색이 생기지 않아요)') }, { label: '회색 음영', checked: P.doc?.mode === 'gray', action: () => C.grayscale() }] },
+      { label: '모드', disabled: no(), submenu: [{ label: 'RGB 색상', checked: !P.doc?.mode || P.doc.mode === 'rgb', action: () => C.rgbMode() }, { label: '회색 음영', checked: P.doc?.mode === 'gray', action: () => C.grayscale() }] },
       '-',
       { label: '조정', disabled: no(), submenu: adjustItems },
       '-',

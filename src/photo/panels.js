@@ -8,7 +8,7 @@ import { fontLabel } from '../fonts.js';
 import { makeCanvas, SHAPES, LAYER_COLORS, FILL_TYPES, PhotoDoc, psdTextKey } from './doc.js';
 import { GRADIENTS, GRADIENT_STYLES, gradientSwatch, listPatterns } from './resources.js';
 import { BLEND_GROUPS, PASS_THROUGH, blendName } from './blend.js';
-import { hasFx, FX_NAMES, instanceKeys } from './styles.js';
+import { hasFx, FX_NAMES, instanceKeys, baseKey } from './styles.js';
 
 const FX_ORDER = ['bevel', 'stroke', 'innerShadow', 'innerGlow', 'satin', 'colorOverlay', 'gradientOverlay', 'patternOverlay', 'outerGlow', 'dropShadow'];
 import { TOOLS, TOOL_BY_ID, TOOL_GROUPS } from './tools.js';
@@ -1242,13 +1242,18 @@ export function buildLayersPanel(P) {
         }
       });
     }
-    const fxOn = hasFx(l.fx);
+    // the effects listed under the layer: the turned-on ones, and those hidden with their eye here
+    // (Photoshop keeps those listed with the eye off); all of them also while 효과 is hidden as a whole
+    const fxKeys = l.fx ? FX_ORDER.flatMap((k0) => instanceKeys(l.fx, k0)).filter((k) => l.fx[k].enabled || l.fx[k].eyeOff) : [];
+    const fxOn = fxKeys.length > 0;
+    const fxOpen = fxOn && l.fxOpen !== false;
+    const foldFx = () => { l.fxOpen = !fxOpen; };
     // the 배경 layer: italic name and a lock at the right (click: make it a normal layer)
     const isBg = l.kind === 'raster' && !l.parent && doc.layers[0] === l && l.name === '배경';
     const badges = [
       isBg ? h('button.ph-badge.ph-bglock', { title: '배경 레이어 (누르면 일반 레이어로 바꿉니다)', 'aria-label': '배경 레이어 잠금 풀기', onclick: (e) => { e.stopPropagation(); P.cmd.layerFromBackground?.(); } }, icon('lock', 12)) : null,
       l.linkId ? h('span.ph-badge', { title: '연결된 레이어' }, icon('link', 12)) : null,
-      fxOn ? onDbl(h('button.ph-badge.fx', { title: '효과 보기/숨기기 · 두 번 클릭: 레이어 스타일', onclick: (e) => { e.stopPropagation(); l.fxOpen = !l.fxOpen; P.emit('layers'); } }, 'fx', l.fxOpen ? '▾' : '▸'), `${l.id}:fxb`, () => { l.fxOpen = !l.fxOpen; P.selectLayer(l.id); P.cmd.layerStyle('blending'); }) : null,
+      fxOn ? onDbl(h('button.ph-badge.fx', { title: '효과 목록 펼치기/접기 · 두 번 클릭: 레이어 스타일', 'aria-expanded': String(fxOpen), onclick: (e) => { e.stopPropagation(); foldFx(); P.emit('layers'); } }, 'fx', fxOpen ? '▾' : '▸'), `${l.id}:fxb`, () => { l.fxOpen = fxOpen; P.selectLayer(l.id); P.cmd.layerStyle('blending'); }) : null,
       !isBg && (l.locked || l.lockPixels || l.lockPos || l.lockAlpha) ? h('span.ph-badge', { title: '잠김' }, icon('lock', 12)) : null,
     ];
     // the name itself (double-click: rename); the rest of the row is the empty part (double-click: style)
@@ -1362,19 +1367,41 @@ export function buildLayersPanel(P) {
     });
     rows.push(row);
     // effects and smart filters listed under the layer
-    if (fxOn && l.fxOpen) {
-      rows.push(h('div.ph-subrow', { style: { paddingLeft: `${46 + depth * 16}px` } }, h('span', '효과')));
-      for (const k0 of FX_ORDER) {
-        for (const k of instanceKeys(l.fx, k0)) {
-          const f = l.fx[k];
-          const ey = h('button.ph-eye.small', { 'aria-label': f.enabled ? '효과 끄기' : '효과 켜기' }, icon(f.enabled ? 'eye' : 'eyeOff', 13));
-          ey.addEventListener('click', (e) => {
-            e.stopPropagation();
-            P.run('효과 켜기/끄기', () => { l.fx = { ...l.fx, [k]: { ...f, enabled: !f.enabled } }; l._styled = null; doc.touch(l); });
+    if (fxOpen) {
+      // Photoshop's 효과 list: the eye in the eye column, 효과 (its eye shows / hides them all) and each effect
+      const allOn = !l.fx.disabled;
+      const sub = (eyeBtn, indent, label, title) => {
+        const r = h('div.ph-subrow.ph-fxrow', { style: { paddingLeft: '6px' }, title }, eyeBtn, h('span', { style: { paddingLeft: `${depth * 16 + indent}px` } }, label));
+        r.addEventListener('click', () => { if (doc.activeId !== l.id) P.selectLayer(l.id); });
+        return r;
+      };
+      const allEye = h('button.ph-eye', { 'aria-label': allOn ? '모든 효과 숨기기' : '모든 효과 보이기' }, icon(allOn ? 'eye' : 'eyeOff', 13));
+      allEye.addEventListener('click', (e) => {
+        e.stopPropagation();
+        P.run(allOn ? '레이어 효과 숨기기' : '레이어 효과 보이기', () => {
+          const fx = { ...l.fx };
+          if (allOn) fx.disabled = true;
+          else delete fx.disabled;
+          l.fx = fx;
+          l._styled = null;
+          doc.touch(l);
+        });
+      });
+      rows.push(onDbl(sub(allEye, 30, h('span', h('i.ph-fxglyph', 'fx'), ' 효과'), '두 번 클릭: 레이어 스타일'), `${l.id}:fx`, () => { P.selectLayer(l.id); P.cmd.layerStyle('blending'); }));
+      for (const k of fxKeys) {
+        const f = l.fx[k];
+        const ey = h('button.ph-eye', { 'aria-label': f.enabled ? '효과 끄기' : '효과 켜기', style: allOn ? null : { opacity: 0.45 } }, icon(f.enabled ? 'eye' : 'eyeOff', 13));
+        ey.addEventListener('click', (e) => {
+          e.stopPropagation();
+          P.run(f.enabled ? '레이어 효과 숨기기' : '레이어 효과 보이기', () => {
+            const fx = { ...l.fx, [k]: { ...f, enabled: !f.enabled, eyeOff: f.enabled || undefined } };
+            if (!f.enabled) delete fx.disabled;
+            l.fx = fx;
+            l._styled = null;
+            doc.touch(l);
           });
-          const r = onDbl(h('div.ph-subrow', { style: { paddingLeft: `${46 + depth * 16}px` }, title: '두 번 클릭: 설정 바꾸기' }, ey, h('span', FX_NAMES[k0])), `${l.id}:fx:${k}`, () => { P.selectLayer(l.id); P.cmd.layerStyle(k); });
-          rows.push(r);
-        }
+        });
+        rows.push(onDbl(sub(ey, 46, FX_NAMES[baseKey(k)], '두 번 클릭: 설정 바꾸기'), `${l.id}:fx:${k}`, () => { P.selectLayer(l.id); P.cmd.layerStyle(k); }));
       }
     }
     if (l.kind === 'smart' && l.smart.filters?.length) {
@@ -1911,8 +1938,17 @@ export function buildHistoryPanel(P) {
     list.querySelector('.ph-hrow.on')?.scrollIntoView({ block: 'nearest' });
   };
   const foot = h('div.ph-hfoot',
-    h('button.small', { title: '지금 모습을 스냅숏으로 기억 (작업 내역이 넘쳐도 남음)', onclick: () => P.newSnapshot() }, icon('camera', 14), ' 새 스냅숏'),
-    h('button.small', { title: '지금 모습으로 새 문서 만들기', onclick: () => (P.doc ? P.stateToDoc() : null) }, icon('plus', 13), ' 새 문서로'));
+    // Photoshop's camera button makes 스냅숏 1, 2… at once; Alt+click asks for a name
+    h('button.small', { title: '지금 모습을 스냅숏으로 기억 (작업 내역이 넘쳐도 남음) · Alt+클릭: 이름 정하기', onclick: (e) => P.newSnapshot(e.altKey ? undefined : `스냅숏 ${++count}`) }, icon('camera', 14), ' 새 스냅숏'),
+    h('button.small', { title: '지금 모습으로 새 문서 만들기', onclick: () => (P.doc ? P.stateToDoc() : null) }, icon('plus', 13), ' 새 문서로'),
+    // Photoshop's trash: the current state goes, with every state after it
+    h('button.small', { title: '현재 상태 삭제 (그 뒤의 상태도 함께)', 'aria-label': '현재 상태 삭제', onclick: () => {
+      const hist = P.doc?.history;
+      if (!hist?.undoStack.length) return;
+      P.undo();
+      hist.redoStack.length = 0;
+      P.emit('history');
+    } }, icon('trash', 13)));
   P.on('history', render);
   P.on('doc', render);
   return h('div.ph-panel.history', list, foot);

@@ -998,7 +998,11 @@ export function installSelectionTools(P) {
       if (toggle) {
         if (st.comps.has(which) && st.comps.size > 1) st.comps.delete(which);
         else st.comps.add(which);
-      } else st.comps = new Set([which]);
+      } else {
+        // a plain click shows that channel alone (an alpha channel shown before is hidden, as in Photoshop)
+        st.comps = new Set([which]);
+        st.alpha.clear();
+      }
       st.active = null;
     } else {
       st.active = which;
@@ -1006,6 +1010,8 @@ export function installSelectionTools(P) {
       if (!toggle) st.comps = new Set();
     }
     P.emit('channels');
+    // the tab title names the channel (Photoshop: "이름 @ 100%(알파 1/8)")
+    P.renderTabs?.();
     P.redraw();
   };
   C.toggleChannelEye = (which) => {
@@ -1018,6 +1024,7 @@ export function installSelectionTools(P) {
     else st.alpha.add(which);
     P.chState();
     P.emit('channels');
+    P.renderTabs?.();
     P.redraw();
   };
 

@@ -546,6 +546,7 @@ function output(P, src, base, brushC, o) {
       if (!l) return;
       P.run('선택 및 마스크 (레이어 마스크)', () => {
         l.mask = mask();
+        doc.freeBackground(l);
         doc.selection = null;
         doc.touch(l);
       });

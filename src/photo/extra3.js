@@ -411,10 +411,12 @@ function stretch(P, label, perChannel, neutral) {
   return undefined;
 }
 
-function toGrayscale(P) {
+function toGrayscale(P, toRgb = false) {
   const doc = P.doc;
   if (!doc) return;
-  P.run('회색 음영', () => {
+  // Image ▸ Mode ▸ RGB Color from grayscale: what was painted grey stays grey, new paint has colour
+  if (toRgb && (!doc.mode || doc.mode === 'rgb')) return void toast('이미 RGB 색상 모드입니다');
+  P.run(toRgb ? 'RGB 색상' : '회색 음영', () => {
     for (const l of doc.layers) {
       if (l.kind !== 'raster' || !l.canvas) continue;
       const c = cloneCanvas(l.canvas);
@@ -427,9 +429,9 @@ function toGrayscale(P) {
       l._styled = null;
       doc.touch(l);
     }
-    doc.mode = 'gray';
+    doc.mode = toRgb ? 'rgb' : 'gray';
   });
-  toast('모든 이미지 레이어를 회색 음영으로 바꿨어요. 글자·모양 레이어의 색은 그대로예요.');
+  if (!toRgb) toast('회색 음영 문서가 됐어요. 이제 칠하거나 붙여 넣는 색도 회색으로 보이고 저장됩니다.');
 }
 
 // ---------------------------------------------------------------- focus area
@@ -637,6 +639,7 @@ export function installExtra3(P) {
   C.autoContrast = () => stretch(P, '자동 대비', false, false);
   C.autoColor = () => stretch(P, '자동 색상', true, true);
   C.grayscale = () => toGrayscale(P);
+  C.rgbMode = () => toGrayscale(P, true);
   C.focusArea = () => focusArea(P);
   C.findReplace = () => findReplace(P);
   C.newComp = async () => {

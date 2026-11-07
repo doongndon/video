@@ -1607,12 +1607,58 @@ export const TOOLS = [
       this.on = doc ? { doc, w: doc.width, h: doc.height } : null;
       this.fresh = true;
       if (doc && this.ratio(E)) this.fitRatio(E, true);
+      this.syncView(E);
       E.overlay();
     },
-    deactivate() {
+    deactivate(E) {
       this.b = null;
       this.d = null;
       this.straighten = false;
+      if (E) this.syncView(E);
+    },
+    /**
+     * Photoshop keeps a turned crop box level and turns the picture under it: the view turns by the
+     * box's angle about the box's middle (the user's own Rotate View angle comes back afterwards).
+     */
+    syncView(E) {
+      const t = this.turn;
+      const doc = E.doc;
+      if (t && t.doc !== doc) {
+        t.doc.view = { ...t.doc.view, rot: t.base };
+        this.turn = null;
+      }
+      const b = doc ? this.b : null;
+      const a = b?.a || 0;
+      if (!doc || (!a && !this.turn)) return;
+      if (!this.turn) this.turn = { doc, base: doc.view.rot || 0 };
+      const v = doc.view;
+      const sg = v.flip ? -1 : 1;
+      const rot = this.turn.base - (sg * a * 180) / Math.PI;
+      if (!a) this.turn = null;
+      const r = document.querySelector('.ph-stage')?.getBoundingClientRect();
+      if (!r || !b) {
+        doc.view = { ...v, rot };
+        E.viewChanged();
+        return;
+      }
+      // keep the box's middle where it is on screen: screen = S + R(rot)·F·(L − S)
+      const S = [r.width / 2, r.height / 2];
+      const z = v.zoom;
+      const L0 = [v.x + b.cx * z, v.y + b.cy * z];
+      const q0 = ((v.rot || 0) * Math.PI) / 180;
+      const dx0 = sg * (L0[0] - S[0]);
+      const dy0 = L0[1] - S[1];
+      const tx = dx0 * Math.cos(q0) - dy0 * Math.sin(q0);
+      const ty = dx0 * Math.sin(q0) + dy0 * Math.cos(q0);
+      const q1 = (-rot * Math.PI) / 180;
+      const lx = S[0] + sg * (tx * Math.cos(q1) - ty * Math.sin(q1));
+      const ly = S[1] + tx * Math.sin(q1) + ty * Math.cos(q1);
+      doc.view = { ...v, rot, x: v.x + lx - L0[0], y: v.y + ly - L0[1] };
+      E.viewChanged();
+    },
+    /** The angle (radians, on screen) of a pointer about a client point. */
+    screenAngle(e, c) {
+      return Math.atan2(e.clientY - c[1], e.clientX - c[0]);
     },
     /** The box, kept in step with the picture while it is untouched (undo, another document). */
     box(E) {
@@ -1670,7 +1716,7 @@ export const TOOLS = [
       const k = this.straighten ? 'crosshair' : this.handleAt(E, p);
       const [lx, ly] = this.local(p);
       const inside = Math.abs(lx) <= b.w / 2 && Math.abs(ly) <= b.h / 2;
-      const cur = k === 'crosshair' ? k : k ? (['t', 'b'].includes(k) ? 'ns-resize' : ['l', 'r'].includes(k) ? 'ew-resize' : ['tl', 'br'].includes(k) ? 'nwse-resize' : 'nesw-resize') : this.fresh ? 'crosshair' : inside ? 'move' : 'alias';
+      const cur = k === 'crosshair' ? k : k ? (['t', 'b'].includes(k) ? 'ns-resize' : ['l', 'r'].includes(k) ? 'ew-resize' : ['tl', 'br'].includes(k) ? 'nwse-resize' : 'nesw-resize') : !inside ? 'alias' : this.fresh ? 'crosshair' : 'move';
       this.cursor = cur;
     },
     down(E, p, e) {
@@ -1684,7 +1730,19 @@ export const TOOLS = [
       const hd = this.handleAt(E, p);
       const [lx, ly] = this.local(p);
       const inside = Math.abs(lx) <= b.w / 2 && Math.abs(ly) <= b.h / 2;
-      this.d = { h: hd || (this.fresh ? 'new' : inside ? 'move' : 'rotate'), a: p, b0: { ...b }, moved: false };
+      // outside the box turns it (also the first, whole-picture box); inside draws a new one or moves it
+      this.d = { h: hd || (!inside ? 'rotate' : this.fresh ? 'new' : 'move'), a: p, b0: { ...b }, moved: false };
+      // turning follows the pointer on screen about the box's middle (which stays put while the view turns)
+      const r = document.querySelector('.ph-stage')?.getBoundingClientRect();
+      if (this.d.h === 'rotate' && r && e?.clientX != null) {
+        const v = E.doc.view;
+        const [lx, ly] = E.toScreen(b.cx, b.cy);
+        const q = ((v.rot || 0) * Math.PI) / 180;
+        const dx = (v.flip ? -1 : 1) * (lx - r.width / 2);
+        const dy = ly - r.height / 2;
+        this.d.pivot = [r.left + r.width / 2 + dx * Math.cos(q) - dy * Math.sin(q), r.top + r.height / 2 + dx * Math.sin(q) + dy * Math.cos(q)];
+        this.d.sa0 = this.screenAngle(e, this.d.pivot);
+      }
     },
     move(E, p, e) {
       const d = this.d;
@@ -1696,9 +1754,13 @@ export const TOOLS = [
       if (d.h === 'line') d.b = p;
       else if (d.h === 'move') this.b = { ...b0, cx: b0.cx + p.x - d.a.x, cy: b0.cy + p.y - d.a.y };
       else if (d.h === 'rotate') {
-        let ang = b0.a + Math.atan2(p.y - b0.cy, p.x - b0.cx) - Math.atan2(d.a.y - b0.cy, d.a.x - b0.cx);
+        // the picture turns with the pointer (the box turns the other way over it)
+        let ang = d.pivot
+          ? b0.a - (E.doc.view.flip ? -1 : 1) * (this.screenAngle(e, d.pivot) - d.sa0)
+          : b0.a + Math.atan2(p.y - b0.cy, p.x - b0.cx) - Math.atan2(d.a.y - b0.cy, d.a.x - b0.cx);
         if (e.shiftKey) ang = Math.round(ang / (Math.PI / 12)) * (Math.PI / 12);
         this.b = this.fitInside(E, { ...b0, a: normAngle(ang) }, b0);
+        this.syncView(E);
       } else if (d.h === 'new') {
         let w = p.x - d.a.x;
         let hh = p.y - d.a.y;
@@ -1811,6 +1873,7 @@ export const TOOLS = [
       const b0 = { cx: doc.width / 2, cy: doc.height / 2, w, h: hh, a: 0 };
       this.b = this.fitInside(E, { ...b0, a }, b0);
       this.fresh = false;
+      this.syncView(E);
     },
     up(E) {
       const d = this.d;
@@ -1939,6 +2002,7 @@ export const TOOLS = [
       const opts = { deletePixels: !!o.deletePixels, contentAware: !!o.contentAware, size, res: size ? +o.res || null : null };
       this.b = null;
       this.straighten = false;
+      this.syncView(E);
       const r = E.cmd.cropBox
         ? E.cmd.cropBox({ cx: b.cx, cy: b.cy, w: b.w, h: b.h, a: turned ? b.a : 0 }, opts)
         : E.cropTo({ x: Math.round(b.cx - b.w / 2), y: Math.round(b.cy - b.h / 2), w: Math.round(b.w), h: Math.round(b.h) }, opts.deletePixels);
@@ -1983,19 +2047,18 @@ export const TOOLS = [
         g.fillRect((u * W) / 2 - 4, (v * H) / 2 - 4, 8, 8);
         g.strokeRect((u * W) / 2 - 4.5, (v * H) / 2 - 4.5, 9, 9);
       }
-      g.restore();
-      // the size (and the turn) of the result
-      const turnDeg = Math.round((b.a * 1800) / Math.PI) / 10;
+      // the size (and the turn) of the result, written along the box's top edge (level on screen,
+      // as the view turns with the box); inside the box when there is no room above it
+      const turnDeg = -Math.round((b.a * 1800) / Math.PI) / 10;
       const label = `${Math.round(b.w)} × ${Math.round(b.h)} px${turnDeg ? ` · ${turnDeg}°` : ''}  (Enter 또는 두 번 눌러 자르기 · Esc 취소)`;
-      const top = cs.reduce((m, q) => (q[1] < m[1] ? q : m), cs[0]);
-      g.save();
+      const topY = Math.min(...cs.map((q) => q[1]));
       g.font = '12px system-ui, sans-serif';
       g.lineWidth = 3;
       g.strokeStyle = 'rgba(0,0,0,.7)';
       g.fillStyle = '#fff';
-      const ly = top[1] - 8 > 12 ? top[1] - 8 : top[1] + 18;
-      g.strokeText(label, Math.max(4, top[0] - 40), ly);
-      g.fillText(label, Math.max(4, top[0] - 40), ly);
+      const ly = this.turn || topY - 8 > 12 ? -H / 2 - 8 : -H / 2 + 18;
+      g.strokeText(label, -W / 2 + 2, ly);
+      g.fillText(label, -W / 2 + 2, ly);
       g.restore();
       // Straighten: the line being drawn and its angle
       if (this.d?.h === 'line' && this.d.moved) {

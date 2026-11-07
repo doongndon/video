@@ -203,6 +203,8 @@ export function newDocDialog(P) {
 export const RESAMPLE = [['auto', '자동'], ['preserve', '세부 묘사 유지 (확대)'], ['bicubicSmoother', '쌍입방 매끄럽게 (확대)'], ['bicubicSharper', '쌍입방 선명하게 (축소)'], ['bicubic', '쌍입방 (매끄러운 그레이디언트)'], ['nearest', '최단입점 (명확한 가장자리)'], ['bilinear', '쌍선형']];
 const FIT_TO = [
   ['', '원본 크기'],
+  // shown once a size is typed in (Photoshop's 사용자 정의)
+  ['custom', '사용자 정의'],
   ['px:1920x1080', '1920 × 1080 픽셀 (풀 HD)'], ['px:1280x720', '1280 × 720 픽셀'], ['px:1080x1080', '1080 × 1080 픽셀'], ['px:800x600', '800 × 600 픽셀'],
   ['in:4x6@300', '4 × 6 인치 300 ppi'], ['in:5x7@300', '5 × 7 인치 300 ppi'], ['in:8x10@300', '8 × 10 인치 300 ppi'],
   ['cm:21x29.7@300', 'A4 (21 × 29.7 cm) 300 ppi'], ['res:72', '72 ppi (웹)'], ['res:300', '300 ppi (인쇄)'],
@@ -258,7 +260,7 @@ export function imageSizeDialog(P) {
       const px = isW ? st.w : st.h;
       st.res = clamp((px / v) * PER_INCH[unit], 0.01, 99999);
     }
-    fit.value = '';
+    fit.value = 'custom';
     show(field);
   };
   w.addEventListener('input', () => fromField(w));
@@ -280,7 +282,7 @@ export function imageSizeDialog(P) {
       st.h *= nres / st.res;
     }
     st.res = nres;
-    fit.value = '';
+    fit.value = 'custom';
     show(res);
   });
   resU.addEventListener('change', () => show());
@@ -302,6 +304,7 @@ export function imageSizeDialog(P) {
   });
   fit.addEventListener('change', () => {
     const v = fit.value;
+    if (v === 'custom') return;
     if (!v) {
       st.w = W0;
       st.h = H0;
@@ -874,6 +877,20 @@ function picturePins(P, modal, { defs, params, ctls, size, toDoc, fromDoc, onCha
     band.setAttribute('class', 'ph-band');
     band.innerHTML = '<path class="f"/><path class="d"/>';
   }
+  // Iris Blur: the ellipse where the blur is full (solid, as in Photoshop) and the one inside it where
+  // the sharp area ends (dashed); dragging the solid one sizes both, the dashed one the sharp area
+  const iris = ['x', 'y', 'radius', 'aspect', 'fade'].every((k) => defs.some((d) => d[0] === k));
+  let ring = null;
+  if (iris) {
+    ring = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    ring.setAttribute('class', 'ph-band');
+    ring.innerHTML = '<path class="f"/><path class="d"/><path class="hit" data-k="outer"/><path class="hit" data-k="inner"/>';
+  }
+  const irisGeo = () => {
+    const [W, H] = size;
+    const R = (Math.min(W, H) / 2) * (params.radius / 100);
+    return { W, H, cx: (W * params.x) / 100, cy: (H * params.y) / 100, R, R2: R * (1 + params.fade / 50), k: params.aspect / 100 };
+  };
   const pinAt = (pin) => toDoc((pin.a ? params[pin.a] : 50) / 100, params[pin.b] / 100);
   const toClient = (x, y) => {
     // the inverse of P.toDoc (the view may be zoomed, moved or turned)
@@ -920,7 +937,64 @@ function picturePins(P, modal, { defs, params, ctls, size, toDoc, fromDoc, onCha
       band.children[0].setAttribute('d', line(-f) + line(f));
       band.children[1].setAttribute('d', line(-fd) + line(fd));
     }
+    if (ring) {
+      const r = document.querySelector('.ph-stage')?.getBoundingClientRect() || { left: 0, top: 0, width: innerWidth, height: innerHeight };
+      Object.assign(ring.style, { left: `${r.left}px`, top: `${r.top}px`, width: `${r.width}px`, height: `${r.height}px` });
+      const { W, H, cx, cy, R, R2, k } = irisGeo();
+      const ellipse = (rad) => {
+        let d = '';
+        for (let i = 0; i <= 64; i++) {
+          const t = (i / 64) * Math.PI * 2;
+          const [qx, qy] = toClient(...toDoc((cx + Math.cos(t) * rad * k) / W, (cy + Math.sin(t) * rad) / H));
+          d += `${i ? 'L' : 'M'}${qx - r.left},${qy - r.top}`;
+        }
+        return d;
+      };
+      const [outer, inner] = [ellipse(R2), ellipse(R)];
+      ring.children[0].setAttribute('d', outer);
+      ring.children[1].setAttribute('d', inner);
+      ring.children[2].setAttribute('d', outer);
+      ring.children[3].setAttribute('d', inner);
+    }
   };
+  if (ring) {
+    // a drag on a ring: its size follows the pointer (in the filter's pixels, the ellipse made round)
+    for (const hit of [ring.children[2], ring.children[3]]) {
+      hit.addEventListener('pointerdown', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        hit.setPointerCapture(e.pointerId);
+        const outer = hit.dataset.k === 'outer';
+        const mv = (ev) => {
+          const pt = P.toDoc(ev.clientX, ev.clientY);
+          const [u, v] = fromDoc(pt.x, pt.y);
+          const { W, H, cx, cy, R2, k } = irisGeo();
+          const d = Math.hypot((u * W - cx) / k, v * H - cy);
+          const set = (key, val) => {
+            const def = defs.find((x) => x[0] === key);
+            params[key] = clamp(Math.round(val), def[2], def[3]);
+            ctls[key]?.(params[key]);
+          };
+          if (outer) set('radius', (d / (1 + params.fade / 50) / (Math.min(W, H) / 2)) * 100);
+          else {
+            // the sharp area grows or shrinks inside the outer ring, which stays
+            set('radius', (d / (Math.min(W, H) / 2)) * 100);
+            set('fade', (R2 / Math.max(1, (Math.min(W, H) / 2) * (params.radius / 100)) - 1) * 50);
+          }
+          place(true);
+          onChange();
+        };
+        const up = () => {
+          hit.removeEventListener('pointermove', mv);
+          hit.removeEventListener('pointerup', up);
+          hit.removeEventListener('pointercancel', up);
+        };
+        hit.addEventListener('pointermove', mv);
+        hit.addEventListener('pointerup', up);
+        hit.addEventListener('pointercancel', up);
+      });
+    }
+  }
   const movePin = (pin, e) => {
     const pt = P.toDoc(e.clientX, e.clientY);
     const [u, v] = fromDoc(pt.x, pt.y);
@@ -946,7 +1020,14 @@ function picturePins(P, modal, { defs, params, ctls, size, toDoc, fromDoc, onCha
     pin.el.addEventListener('pointerup', up);
     pin.el.addEventListener('pointercancel', up);
   };
+  // on a computer the window moves to the top right (where Photoshop keeps its Blur Tools panel), so
+  // the picture and its pins stay in view instead of under the window
+  if ((pins.length || band) && !document.body.classList.contains('mobile')) {
+    back.style.placeItems = 'start end';
+    modal.style.margin = '64px 12px 0 0';
+  }
   if (band) back.append(band);
+  if (ring) back.append(ring);
   for (const pin of pins) {
     pin.el.addEventListener('pointerdown', (e) => dragPin(pin, e));
     back.append(pin.el);
