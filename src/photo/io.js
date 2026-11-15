@@ -14,15 +14,25 @@ const baseName = (n) => String(n || '이미지').replace(/\.[^.]+$/, '');
 
 export const OPEN_ACCEPT = 'image/*,.psd,.psb,.mphoto,.png,.jpg,.jpeg,.webp,.gif,.bmp,.svg,.avif';
 
-export async function canvasFromFile(file) {
+/**
+ * A picture file as a canvas. `limit(w, h, name)` (phones) may answer a smaller scale for a picture
+ * too big for the device's canvases, or 0 to leave it unopened.
+ */
+export async function canvasFromFile(file, limit = null) {
   const url = URL.createObjectURL(file);
   try {
     const img = new Image();
     img.decoding = 'async';
     img.src = url;
     await img.decode();
-    const c = makeCanvas(img.naturalWidth || 1, img.naturalHeight || 1);
-    c.getContext('2d').drawImage(img, 0, 0);
+    const w = img.naturalWidth || 1;
+    const hh = img.naturalHeight || 1;
+    const k = limit ? await limit(w, hh, file.name) : 1;
+    if (!k) throw Object.assign(new Error('취소했습니다'), { name: 'AbortError' });
+    const c = makeCanvas(Math.max(1, Math.round(w * Math.min(1, k))), Math.max(1, Math.round(hh * Math.min(1, k))));
+    const g = c.getContext('2d');
+    g.imageSmoothingQuality = 'high';
+    g.drawImage(img, 0, 0, c.width, c.height);
     return c;
   } finally {
     URL.revokeObjectURL(url);
@@ -44,11 +54,11 @@ export function docFromCanvas(canvas, name) {
   return doc;
 }
 
-export async function openFile(file) {
+export async function openFile(file, { limit = null } = {}) {
   const lower = file.name.toLowerCase();
   if (lower.endsWith('.psd') || lower.endsWith('.psb')) return finishPsd(docFromPsd(await file.arrayBuffer(), baseName(file.name)));
   if (lower.endsWith('.mphoto') || file.type === 'application/json') return docFromProject(JSON.parse(await file.text()));
-  const doc = docFromCanvas(await canvasFromFile(file), baseName(file.name));
+  const doc = docFromCanvas(await canvasFromFile(file, limit), baseName(file.name));
   doc.fileName = file.name;
   return doc;
 }

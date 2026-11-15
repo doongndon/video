@@ -1813,8 +1813,9 @@ function resolveGradient(g, P) {
 
 // ---------------------------------------------------------------- fill / stroke
 
-export function fillDialog(P) {
-  const what = sel([['fg', '전경색'], ['bg', '배경색'], ['custom', '색상…'], ['content', '내용 인식'], ['pattern', '패턴'], ['#000000', '검정'], ['#808080', '50% 회색'], ['#ffffff', '흰색']], 'fg');
+/** 칠 (Shift+F5). `content`: what the 내용 list starts on (Delete on the 배경 layer starts on 내용 인식). */
+export function fillDialog(P, { content = 'fg' } = {}) {
+  const what = sel([['fg', '전경색'], ['bg', '배경색'], ['custom', '색상…'], ['content', '내용 인식'], ['pattern', '패턴'], ['#000000', '검정'], ['#808080', '50% 회색'], ['#ffffff', '흰색']], content);
   const color = h('input', { type: 'color', value: P.fg, hidden: true, 'aria-label': '색상' });
   const pat = sel(listPatterns().map((p) => [p.id, p.name]), listPatterns()[0]?.id || 'checker');
   const patRow = formRow('사용자 정의 패턴', pat);

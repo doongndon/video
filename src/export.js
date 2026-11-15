@@ -584,7 +584,7 @@ export async function preloadFonts(seq) {
 export async function exportSequence(opts) {
   const seq = store.seq;
   const id = formatId(opts.format);
-  const fmt = FORMATS[id];
+  let fmt = FORMATS[id];
   const { start, end } = opts.range;
   if (end - start <= 0) throw new Error('내보낼 구간이 비어 있습니다. 타임라인에 클립이 있는지, 시작/끝 표시가 올바른지 확인하세요.');
   const token = opts.token || { cancelled: false };
@@ -635,7 +635,17 @@ export async function exportSequence(opts) {
     const quality = new MB.Quality(opts.quality || 'high');
     const rate = opts.bitrate ? { bitrate: Math.max(50000, Math.round(opts.bitrate * 1e6)) } : { quality };
     const mode = opts.bitrateMode === 'constant' || opts.bitrateMode === 'variable' ? opts.bitrateMode : undefined;
-    const canVideo = await MB.canEncodeVideo(fmt.video, { width: outW, height: outH, ...(opts.bitrate ? { bitrate: rate.bitrate } : {}) }).catch(() => false);
+    let canVideo = await MB.canEncodeVideo(fmt.video, { width: outW, height: outH, ...(opts.bitrate ? { bitrate: rate.bitrate } : {}) }).catch(() => false);
+    // phones cannot always make every format (no H.264 encoder on some Android phones, no VP9 on
+    // iPhones): fall back to the other common one and say so in the summary
+    let fellBack = null;
+    for (const alt of canVideo ? [] : ['h264', 'vp9']) {
+      if (FORMATS[alt].video === fmt.video || !(await MB.canEncodeVideo(FORMATS[alt].video, { width: outW, height: outH }).catch(() => false))) continue;
+      fellBack = fmt;
+      fmt = FORMATS[alt];
+      canVideo = true;
+      break;
+    }
     if (!canVideo) throw new Error(`이 브라우저는 ${fmt.label} 영상을 만들 수 없습니다. 형식을 H.264나 VP9로 바꾸거나 최신 Chrome/Edge를 사용하세요.`);
     const wantAudio = opts.audio !== false && Object.values(seq.clips).some((c) => c.kind === 'audio');
     const sr = opts.sampleRate || 48000;
@@ -739,7 +749,8 @@ export async function exportSequence(opts) {
     const blob = new Blob([output.target.buffer], { type: fmt.container === 'mp4' ? 'video/mp4' : 'video/webm' });
     progress(1, '완료');
     const vInfo = `${outW}×${outH} @ ${fps} fps · ${fmt.video.toUpperCase()}${opts.bitrate ? ` ${opts.bitrate} Mbps ${mode === 'constant' ? 'CBR' : 'VBR'}` : ''}`;
-    return { blob, info: `${vInfo}${audioCodec ? ` + ${audioInfo(audioCodec.toUpperCase(), audioRate)}` : ''}`, warnings: warnings(), loudness };
+    const swapped = fellBack ? ` (이 브라우저는 ${fellBack.label}을(를) 만들 수 없어 ${fmt.label}(으)로 만들었습니다)` : '';
+    return { blob, ext: fmt.ext, info: `${vInfo}${audioCodec ? ` + ${audioInfo(audioCodec.toUpperCase(), audioRate)}` : ''}${swapped}`, warnings: warnings(), loudness };
   } finally {
     wakeLock?.release().catch(() => {});
     releaseSoundCapture();

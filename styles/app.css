@@ -217,6 +217,9 @@ body.splitting:has(.splitter.h.dragging) { cursor: row-resize; }
 .track-header button.on.mute { background: #2f7a45; }
 .track-header button.on.solo { background: #8a7a14; }
 .track-header button.on.eye { background: #6a2428; }
+/* 동기화 잠금 is on by default, so on just shows the icon (as in Premiere) and off fades it out */
+.track-header button.sync.on { background: transparent; color: var(--text); }
+.track-header button.sync:not(.on) { opacity: .35; }
 .track-header button.rec.on { background: var(--rec); }
 .track-header .vol { margin-left: auto; font-size: var(--fs-xs); color: var(--text-faint); text-align: right; cursor: ew-resize; padding: 2px 4px; border-radius: 4px; }
 .track-header .vol:hover { background: var(--bg-4); color: var(--text); }
@@ -562,7 +565,7 @@ body.mobile .tl-hscroll-wrap { padding-left: 76px; }
 body.mobile .tl-bottom { display: none; }
 body.mobile .tl-ruler-spacer span { display: none; }
 body.mobile .track-header { gap: 1px; padding: 0 2px; }
-body.mobile .track-header .vol, body.mobile .track-header .lock, body.mobile .track-header .rec { display: none; }
+body.mobile .track-header .vol, body.mobile .track-header .lock, body.mobile .track-header .sync, body.mobile .track-header .rec { display: none; }
 body.mobile .track-header .tname { min-width: 30px; }
 body.mobile .m-add { display: grid; place-items: center; position: absolute; right: 12px; bottom: 26px; width: 52px; height: 52px; border-radius: 26px; background: var(--accent); border: none; color: #fff; box-shadow: 0 6px 16px rgba(0,0,0,.45); z-index: 5; }
 body.mobile .m-bottom { display: block; background: var(--bg-2); border-top: 1px solid var(--line); padding-bottom: env(safe-area-inset-bottom, 0px); position: relative; z-index: 70; flex-shrink: 0; }
@@ -587,8 +590,10 @@ body.mobile.m-sheet-big:not(.m-land) #pg-top-left, body.mobile.m-sheet-big:not(.
 body.mobile #pg-top-left > .tabs, body.mobile #pg-bottom-left > .tabs { display: none; }
 /* typing in a sheet (on-screen keyboard up): the sheet takes the whole screen */
 body.mobile.m-typing #pg-top-left.m-open, body.mobile.m-typing #pg-bottom-left.m-open { top: 0; bottom: 0; height: auto; width: auto !important; left: 0; border-radius: 0; z-index: 90; padding-top: env(safe-area-inset-top, 0px); }
+/* --m-kb: the on-screen keyboard's height where the browser does not shrink the page for it (iOS) */
+body.mobile.m-typing #pg-top-left.m-open, body.mobile.m-typing #pg-bottom-left.m-open, body.mobile .modal-backdrop, body.mobile .m-menu-backdrop { bottom: var(--m-kb, 0px); }
 body.mobile.m-typing .m-grip { display: none; }
-body.mobile .m-sheet-head { display: flex; align-items: center; gap: 6px; padding: 4px 6px 0 12px; flex-shrink: 0; position: relative; }
+body.mobile .m-sheet-head { display: flex; align-items: center; gap: 6px; padding: 4px 6px 0 12px; flex-shrink: 0; position: relative; touch-action: none; }
 body.mobile .m-sheet-name { flex: 1; font-weight: 700; padding-top: 10px; }
 .m-grip { position: absolute; left: 50%; top: 2px; transform: translateX(-50%); width: 64px; height: 18px; min-height: 0; padding: 0; background: none; border: none; }
 .m-grip::after { content: ""; display: block; width: 40px; height: 5px; border-radius: 3px; background: var(--line-2); margin: 6px auto 0; }
@@ -598,6 +603,9 @@ body.mobile .tabs .tab { padding: 0 12px; }
 body.mobile .toasts { bottom: calc(var(--m-nav-h) + 72px + env(safe-area-inset-bottom, 0px)); width: calc(100vw - 32px); }
 /* with a sheet open, messages go over the preview instead of covering the sheet */
 body.mobile.m-sheet-open .toasts { bottom: auto; top: calc(var(--m-bar-bottom, 52px) + 44px); }
+/* dialogs and list sheets rise from the bottom: messages wait in the strip above them; a pop-up menu hides them */
+body.mobile:has(.modal-backdrop:not(.peeking), .m-menu-backdrop) .toasts { bottom: auto; top: calc(6px + env(safe-area-inset-top, 0px)); }
+body.mobile:has(.menu) .toasts { visibility: hidden; }
 body.mobile .toast { font-size: 14px; padding: 6px 12px; }
 body.mobile .toast { max-width: 100%; text-align: center; }
 body.mobile input[type=text], body.mobile input[type=number], body.mobile input[type=search], body.mobile input[type=password], body.mobile select, body.mobile textarea { font-size: 16px; }
@@ -605,8 +613,9 @@ body.mobile button { min-height: 36px; }
 body.mobile .menu { min-width: 220px; max-width: 92vw; font-size: 15px; }
 body.mobile .menu .item { padding: 11px 16px 11px 30px; }
 body.mobile .modal-backdrop { place-items: end stretch; }
-body.mobile .modal { min-width: 0; width: 100% !important; max-width: 100%; max-height: 90dvh; border-radius: 16px 16px 0 0; padding-bottom: env(safe-area-inset-bottom, 0px); }
+body.mobile .modal { min-width: 0; width: 100% !important; max-width: 100%; max-height: min(90dvh, calc(100dvh - 60px - env(safe-area-inset-top, 0px))); border-radius: 16px 16px 0 0; padding-bottom: env(safe-area-inset-bottom, 0px); }
 body.mobile .modal footer button { flex: 1; min-height: 44px; }
+.export-share { display: inline-flex; align-items: center; gap: 6px; margin: 6px 0; min-height: 44px; padding: 0 16px; }
 body.mobile .form-row { grid-template-columns: minmax(0, 1fr); gap: 4px; }
 body.mobile .modal select, body.mobile .modal input:not([type=checkbox]):not([type=radio]):not([type=color]) { max-width: 100%; }
 body.mobile .modal label { overflow-wrap: anywhere; }
@@ -639,7 +648,7 @@ body.mobile.m-land.m-sheet-big #pg-top-left, body.mobile.m-land.m-sheet-big #pg-
 body.m-land.m-has-sel:not(.m-sheet-open) .m-nav { display: none; }
 body.m-land .m-grip { display: none; }
 body.m-land .m-menu { left: auto; top: 0; width: min(460px, 70vw); max-height: none; border-radius: 16px 0 0 16px; }
-body.m-land .modal { max-height: 96dvh; }
+body.m-land .modal { max-height: calc(100dvh - 46px); }
 
 .m-menu-backdrop { position: fixed; inset: 0; z-index: 1500; background: rgba(0,0,0,.5); }
 .m-menu { position: absolute; left: 0; right: 0; bottom: 0; max-height: 82dvh; display: flex; flex-direction: column; background: #262a31; border-radius: 16px 16px 0 0; padding-bottom: env(safe-area-inset-bottom, 0px); box-shadow: 0 -10px 30px rgba(0,0,0,.6); }
@@ -804,7 +813,7 @@ body:not(.photo-mode):not(.mobile) .tl-top { border-bottom: none; padding: 1px 6
 body:not(.photo-mode):not(.mobile) .tl-top .tc { font-size: var(--fs-tc); min-width: 0; margin-right: 6px; }
 body:not(.photo-mode):not(.mobile) .tl-top .ibtn { min-height: 0; height: calc(22px * var(--ui-scale)); color: var(--text-dim); }
 body:not(.photo-mode):not(.mobile) .tl-top .ibtn.on { color: var(--value); background: transparent; }
-body:not(.photo-mode):not(.mobile) .tl-main { grid-template-columns: calc(172px * var(--ui-scale)) 1fr; }
+body:not(.photo-mode):not(.mobile) .tl-main { grid-template-columns: calc(180px * var(--ui-scale)) 1fr; }
 body:not(.photo-mode):not(.mobile) .tl-hscroll-wrap { padding-left: calc(172px * var(--ui-scale)); }
 body:not(.photo-mode):not(.mobile) .tl-headers { border-right: 1px solid var(--gutter); }
 body:not(.photo-mode):not(.mobile) .tl-ruler-spacer { border-bottom-color: var(--gutter); gap: 1px; padding: 0 4px; }

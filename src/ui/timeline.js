@@ -250,7 +250,13 @@ export function createTimeline() {
       }, patchedHere ? (t.kind === 'video' ? 'V1' : 'A1') : '');
       const lockBtn = h(`button.lock${t.locked ? '.on' : ''}`, { title: t.locked ? '트랙 잠금 풀기' : '트랙 잠그기 (편집 막기)', 'aria-pressed': String(!!t.locked), onclick: () => edit.setTrackFlag(t.id, 'locked') }, icon(t.locked ? 'lock' : 'unlock'));
       const name = h(`span.tname${t.targeted ? '.targeted' : ''}`, { title: '트랙 대상 지정: 붙여넣기·편집점 추가·편집점 이동이 이 트랙에 적용됩니다 (클릭해서 켜기/끄기)', 'aria-pressed': String(!!t.targeted), onclick: () => edit.setTrackFlag(t.id, 'targeted') }, t.name);
-      const items = [patch, lockBtn, name];
+      // 동기화 잠금 (on unless turned off): ripple edits on other tracks move this track's clips too
+      const syncOn = t.syncLock !== false;
+      const syncBtn = h(`button.sync${syncOn ? '.on' : ''}`, {
+        title: `동기화 잠금 켜기/끄기 (지금 ${syncOn ? '켜짐' : '꺼짐'}): 켜져 있으면 다른 트랙에서 잔물결 삭제·삽입·잔물결 트림을 할 때 이 트랙의 클립도 함께 움직여 싱크가 맞습니다. Shift+클릭: 같은 종류 트랙 모두`,
+        'aria-pressed': String(syncOn), onclick: (e) => edit.toggleSyncLock(t.id, e.shiftKey),
+      }, icon('syncLock'));
+      const items = [patch, lockBtn, name, syncBtn];
       if (t.kind === 'video') {
         items.push(h(`button.eye${t.hidden ? '.on' : ''}`, { title: t.hidden ? '트랙 보이기' : '트랙 숨기기', 'aria-pressed': String(!!t.hidden), onclick: () => edit.setTrackFlag(t.id, 'hidden') }, icon(t.hidden ? 'eyeOff' : 'eye')));
       } else {
@@ -339,6 +345,7 @@ export function createTimeline() {
           { label: '트랙 삭제… (빈 트랙)', action: () => openDeleteTracksDialog() },
           '-',
           { label: '소스 패치를 이 트랙으로', checked: patchedHere, action: () => edit.setSourcePatch(t.id) },
+          { label: '동기화 잠금', hint: '잔물결 편집 때 함께 움직이기', checked: syncOn, action: () => edit.toggleSyncLock(t.id) },
           { label: '트랙 펼치기 / 접기', action: () => toggleTrackExpanded(t) },
           { label: '모든 트랙 확장', key: 'Shift+=', action: () => trackHeights('all', 1) },
           { label: '모든 트랙 최소화', key: 'Shift+-', action: () => trackHeights('all', -1) },
@@ -759,10 +766,11 @@ export function createTimeline() {
     if (selected && COARSE && w > 30 && !ghost) {
       // finger-sized trim handles on the selected clip
       ctx.fillStyle = '#ffffff';
-      for (const hx of [x + 1, x + w - 9]) {
-        ctx.fillRect(hx, y + 1, 8, hh - 2);
+      for (const hx of [x + 1, x + w - 13]) {
+        ctx.fillRect(hx, y + 1, 12, hh - 2);
         ctx.fillStyle = '#1b1e23';
-        ctx.fillRect(hx + 3, y + hh / 2 - 6, 2, 12);
+        ctx.fillRect(hx + 4, y + hh / 2 - 7, 1.5, 14);
+        ctx.fillRect(hx + 6.5, y + hh / 2 - 7, 1.5, 14);
         ctx.fillStyle = '#ffffff';
       }
     }
@@ -1189,12 +1197,28 @@ export function createTimeline() {
       const x1 = Math.max(x0 + 4, xOf(tw.end));
       if (x >= x0 && x <= x1 && y >= ry && y <= ry + Math.min(row.h - 3, 22)) {
         // its edges drag the length (Premiere), unless the box is too short to tell them apart
-        const ep = Math.min(EDGE_PX, (x1 - x0) / 3);
+        const ep = Math.min(edgePx, (x1 - x0) / 3);
         const zone = x - x0 <= ep && tw.a ? 'start' : x1 - x <= ep && (tw.b || !tw.a) ? 'end' : null;
         return { area: 'transition', row, t, transition: tw, zone };
       }
     }
     const clips = clipsOnTrack(s, row.track.id);
+    // a finger on the selected clip: its trim handles also reach a little past its ends (~40 px targets)
+    if (edgePx === EDGE_PX_TOUCH && store.ui.tool === 'select' && !keys) {
+      for (const c of clips) {
+        if (!store.selection.clips.has(c.id)) continue;
+        const x0 = xOf(c.start);
+        const x1 = xOf(clipEnd(c));
+        if (x1 - x0 < 3 * edgePx) continue;
+        const zone = x >= x0 - 16 && x <= x0 + edgePx ? 'in' : x >= x1 - edgePx && x <= x1 + 16 ? 'out' : null;
+        if (!zone) continue;
+        // keyframes on the rubber band still win (one often sits on the clip's first frame)
+        const geo = clipBody(row);
+        const band = geo.bodyH > 14 ? bandOf(c) : null;
+        const onKey = band?.p.kf?.some((k) => Math.abs(xOf(c.start + k.t) - x) <= 15 && Math.abs(bandY(band, k.v, geo.bodyY, geo.bodyH) - y) <= 16);
+        if (!onKey) return { area: 'clip', row, t, clip: c, zone, band: null, geo };
+      }
+    }
     for (const c of clips) {
       const x0 = xOf(c.start);
       const x1 = xOf(clipEnd(c));
@@ -1210,7 +1234,7 @@ export function createTimeline() {
       // keyframes on the rubber band win over the trim zones (a key often sits on the clip's first frame)
       const band = geo.bodyH > 14 && bandTools ? bandOf(c) : null;
       if (band?.p.kf) {
-        const tol = COARSE || lastPointerType === 'touch' ? 9 : 5;
+        const tol = lastPointerType === 'touch' ? 15 : COARSE ? 9 : 5;
         for (let i = 0; i < band.p.kf.length; i++) {
           const k = band.p.kf[i];
           if (k.t < -EPS || k.t > c.duration + EPS) continue;
@@ -1793,7 +1817,7 @@ export function createTimeline() {
         break;
       case 'scrub':
         scrubTo(x, e.shiftKey);
-        autoScroll(x);
+        autoScroll(x, e);
         break;
       case 'marker': {
         const mk = s.markers.find((m) => m.id === drag.id);
@@ -1867,7 +1891,7 @@ export function createTimeline() {
         drag.tooltip = `${dt >= 0 ? '+' : '-'}${formatTimecode(Math.abs(dt), fps())}${drag.insert ? '  (삽입)' : ''}${drag.duplicate ? '  (복제)' : ''}`;
         drag.tipX = x;
         drag.tipY = y;
-        autoScroll(x);
+        autoScroll(x, e, y);
         invalidate();
         break;
       }
@@ -1881,7 +1905,7 @@ export function createTimeline() {
         drag.tooltip = `${delta >= 0 ? '+' : '-'}${formatTimecode(Math.abs(delta), fps())}`;
         drag.tipX = x;
         drag.tipY = y;
-        autoScroll(x);
+        autoScroll(x, e);
         break;
       }
       case 'transDur': {
@@ -1933,7 +1957,7 @@ export function createTimeline() {
         drag.tooltip = `밀기 ${delta >= 0 ? '+' : '-'}${formatTimecode(Math.abs(delta), fps())}`;
         drag.tipX = x;
         drag.tipY = y;
-        autoScroll(x);
+        autoScroll(x, e);
         break;
       }
       case 'rate': {
@@ -1952,7 +1976,7 @@ export function createTimeline() {
         drag.tipX = x;
         drag.tipY = y;
         store.changed();
-        autoScroll(x);
+        autoScroll(x, e);
         break;
       }
       case 'rampKey': {
@@ -2023,7 +2047,7 @@ export function createTimeline() {
     if (Math.abs(inc) < EPS) return;
     const clips = drag.ids.map((id) => s.clips[id]).filter(Boolean);
     if (drag.mode === 'ripple') {
-      edit.rawRippleTrim(clips, drag.edge, inc);
+      drag.sync = edit.rawRippleTrim(clips, drag.edge, inc, drag.sync);
     } else if (drag.mode === 'rolling') {
       // the cut moves: both sides of the edit point change by the same amount
       for (const c of clips) edit.rawTrimEdge(c, drag.edge, inc);
@@ -2060,6 +2084,7 @@ export function createTimeline() {
   function onPointerUp(e) {
     touches.delete(e.pointerId);
     clearTimeout(longPress);
+    cancelAnimationFrame(autoRaf);
     if (!drag) return;
     if (drag.type === 'pinch') {
       if (touches.size < 2) drag = null;
@@ -2106,6 +2131,7 @@ export function createTimeline() {
           const touched = d.type === 'slide' ? d.items.flatMap((it) => [it.id, it.prevId, it.nextId]).filter(Boolean) : [...d.ids, ...(d.partnerIds || [])];
           if (d.type === 'trim' && d.mode === 'ripple') touched.push(...Object.keys(s.clips));
           edit.rawTidyTimes(touched);
+          if (d.sync) edit.syncNote(d.sync.stuck);
         }
         if (d.type === 'marker') s.markers.sort((a, b) => a.time - b.time);
         store.commit();
@@ -2159,9 +2185,29 @@ export function createTimeline() {
     requestDraw();
   }
 
-  function autoScroll(x) {
-    if (x > view.width - 20) setScrollX(view.scrollX + 20);
-    else if (x < 20 && view.scrollX > 0) setScrollX(view.scrollX - 20);
+  // A drag near an edge scrolls the timeline, and keeps scrolling while the pointer rests there
+  // (faster the closer it gets). The drag's start point moves with the view, so the clip or edge
+  // being dragged travels with the scroll. y: also scroll up / down (moving clips between tracks).
+  let autoRaf = 0;
+  function autoScroll(x, e = null, y = null) {
+    cancelAnimationFrame(autoRaf);
+    const d0 = drag;
+    if (!d0) return;
+    const zone = lastPointerType === 'touch' ? 40 : 24;
+    const speed = (depth) => Math.sign(depth) * (3 + 15 * Math.min(1, Math.abs(depth) / zone));
+    const dx = x > view.width - zone ? x - (view.width - zone) : x < zone ? x - zone : 0;
+    const before = view.scrollX;
+    if (dx && !(dx < 0 && view.scrollX <= 0)) setScrollX(view.scrollX + speed(dx));
+    const moved = view.scrollX - before;
+    if (moved && d0.type !== 'scrub' && Number.isFinite(d0.x0)) d0.x0 -= moved;
+    let movedY = 0;
+    if (y != null) {
+      const dy = y > view.height - zone / 2 ? y - (view.height - zone / 2) : y < RULER_H + zone / 2 ? y - (RULER_H + zone / 2) : 0;
+      const sy = view.scrollY;
+      if (dy) setScrollY(view.scrollY + speed(dy) / 2);
+      movedY = view.scrollY - sy;
+    }
+    if ((moved || movedY) && e) autoRaf = requestAnimationFrame(() => { if (drag === d0) onPointerMove(e); });
   }
 
   function onDoubleClick(e) {

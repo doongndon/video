@@ -6,6 +6,7 @@
 import { store } from '../store.js';
 import { h, formatTimecode, parseTimecode, formatBytes, downloadBlob, clamp } from '../util.js';
 import { openModal, formRow, toast, loadPref, savePref } from './common.js';
+import { icon } from './icons.js';
 import {
   FORMATS, EXPORT_PRESETS, formatId, exportRange, exportSequence, exportFrame, estimateExportSize, suggestedBitrate,
   outputSize, encodableVideoCodecs, encodableAudioCodecs,
@@ -39,6 +40,9 @@ const supportReady = () => support || (support = Promise.all([encodableVideoCode
  * status line and missing-sound note are elements of the calling dialog or pop-up.
  */
 async function runExport({ o, fmt, baseName, token, setProg, status, silentNote, importAfter = false }) {
+  // the progress line sits below the settings: bring it into view (phones show one screen of them)
+  status.scrollIntoView?.({ block: 'nearest' });
+  status.parentNode?.querySelector(':scope > .export-share')?.remove();
   const result = await exportSequence({
     ...o,
     baseName,
@@ -48,7 +52,7 @@ async function runExport({ o, fmt, baseName, token, setProg, status, silentNote,
       status.textContent = label || '';
     },
   });
-  const name = `${baseName}.${fmt.ext}`;
+  const name = `${baseName}.${result.ext || fmt.ext}`;
   setProg(1);
   status.textContent = `${name} 완성 · ${formatBytes(result.blob.size)} · ${result.info}`;
   if (result.warnings?.length) {
@@ -62,6 +66,13 @@ async function runExport({ o, fmt, baseName, token, setProg, status, silentNote,
   if (await downloadBlob(result.blob, name)) {
     status.textContent = `${name} 저장 · ${formatBytes(result.blob.size)} · ${result.info}`;
     toast(result.warnings?.length ? `${name} 파일을 내보냈습니다 (일부 소리 빠짐)` : `${name} 파일을 내보냈습니다`);
+  }
+  // phones: hand the file to the share sheet too (save it to the photo library, send it in a messenger)
+  const file = new File([result.blob], name, { type: result.blob.type });
+  if (document.body.classList.contains('mobile') && navigator.canShare?.({ files: [file] })) {
+    status.after(h('button.export-share', {
+      onclick: () => navigator.share({ files: [file], title: name }).catch((err) => { if (err?.name !== 'AbortError') toast('공유하지 못했습니다'); }),
+    }, icon('share', 16), '공유 · 사진 앱에 저장'));
   }
   return result;
 }
@@ -227,7 +238,11 @@ export function openExportSettings({ mount = null } = {}) {
     codecNote.textContent = parts.join(' · ');
     // availability
     const warnings = [];
-    if (codecs && encoded && codecs.v[f.video] === false) warnings.push(`이 브라우저는 ${f.label} 인코딩을 지원하지 않습니다. H.264나 VP9를 고르세요.`);
+    if (codecs && encoded && codecs.v[f.video] === false) {
+      // the export falls back to the other common format when this browser can make it
+      const alt = ['h264', 'vp9'].map((id) => FORMATS[id]).find((x) => x.video !== f.video && codecs.v[x.video]);
+      warnings.push(alt ? `이 브라우저는 ${f.label}을(를) 만들 수 없어 ${alt.label}(으)로 대신 내보냅니다.` : `이 브라우저는 ${f.label} 인코딩을 지원하지 않습니다. H.264나 VP9를 고르세요.`);
+    }
     if (presetId === 'shorts' && s.width >= s.height) warnings.push('지금 시퀀스는 가로 화면입니다. 세로(9:16) 영상이 필요하면 먼저 시퀀스 ▸ 자동 리프레임으로 세로 시퀀스를 만드세요.');
     if (f.gif && (o.range.end - o.range.start) * o._rate > 600) warnings.push('GIF가 600프레임을 넘습니다. 시간이 오래 걸리고 파일이 매우 커질 수 있습니다.');
     if (f.seq && (o.range.end - o.range.start) * o._rate > 3000) warnings.push('이미지가 3000장을 넘습니다. 시간이 오래 걸리고 ZIP 파일이 매우 커질 수 있습니다.');

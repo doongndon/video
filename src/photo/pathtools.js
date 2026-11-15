@@ -194,7 +194,8 @@ export function installPathTools(P) {
 
   // ---------------------------------------------------------------- hit tests
 
-  const tol = () => 7 / P.view.zoom;
+  // a fingertip gets a target about 40 px across (phone.js keeps the last pointer's type)
+  const tol = () => (P.lastPointerType === 'touch' ? 20 : 7) / P.view.zoom;
   const hitKnot = (sps, p) => {
     for (let si = sps.length - 1; si >= 0; si--) {
       const ks = sps[si].knots;

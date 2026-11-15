@@ -183,9 +183,18 @@ body.mobile .ph-strip::-webkit-scrollbar { display: none; }
 .ph-stool { flex: 0 0 auto; min-width: 58px; height: 52px; display: grid; justify-items: center; align-content: center; gap: 2px; padding: 0 4px; background: none; border: 1px solid transparent; border-radius: 10px; color: var(--text-dim); font-size: 10.5px; white-space: nowrap; }
 .ph-stool.on { background: var(--accent-soft); border-color: var(--accent); color: var(--value); }
 .ph-stool .ico svg { width: 20px; height: 20px; }
+.ph-stool { position: relative; }
+/* a slot with more tools: a small corner mark, as on Photoshop's toolbar */
+.ph-stool.group::after { content: ''; position: absolute; right: 7px; top: 22px; border: 3px solid transparent; border-right-color: currentColor; border-bottom-color: currentColor; opacity: .7; }
+.ph-schip { position: relative; width: 26px; height: 22px; }
+.ph-schip i { position: absolute; width: 15px; height: 15px; border: 1px solid #000; box-shadow: 0 0 0 1px rgba(255,255,255,.55); }
+.ph-schip i:first-child { right: 2px; bottom: 0; }
+.ph-schip i:last-child { left: 2px; top: 0; }
 body.mobile .ph-mnav { display: flex; gap: 2px; padding: 2px 4px calc(2px + env(safe-area-inset-bottom, 0px)); background: var(--bg-2); border-top: 1px solid var(--line); overflow-x: auto; scrollbar-width: none; flex-shrink: 0; }
 body.mobile .ph-mnav::-webkit-scrollbar { display: none; }
-body.mobile .ph-mnav .m-tool { flex: 1 0 auto; min-width: 54px; height: 54px; }
+/* all eight fit (더보기 at the right end must never scroll off a narrow phone) */
+body.mobile .ph-mnav .m-tool { flex: 1 1 0; min-width: 0; height: 54px; padding: 0 1px; font-size: 11px; }
+body.mobile .ph-mnav .m-tool span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 body.mobile .ph-sheet {
   display: flex; flex-direction: column; position: fixed; left: 0; right: 0; bottom: calc(59px + env(safe-area-inset-bottom, 0px)); height: 52dvh; z-index: 60;
   background: var(--bg-2); border: 1px solid var(--line-2); border-bottom: none; border-radius: 16px 16px 0 0;
@@ -193,12 +202,17 @@ body.mobile .ph-sheet {
   transform: translateY(105%); visibility: hidden; transition: transform .22s ease, visibility 0s linear .22s;
 }
 body.mobile .ph-sheet.open { transform: none; visibility: visible; transition: transform .22s ease; }
+/* short phones (360 × 640): a taller sheet, or the layer list shows hardly one row under its controls */
+@media (max-height: 700px) { body.mobile:not(.m-land) .ph-sheet { height: 62dvh; } }
 .ph-sheet-head { display: flex; align-items: center; gap: 6px; padding: 4px 6px 4px 14px; border-bottom: 1px solid var(--line); flex-shrink: 0; font-size: 16px; }
 .ph-sheet-head b { flex: 1; }
 .ph-sheet-body { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; }
 body.mobile .ph-sheet .ph-panel { padding: 10px 14px; gap: 10px; }
 body.mobile .ph-sheet .ph-panel.layers { padding: 0; }
 body.mobile .ph-layer { min-height: 56px; }
+/* touch: the grip that moves a layer up or down the list */
+.ph-lgrip { display: none; }
+body.ph-touch .ph-lgrip { display: grid; place-items: center; flex: 0 0 40px; align-self: stretch; margin-left: auto; color: var(--text-faint); touch-action: none; }
 body.mobile .ph-eye { width: 40px; height: 40px; }
 body.mobile .ph-lfoot { justify-content: space-between; }
 body.mobile .ph-lfoot button { min-height: 40px; min-width: 44px; }
@@ -208,8 +222,11 @@ body.mobile .ph-swatch { height: 34px; }
 body.mobile .ph-hrow { height: 40px; }
 body.mobile .ph-prow button { min-height: 36px; }
 body.mobile .cp-hue { height: 26px; }
-body.mobile .ph-textedit { left: 8px !important; right: 8px; width: auto; top: auto !important; bottom: calc(8px + env(safe-area-inset-bottom, 0px)); z-index: 950; }
+/* --ph-kb: the on-screen keyboard's height where the page doesn't shrink for it (iPhone; phone.js) */
+body.mobile .ph-textedit { left: 8px !important; right: 8px; width: auto; top: auto !important; bottom: calc(8px + var(--ph-kb, 0px) + env(safe-area-inset-bottom, 0px)); z-index: 950; }
 body.mobile .ph-textedit textarea { font-size: 16px; }
+body.mobile .ph-textedit .note { display: none; }
+.ph:has(.ph-textedit:not([hidden])) .ph-tsc { display: none; }
 @media (prefers-reduced-motion: reduce) { body.mobile .ph-sheet { transition: none; } }
 /* phone held sideways: the sheet comes in from the right */
 body.mobile.m-land .ph-sheet { left: auto; top: 0; bottom: calc(49px + env(safe-area-inset-bottom, 0px)); height: auto; width: min(420px, 60vw); border-radius: 16px 0 0 16px; transform: translateX(105%); }
@@ -217,6 +234,34 @@ body.mobile.m-land .ph-sheet.open { transform: none; }
 body.mobile.m-land .ph-opts { min-height: 38px; }
 body.mobile.m-land .ph-stool { height: 44px; font-size: 10px; }
 body.mobile.m-land .ph-mnav .m-tool { height: 44px; }
+/* sideways the tools run down the left edge and the panels down the right, so the picture keeps the height */
+body.mobile.m-land .ph { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; grid-template-rows: auto minmax(0, 1fr); }
+body.mobile.m-land .ph-opts { grid-column: 1 / -1; }
+body.mobile.m-land .ph-body { grid-column: 2; grid-row: 2; min-width: 0; }
+body.mobile.m-land .ph-strip, body.mobile.m-land .ph-mnav { grid-row: 2; flex-direction: column; overflow-x: hidden; overflow-y: auto; border-top: none; padding-top: 2px; padding-bottom: calc(2px + env(safe-area-inset-bottom, 0px)); }
+body.mobile.m-land .ph-strip { grid-column: 1; border-right: 1px solid var(--line); padding-left: max(4px, env(safe-area-inset-left, 0px)); }
+body.mobile.m-land .ph-mnav { grid-column: 3; border-left: 1px solid var(--line); padding-right: max(4px, env(safe-area-inset-right, 0px)); }
+body.mobile.m-land .ph-stool, body.mobile.m-land .ph-mnav .m-tool { flex: 0 0 auto; width: 62px; min-width: 0; }
+body.mobile.m-land .ph-stool span { max-width: 58px; overflow: hidden; text-overflow: ellipsis; }
+body.mobile.m-land .ph-sheet { right: calc(68px + env(safe-area-inset-right, 0px)); bottom: 0; border-radius: 16px 0 0 0; }
+body.mobile.m-land .ph-tabs { min-height: 26px; }
+/* the options bar scrolls sideways: the edge with more fades out */
+body.mobile .ph-opts.ph-more-r { -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 36px), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 36px), transparent); }
+body.mobile .ph-opts.ph-more-l { -webkit-mask-image: linear-gradient(to left, #000 calc(100% - 36px), transparent); mask-image: linear-gradient(to left, #000 calc(100% - 36px), transparent); }
+body.mobile .ph-opts.ph-more-l.ph-more-r { -webkit-mask-image: linear-gradient(to right, transparent, #000 36px, #000 calc(100% - 36px), transparent); mask-image: linear-gradient(to right, transparent, #000 36px, #000 calc(100% - 36px), transparent); }
+body.mobile .ph-opts > * { flex-shrink: 0; }
+/* the contextual task bar docked above the bottom bars; folded into one button */
+body.mobile .ph-ctb { padding: 3px; gap: 1px; }
+body.mobile .ph-ctb.folded { padding: 2px; border-radius: 22px; }
+body.mobile .ph-ctb .ph-ctb-btn:has(> .ico:only-child) { width: 40px; padding: 0; justify-content: center; }
+/* the touch shortcut (Shift / Alt for a finger) */
+.ph-stage .ph-tsc { position: absolute; left: 10px; bottom: 70px; z-index: 31; width: 48px; height: 48px; min-height: 0; padding: 0; border-radius: 50%; display: grid; place-items: center; background: rgba(40, 40, 40, .72); border: 2px solid var(--line-2); color: var(--text-faint); font-size: 11px; font-weight: 700; touch-action: none; user-select: none; -webkit-user-select: none; box-shadow: 0 2px 10px rgba(0,0,0,.4); }
+.ph-stage .ph-tsc[hidden] { display: none; }
+.ph-stage .ph-tsc.on { background: var(--accent); border-color: #fff; color: #fff; }
+.ph-stage .ph-tsc.locked { box-shadow: 0 0 0 3px var(--accent-soft), 0 2px 10px rgba(0,0,0,.4); }
+body:not(.mobile) .ph-stage .ph-tsc { bottom: 16px; }
+/* the press-and-hold eyedropper's ring, above the finger */
+.ph-pickring { position: fixed; z-index: 2000; width: 84px; height: 84px; margin: -150px 0 0 -42px; border-radius: 50%; border: 14px solid #888; box-shadow: 0 0 0 1px rgba(0,0,0,.6), inset 0 0 0 1px rgba(0,0,0,.6), 0 4px 16px rgba(0,0,0,.5); pointer-events: none; }
 
 /* ---------------------------------------------------------------- layers panel (tree) */
 .ph-lhead { display: grid; gap: 4px; }
@@ -921,6 +966,12 @@ body.mobile .ph-home-store { width: 100%; margin: 0; padding: 6px 2px 0; }
 body.mobile .ph-home-main { overflow: visible; padding: 0 12px 24px; }
 body.mobile .ph-home-bar { position: static; flex-wrap: wrap; }
 body.mobile .ph-hfilter { width: 110px; font-size: 16px; }
+/* quick start: all the cards in two columns instead of a row running off the right edge */
+body.mobile .ph-home-qrow { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); overflow: visible; }
+body.mobile .ph-home-q { min-width: 0; padding: 0 8px; }
+body.mobile .ph-home-q span { min-width: 0; }
+body.mobile .ph-home-q b, body.mobile .ph-home-q small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+body.mobile .ph-home-bar { row-gap: 6px; }
 body.mobile .ph-home-grid.grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px 12px; }
 body.mobile .ph-hc-more { opacity: 1; width: 34px; height: 32px; }
 body.mobile .ph-home-grid.list .ph-hc, body.mobile .ph-hl-head { grid-template-columns: 52px minmax(0, 1fr) auto; }

@@ -4,7 +4,7 @@
 // the panels that edit the document do nothing. Text being typed is committed first instead.
 import { toast } from '../ui/common.js';
 import { TOOL_BY_ID } from './tools.js';
-import { Transformer } from './transform.js';
+import { Transformer, noteStep, undoStep } from './transform.js';
 
 /** Panels that change the document (colour, swatches, brushes, navigator, info… keep working). */
 const LOCKED = new Set(['layers', 'channels', 'paths', 'history', 'adjustments', 'props', 'styles', 'actions', 'comps', 'timeline', 'gradients', 'patterns', 'shapes', 'char', 'para', 'charStyles', 'paraStyles', 'glyphs', 'ai']);
@@ -98,19 +98,42 @@ export function installSessionLock(P, { panels }) {
     for (const [id, p] of Object.entries(panels)) if (LOCKED.has(id)) p.el.classList.toggle('ph-locked', busy);
   };
   for (const ev of ['transform', 'tool', 'opts', 'doc', 'history']) P.on(ev, paint);
+  // the crop box's settled states (no drag going on), for Ctrl+Z one change at a time
+  const crop = TOOL_BY_ID.crop;
+  const noteCrop = () => {
+    if (P.tool !== 'crop' || !crop.b || crop.d) return;
+    const k = JSON.stringify({ b: crop.b, fresh: !!crop.fresh });
+    if (crop.fresh || crop.stepKey === undefined) crop.steps = [];
+    else if (k !== crop.stepKey) crop.steps.push(crop.stepKey);
+    crop.stepKey = k;
+  };
   const overlay = P.overlay;
   if (overlay) P.overlay = (...a) => {
     paint();
+    noteCrop();
     return overlay(...a);
   };
 
-  // ---- Ctrl+Z while cropping: the box goes back (Photoshop undoes the crop box's last change)
+  // ---- Ctrl+Z inside a session goes back one change (a drag, a typed value, a nudge), as in
+  // Photoshop; with nothing changed yet the crop box starts over and a transform is cancelled
   const undo = P.undo;
   P.undo = () => {
     if (P.busy() === 'crop') {
-      TOOL_BY_ID[P.tool].activate(P);
+      noteCrop();
+      if (P.tool === 'crop' && crop.steps?.length) {
+        crop.stepKey = crop.steps.pop();
+        const s = JSON.parse(crop.stepKey);
+        crop.b = s.b;
+        crop.fresh = s.fresh;
+        crop.syncView(P);
+      } else TOOL_BY_ID[P.tool].activate(P);
+      P.emit('opts');
       P.overlay();
       return undefined;
+    }
+    if (P.transform) {
+      noteStep(P.transform);
+      if (undoStep(P.transform)) return undefined;
     }
     return undo();
   };

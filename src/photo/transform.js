@@ -453,6 +453,28 @@ const near = (a, b, eps = 1e-6) => Math.abs(a[0] - b[0]) < eps && Math.abs(a[1] 
  * warp (a preset {style, bend, h, v} or a custom grid of Bézier patches in doc coords).
  * opts.copy: transform a copy of the selected pixels (the originals stay, Ctrl+Alt+T).
  */
+/**
+ * Ctrl+Z inside an on-canvas session (Free Transform, warp, perspective warp) goes back one change at a
+ * time, as in Photoshop: each settled state (no drag going on) is remembered when it differs from the
+ * last. The session gives stepState() / restoreState(s); Esc still cancels the whole session.
+ */
+export function noteStep(t) {
+  if (!t?.stepState || t.d) return;
+  const k = JSON.stringify(t.stepState());
+  if (t.stepKey === undefined) t.steps = [];
+  else if (k !== t.stepKey) t.steps.push(t.stepKey);
+  t.stepKey = k;
+}
+
+/** Go back one change; false when nothing has changed yet. */
+export function undoStep(t) {
+  if (!t?.steps?.length) return false;
+  t.stepKey = t.steps.pop();
+  t.restoreState(JSON.parse(t.stepKey));
+  t.E.emit?.('transform');
+  return true;
+}
+
 export class Transformer {
   constructor(E, { mode = 'free', target = 'auto', copy = false } = {}) {
     this.E = E;
@@ -931,7 +953,9 @@ export class Transformer {
   }
 
   hit(p) {
-    const tol = 9 / this.E.view.zoom;
+    // a fingertip gets a target about 44 px across (phone.js keeps the last pointer's type)
+    const touch = this.E.lastPointerType === 'touch';
+    const tol = (touch ? 22 : 9) / this.E.view.zoom;
     const pt = [p.x, p.y];
     this.hoverPt = pt;
     if (this.mode === 'warp' && this.warp?.ctrl) {
@@ -949,6 +973,20 @@ export class Transformer {
       return this.warpUV(pt) ? 'mesh' : 'none';
     }
     const hs = this.handles();
+    if (touch) {
+      // the nearest handle wins (big targets overlap on a small box); the pivot only right on it
+      let best = null;
+      let bd = tol;
+      for (const k of ['c0', 'c1', 'c2', 'c3', 'e0', 'e1', 'e2', 'e3']) {
+        const d = len(sub(hs[k], pt));
+        if (d < bd) {
+          bd = d;
+          best = k;
+        }
+      }
+      if (this.mode === 'free' && len(sub(hs.pivot, pt)) < Math.min(bd, tol / 2)) return 'pivot';
+      if (best) return best;
+    }
     if (len(sub(hs.pivot, pt)) < tol && this.mode === 'free') return 'pivot';
     for (const k of ['c0', 'c1', 'c2', 'c3', 'e0', 'e1', 'e2', 'e3']) if (len(sub(hs[k], pt)) < tol) return k;
     if (pointInQuad(pt, this.q)) return 'move';
@@ -1198,6 +1236,17 @@ export class Transformer {
   up() {
     if (this.d && this.kind !== 'smart' && this.kind !== 'shape' && this.kind !== 'text') this.update(true);
     this.d = null;
+    // the drag is one step for Ctrl+Z (noteStep runs from transformChanged)
+    this.E.transformChanged?.(this);
+  }
+
+  stepState() {
+    return { q: this.q, pivot: this.pivot, warp: this.warp, mode: this.mode };
+  }
+
+  restoreState(s) {
+    Object.assign(this, { q: s.q, pivot: s.pivot, warp: s.warp, mode: s.mode, splitMode: null });
+    this.update(true);
   }
 
   setMode(mode) {

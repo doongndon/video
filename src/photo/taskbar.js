@@ -32,6 +32,11 @@ export function installTaskbar(P) {
   // the prompt field of a generative action is open (and what it does)
   let prompt = null;
   let busy = null;
+  // phones: the bar sits above the bottom bars (Photoshop on iPad and mobile) and folds into one button
+  const phone = () => document.body.classList.contains('mobile');
+  let folded = loadPref('photo.taskbar.fold', false);
+  /** Room (px) the picture leaves at the bottom of the window for the bar on phones (P.fit). */
+  P.fitBottom = () => (phone() && on && !folded ? 54 : 0);
 
   /**
    * The crop tool's box (x, y, w, h) when it reaches past the canvas and isn't turned (for
@@ -56,7 +61,8 @@ export function installTaskbar(P) {
   const context = () => {
     const doc = P.doc;
     if (!on || !doc || P.transform || P.editingText || document.querySelector('.modal-backdrop') || document.body.classList.contains('modal-peeking') || document.body.classList.contains('ph-screen-full')) return null;
-    if (P.tool === 'crop') return P.cropExtent() ? 'crop' : null;
+    // (phones have no Enter / Esc: the bar always offers to crop or reset)
+    if (P.tool === 'crop') return P.cropExtent() || phone() ? 'crop' : null;
     if (doc.selection) return 'selection';
     const l = doc.active;
     if (!l) return null;
@@ -89,8 +95,10 @@ export function installTaskbar(P) {
   const more = () => btn('more', '', (e) => {
     const r = e.currentTarget.getBoundingClientRect();
     showMenu([
-      { label: '막대 위치 고정', checked: !!pinned, action: () => { pinned = pinned ? null : currentPos(); savePref('photo.taskbar.pin', pinned); update(true); } },
-      { label: '막대 위치 재설정', action: () => { pinned = null; savePref('photo.taskbar.pin', null); update(true); } },
+      ...(phone() ? [] : [
+        { label: '막대 위치 고정', checked: !!pinned, action: () => { pinned = pinned ? null : currentPos(); savePref('photo.taskbar.pin', pinned); update(true); } },
+        { label: '막대 위치 재설정', action: () => { pinned = null; savePref('photo.taskbar.pin', null); update(true); } },
+      ]),
       { label: '막대 숨기기', action: () => setOn(false) },
     ], r.left, r.bottom + 4);
   }, { title: '더 보기' });
@@ -118,6 +126,13 @@ export function installTaskbar(P) {
     g.addEventListener('pointercancel', end);
     return g;
   };
+  /** Phones: fold the bar into one button (and back); the picture takes the room it leaves. */
+  const foldBtn = () => btn(folded ? 'chevUp' : 'chevDown', '', () => {
+    folded = !folded;
+    savePref('photo.taskbar.fold', folded);
+    if (P.doc?.view?.auto) P.fit();
+    update(true);
+  }, { title: folded ? '상황별 작업 표시줄 펼치기' : '상황별 작업 표시줄 접기' });
   const menuBtn = (ic, label, items) => btn(ic, label, (e) => {
     const r = e.currentTarget.getBoundingClientRect();
     showMenu(typeof items === 'function' ? items() : items, r.left, r.bottom + 4);
@@ -235,8 +250,8 @@ export function installTaskbar(P) {
     const l = doc.active;
     if (prompt || busy) return promptRow();
     if (ctx === 'crop') {
-      return [btn('ai', '생성형 확장', () => openPrompt('expand'), { primary: true, title: '넓힌 곳을 AI로 채우기' }),
-        btn('check', '자르기', () => TOOL_BY_ID.crop.apply(P), { title: '자르기 적용 (Enter)' }),
+      return [P.cropExtent() ? btn('ai', '생성형 확장', () => openPrompt('expand'), { primary: true, title: '넓힌 곳을 AI로 채우기' }) : null,
+        btn('check', '자르기', () => TOOL_BY_ID.crop.apply(P), { title: '자르기 적용 (Enter)', primary: !P.cropExtent() }),
         btn('reset', '', () => (TOOL_BY_ID.crop.reset || TOOL_BY_ID.crop.activate).call(TOOL_BY_ID.crop, P), { title: '재설정 (Esc)' })];
     }
     if (ctx === 'selection') {
@@ -292,7 +307,11 @@ export function installTaskbar(P) {
     const bh = bar.offsetHeight;
     let x;
     let y;
-    if (pinned) {
+    if (phone()) {
+      // docked at the bottom, in the room P.fit leaves under the picture; folded: a button at the right
+      x = folded && !prompt && !busy ? sw - bw - 8 : (sw - bw) / 2;
+      y = sh - bh - 8;
+    } else if (pinned) {
       x = pinned.x;
       y = pinned.y;
     } else {
@@ -322,7 +341,7 @@ export function installTaskbar(P) {
     const doc = P.doc;
     const l = doc?.active;
     // what the buttons depend on: context, layer, its text / shape values, the AI state
-    const k = ctx ? `${ctx}|${doc.id}|${l?.id}|${l?.kind === 'text' ? `${l.text.font}|${l.text.size}|${l.text.color}` : l?.kind === 'shape' ? `${l.shape.fill}|${l.shape.stroke}` : ''}|${l ? cutOut(l) : ''}|${doc.layers.length === 1}|${prompt}|${!!busy}|${!!l?.mask}` : '';
+    const k = ctx ? `${ctx}|${doc.id}|${l?.id}|${l?.kind === 'text' ? `${l.text.font}|${l.text.size}|${l.text.color}` : l?.kind === 'shape' ? `${l.shape.fill}|${l.shape.stroke}` : ''}|${l ? cutOut(l) : ''}|${doc.layers.length === 1}|${prompt}|${!!busy}|${!!l?.mask}|${phone()}|${folded}|${!!P.cropExtent()}` : '';
     ctxNow = ctx;
     if (!ctx) {
       // a generative request keeps the bar while it runs
@@ -336,7 +355,9 @@ export function installTaskbar(P) {
       // keep focus in the prompt field when the bar redraws for another reason
       const typing = document.activeElement?.classList?.contains('ph-ctb-prompt') ? document.activeElement.value : null;
       key = k;
-      bar.replaceChildren(grip(), ...buttons(ctx), more());
+      if (phone() && folded && !prompt && !busy) bar.replaceChildren(foldBtn());
+      else bar.replaceChildren(phone() ? foldBtn() : grip(), ...buttons(ctx).filter(Boolean), more());
+      bar.classList.toggle('folded', phone() && folded && !prompt && !busy);
       if (typing != null) {
         const inp = bar.querySelector('input.ph-ctb-prompt');
         if (inp) {
@@ -355,6 +376,7 @@ export function installTaskbar(P) {
       prompt = null;
       toast('상황별 작업 표시줄을 숨겼습니다 (창 ▸ 상황별 작업 표시줄로 다시 보기)');
     }
+    if (phone() && P.doc?.view?.auto) P.fit();
     update(true);
   };
   C.toggleTaskbar = () => setOn(!on);

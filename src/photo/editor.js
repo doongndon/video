@@ -2,7 +2,7 @@
 // Owns the open documents, the canvas view (zoom/pan, overlay), tools, menus and shortcuts.
 
 import { h, clamp, downloadBlob, modKey } from '../util.js';
-import { toast, promptDialog, confirmDialog, showMenu, closeMenus, menusOpen, loadPref, savePref } from '../ui/common.js';
+import { toast, promptDialog, confirmDialog, openModal, showMenu, closeMenus, menusOpen, loadPref, savePref } from '../ui/common.js';
 import { icon } from '../ui/icons.js';
 import { mobileApi } from '../ui/mobile.js';
 import { PhotoDoc, newLayer, makeCanvas, cloneCanvas, textBox, boxCorners, unionRect } from './doc.js';
@@ -43,8 +43,11 @@ import { installLearn } from './learn.js';
 import { installTheme, buildHome, rememberFile, recentMenu, keepDoc } from './psui.js';
 import { installArtboards } from './artboards.js';
 import { installSessionLock, blockedWhileBusy } from './session.js';
+import { installPhone } from './phone.js';
 
 const isMobile = () => document.body.classList.contains('mobile');
+/** The 배경 layer: the bottom raster layer of that name, outside any group. */
+const isBackground = (doc, l) => !!l && l === doc?.layers[0] && !l.parent && l.kind === 'raster' && l.name === '배경';
 const ZOOMS = [0.02, 0.05, 0.1, 0.167, 0.25, 0.333, 0.5, 0.667, 1, 1.5, 2, 3, 4, 6, 8, 12, 16, 32];
 
 /** The photo editor API shared by tools, panels, dialogs and menus. */
@@ -133,8 +136,11 @@ export function createPhotoEditor(root) {
     P.overlay();
     toast(id ? '도구를 기본 설정으로 되돌렸습니다' : '모든 도구를 기본 설정으로 되돌렸습니다');
   };
-  P.setTool = (id) => {
+  P.setTool = (id, { ask = true } = {}) => {
     if (!TOOL_BY_ID[id]) return;
+    // another tool while a transform or a changed crop box is open: Photoshop asks first
+    const busy = ask && id !== P.tool && P.busy?.();
+    if (busy) return void askSession(busy, () => P.setTool(id, { ask: false }));
     if (P.transform) P.applyTransform();
     finishText();
     TOOL_BY_ID[P.tool]?.deactivate?.(P);
@@ -144,6 +150,30 @@ export function createPhotoEditor(root) {
     P.emit('tool', id);
     updateCursor();
     P.overlay();
+  };
+  /** '변형을 적용하시겠습니까?' / '이미지를 자르시겠습니까?' with Photoshop's three buttons; then `go`. */
+  let asking = false;
+  const askSession = (kind, go) => {
+    if (asking) return;
+    asking = true;
+    const crop = kind === 'crop';
+    let choice = null;
+    openModal({
+      title: crop ? '자르기' : '변형',
+      body: h('div', crop ? '이미지를 자르시겠습니까?' : '변형을 적용하시겠습니까?'),
+      buttons: [
+        { label: crop ? '자르기' : '적용', primary: true, action: () => { choice = 'apply'; } },
+        { label: '취소' },
+        { label: crop ? '자르지 않음' : '적용 안 함', action: () => { choice = 'discard'; } },
+      ],
+      onClose: () => {
+        asking = false;
+        if (!choice) return;
+        if (crop && choice === 'apply') TOOL_BY_ID[P.tool]?.apply?.(P);
+        else if (!crop) (choice === 'apply' ? P.applyTransform : P.cancelTransform)();
+        go();
+      },
+    });
   };
   P.setColor = (hex, toBg = false, transient = false) => {
     if (toBg) P.bg = hex;
@@ -457,27 +487,88 @@ export function createPhotoEditor(root) {
     const list = (title, items) => (mobileApi.listSheet ? mobileApi.listSheet(title, items) : showMenu(items, 8, 60));
     if (id === 'adjust') return list('조정', [...menus['이미지']().find((x) => x.label?.startsWith('조정')).submenu(), '-', { group: '조정 레이어 (원본을 바꾸지 않음)' }, ...menus['레이어']().find((x) => x.label === '새 조정 레이어').submenu()]);
     if (id === 'filter') return list('필터', menus['필터']());
+    // the lecture's everyday commands, taken from the menus themselves so that they are greyed out
+    // as the menus are (nothing open, a Free Transform or a crop in progress: session.js)
+    const find = (items, re) => {
+      for (const it of items || []) {
+        if (!it || typeof it !== 'object' || it.group) continue;
+        if (re.test(it.label || '')) return it;
+        const sub = typeof it.submenu === 'function' ? null : it.submenu;
+        const hit = sub && find(sub, re);
+        if (hit) return hit;
+      }
+      return null;
+    };
+    const m = (menu, re, label, deep = null) => {
+      let it = find(menus[menu]?.(), re);
+      if (!it && deep) {
+        const sub = find(menus[menu]?.(), deep)?.submenu;
+        it = find(typeof sub === 'function' ? sub() : sub, re);
+      }
+      return it ? { ...it, label: label || it.label, hint: it.key || '' } : null;
+    };
+    const busy = P.busy?.();
+    const lockIf = (it) => (busy ? { ...it, disabled: true } : it);
     return list('더보기', [
+      { group: '파일' },
       { label: '홈 화면 (내 문서)', action: () => P.showHome(true) },
-      { label: '새 문서…', action: () => D.newDocDialog(P) },
-      { label: '열기…', action: () => P.cmd.open() },
-      { label: '내보내기 형식…', action: () => P.exportDialog() },
-      { label: 'PSD로 저장', action: () => P.cmd.savePsd() },
-      { label: '영상 편집으로 보내기…', action: () => D.sendToVideoDialog(P) },
-      '-',
+      m('파일', /^새로 만들기/, '새 문서…'),
+      m('파일', /^열기/, '열기 (사진 앨범 · 파일)…'),
+      lockIf({ label: '휴대폰에 저장 · 공유 (JPG / PNG)…', disabled: !P.doc, action: () => shareDoc() }),
+      lockIf({ label: '내보내기 형식…', disabled: !P.doc, action: () => P.exportDialog() }),
+      m('파일', /^PSD로 저장 \(포토샵/, 'PSD로 저장'),
+      m('파일', /^영상 편집으로 보내기/),
+      { group: '편집' },
+      m('편집', /^실행 취소/), m('편집', /^다시 실행/),
+      m('편집', /^복사$/), m('편집', /^붙여넣기$/),
+      m('레이어', /^복사한 레이어/, '복사한 레이어 (레이어 복제)', /^새로 만들기/),
+      m('편집', /^자유 변형/),
+      { group: '선택' },
+      m('선택', /^모두/, '모두 선택'), m('선택', /^선택 해제/), m('선택', /^반전/, '선택 반전'),
+      m('선택', /^피사체/, '피사체 선택'), m('선택', /^선택 및 마스크/),
+      m('선택', /^수정/, '수정 (페더 · 확대 · 축소…)'),
+      { group: '레이어' },
+      m('레이어', /^레이어 마스크$/), m('레이어', /^레이어 스타일$/), m('레이어', /^레이어 그룹화/), m('레이어', /^아래로 병합/), m('레이어', /^이름 바꾸기/),
+      { group: '패널' },
       { label: '문자 · 단락 패널', action: () => openSheet('char') },
       { label: '글리프 (특수 문자)', action: () => openSheet('glyphs') },
       { label: '견본 패널', action: () => openSheet('swatches') },
+      { label: '채널 패널', action: () => openSheet('channels') },
+      { label: '패스 패널', action: () => openSheet('paths') },
+      panels.cloneSource ? { label: '복제 원본 패널', action: () => openSheet('cloneSource') } : null,
       { label: '도구 사전 설정', action: () => openSheet('presets') },
       { label: '타임라인 (움직이는 GIF)', action: () => openSheet('timeline') },
-      { label: '패스 패널', action: () => openSheet('paths') },
-      '-',
-      { label: '자유 변형', action: () => P.cmd.freeTransform() },
-      { label: '모두 선택', action: () => P.cmd.selectAll() },
-      { label: '선택 해제', action: () => P.cmd.deselect() },
-      { label: '화면에 맞추기', action: () => P.fit(true) },
+      { group: '보기' },
+      { label: '화면에 맞추기', disabled: !P.doc, action: () => P.fit(true) },
+      { label: '100% (실제 픽셀)', disabled: !P.doc, action: () => P.setZoom(1) },
+      P.doc?.view?.rot ? { label: '회전 보기 되돌리기 (0°)', action: () => P.setViewRotation?.(0) } : null,
       '-',
       { label: '전체 메뉴…', action: () => list('메뉴', Object.keys(menus).map((name) => ({ label: name, submenu: () => menus[name]() }))) },
+    ]);
+  }
+  /** Phones: the picture as a JPG or PNG to the share sheet (save to Photos, send) or, without one, a download. */
+  async function shareDoc() {
+    const doc = P.doc;
+    if (!doc) return;
+    const list = (title, items) => (mobileApi.listSheet ? mobileApi.listSheet(title, items) : showMenu(items, 8, 60));
+    const go = async (type) => {
+      const blob = await IO.exportBlob(doc, type, 0.92, 1, { fg: P.fg, bg: P.bg });
+      if (!blob) return void toast('그림을 파일로 만들지 못했습니다 (휴대폰 메모리가 부족할 수 있습니다)');
+      const name = `${String(doc.name || '사진').replace(/\.[a-z0-9]+$/i, '')}.${type}`;
+      const file = new File([blob], name, { type: blob.type });
+      const share = () => navigator.share({ files: [file], title: doc.name }).catch((err) => {
+        if (err?.name === 'AbortError') return;
+        // the tap's permission ran out while the file was made: one more tap shares it
+        if (err?.name === 'NotAllowedError') return void list('공유', [{ label: `${name} 공유하기`, action: share }, { label: '파일로 내려받기', action: () => downloadBlob(blob, name) }]);
+        downloadBlob(blob, name);
+      });
+      if (navigator.canShare?.({ files: [file] })) share();
+      else if (await downloadBlob(blob, name)) toast(`${name} 파일을 저장했습니다`);
+    };
+    list('휴대폰에 저장 · 공유', [
+      { label: 'JPG (사진 앱에 저장, 작은 파일)', action: () => go('jpg') },
+      { label: 'PNG (투명한 곳 유지)', action: () => go('png') },
+      { label: '내보내기 형식… (크기 · 품질 고르기)', action: () => P.exportDialog() },
     ]);
   }
 
@@ -534,11 +625,13 @@ export function createPhotoEditor(root) {
   P.openFiles = async (files) => {
     for (const f of files) {
       try {
-        const doc = P.openDoc(await IO.openFile(f));
+        // phones: a picture too big for their canvases opens smaller (phone.js)
+        const doc = P.openDoc(await IO.openFile(f, { limit: P.openLimit }));
         // File ▸ Open Recent and the home screen list it (psui.js)
         doc.recentId = `${f.name}|${f.size}|${f.lastModified || 0}`;
         setTimeout(() => rememberFile(P, f, doc), 300);
       } catch (err) {
+        if (err?.name === 'AbortError') continue;
         console.error(err);
         toast(`${f.name}: 열 수 없습니다 (${err.message || err})`);
       }
@@ -1123,9 +1216,11 @@ export function createPhotoEditor(root) {
     const a = (rot * Math.PI) / 180;
     const bw = Math.abs(doc.width * Math.cos(a)) + Math.abs(doc.height * Math.sin(a));
     const bh = Math.abs(doc.width * Math.sin(a)) + Math.abs(doc.height * Math.cos(a));
-    const z = Math.max(0.01, Math.min(enlarge ? 64 : 1, (r.width - pad) / bw, (r.height - pad) / bh));
+    // phones: the contextual task bar's room at the bottom stays clear of the picture (taskbar.js)
+    const below = rot ? 0 : P.fitBottom?.() || 0;
+    const z = Math.max(0.01, Math.min(enlarge ? 64 : 1, (r.width - pad) / bw, (r.height - pad - below) / bh));
     // auto: the view follows the window (rotating the phone) until the user zooms or pans
-    doc.view = { zoom: z, x: (r.width - doc.width * z) / 2, y: (r.height - doc.height * z) / 2, fitted: true, auto: true, rot, flip: !!doc.view?.flip, enlarge: enlarge || undefined };
+    doc.view = { zoom: z, x: (r.width - doc.width * z) / 2, y: (r.height - below - doc.height * z) / 2, fitted: true, auto: true, rot, flip: !!doc.view?.flip, enlarge: enlarge || undefined };
     P.viewChanged();
   };
   /** Called when the photo editor comes on screen. */
@@ -1577,7 +1672,9 @@ export function createPhotoEditor(root) {
         if (active === 'xdrag') P.xdragCancel?.();
         const [a, b] = [...touches.values()];
         active = 'pinch';
-        panStart = { d: Math.hypot(a.x - b.x, a.y - b.y), mx: (a.x + b.x) / 2, my: (a.y + b.y) / 2, zoom: P.view.zoom, vx: P.view.x, vy: P.view.y };
+        // the picture's point between the fingers stays under them while they zoom, pan and turn
+        const [sx, sy] = logical((a.x + b.x) / 2, (a.y + b.y) / 2);
+        panStart = { d: Math.hypot(a.x - b.x, a.y - b.y), ang: Math.atan2(b.y - a.y, b.x - a.x), rot: P.doc.view.rot || 0, turning: false, zoom: P.view.zoom, docX: (sx - P.view.x) / P.view.zoom, docY: (sy - P.view.y) / P.view.zoom };
         return;
       }
       if (touches.size > 2) return;
@@ -1636,12 +1733,27 @@ export function createPhotoEditor(root) {
       const mx = (a.x + b.x) / 2;
       const my = (a.y + b.y) / 2;
       const zoom = clamp((panStart.zoom * d) / Math.max(1, panStart.d), 0.01, 64);
-      // keep the point between the fingers under the fingers
-      const [sx, sy] = logical(panStart.mx, panStart.my);
+      // turning the fingers turns the view (Rotate View) once they have turned past 12°, so a
+      // pinch doesn't tilt it; it snaps straight within 5° of a right angle
+      let turn = ((Math.atan2(b.y - a.y, b.x - a.x) - panStart.ang) * 180) / Math.PI;
+      turn = ((turn + 540) % 360) - 180;
+      if (!panStart.turning && Math.abs(turn) > 12) panStart.turning = true;
+      let rot = panStart.rot;
+      if (panStart.turning) {
+        rot = panStart.rot + turn;
+        const right = Math.round(rot / 90) * 90;
+        if (Math.abs(rot - right) < 5) rot = right;
+        rot = ((((rot + 180) % 360) + 360) % 360) - 180;
+        rot = Math.round(rot * 10) / 10;
+      }
+      // keep the point between the fingers under the fingers (in the turned view's coordinates)
+      P.doc.view = { ...P.doc.view, rot };
       const [nx, ny] = logical(mx, my);
-      const docX = (sx - panStart.vx) / panStart.zoom;
-      const docY = (sy - panStart.vy) / panStart.zoom;
-      P.doc.view = { zoom, x: nx - docX * zoom, y: ny - docY * zoom, fitted: true, rot: P.doc.view.rot || 0, flip: !!P.doc.view.flip };
+      P.doc.view = { zoom, x: nx - panStart.docX * zoom, y: ny - panStart.docY * zoom, fitted: true, rot, flip: !!P.doc.view.flip };
+      if (rot !== (panStart.lastRot ?? panStart.rot)) {
+        panStart.lastRot = rot;
+        P.emit('opts');
+      }
       P.viewChanged();
       return;
     }
@@ -1963,9 +2075,11 @@ export function createPhotoEditor(root) {
   function clearOrDelete() {
     const doc = P.doc;
     if (!doc || P.transform) return null;
+    // the 배경 layer has no transparency: like Photoshop the key opens 칠 (내용 인식) for the selection
+    if (doc.selection && !doc.quickMask && isBackground(doc, doc.active) && !P.maskTarget?.()) return void D.fillDialog(P, { content: 'content' });
     if (doc.selection || doc.quickMask) return P.cmd.clear();
     if (!doc.active) return undefined;
-    if (doc.layers.length <= 1) return void toast('마지막 레이어는 지울 수 없습니다');
+    if (doc.layers.length <= 1) return void toast(isBackground(doc, doc.active) ? '배경 레이어는 지울 수 없습니다. 지울 부분을 먼저 선택하면 칠(내용 인식)로 채웁니다' : '마지막 레이어는 지울 수 없습니다');
     return P.cmd.deleteLayer();
   }
   /** Alt+[ / ]: the layer below / above in the layers panel (Shift: add it to the picked layers). */
@@ -2121,6 +2235,8 @@ export function createPhotoEditor(root) {
   ];
   // while a transform or a crop is open, what would change the document waits (session.js)
   installSessionLock(P, { panels });
+  // touch: the touch shortcut, press and hold, finger taps, pen and palm (phone.js)
+  installPhone(P, { stage, opts });
 
   // ---------------------------------------------------------------- autosave
 
@@ -2383,8 +2499,19 @@ function installCommands(P) {
     if (!activeRaster('지우기')) return undefined;
     P.run(label, () => {
       const g = doc.editPixels(l);
-      g.globalCompositeOperation = 'destination-out';
-      g.drawImage(doc.selection.canvas, -l.x, -l.y);
+      if (isBackground(doc, l)) {
+        // a 배경 layer cannot be transparent: Photoshop fills what is cleared with the background colour
+        const t = makeCanvas(doc.width, doc.height);
+        const tg = t.getContext('2d');
+        tg.fillStyle = P.bg;
+        tg.fillRect(0, 0, t.width, t.height);
+        tg.globalCompositeOperation = 'destination-in';
+        tg.drawImage(doc.selection.canvas, 0, 0);
+        g.drawImage(t, -l.x, -l.y);
+      } else {
+        g.globalCompositeOperation = 'destination-out';
+        g.drawImage(doc.selection.canvas, -l.x, -l.y);
+      }
       l._styled = null;
     });
     return undefined;

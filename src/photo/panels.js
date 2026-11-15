@@ -3,6 +3,7 @@
 import { h, clamp } from '../util.js';
 import { showMenu, toast, promptDialog, loadPref, savePref, openModal } from '../ui/common.js';
 import { icon } from '../ui/icons.js';
+import { mobileApi } from '../ui/mobile.js';
 import { openFontPicker } from '../ui/font-picker.js';
 import { fontLabel } from '../fonts.js';
 import { makeCanvas, SHAPES, LAYER_COLORS, FILL_TYPES, PhotoDoc, psdTextKey } from './doc.js';
@@ -413,14 +414,67 @@ function editToolbarDialog(P, rerender) {
   });
 }
 
-/** Phone: one scrolling strip with every tool. */
+// short names for the phone's tool strip (the full name is in the hint and the group's list)
+const SHORT = { heal: '스팟 복구', historyBrush: '내역 브러시', artHistory: '미술 내역', contentMove: '내용 이동', redEye: '적목', customShape: '사용자 모양', textMask: '문자 마스크', verticalTextMask: '세로 마스크', text: '문자', freePen: '자유 펜', colorReplace: '색상 대체', magicEraser: '자동 지우개', bgEraser: '배경 지우개' };
+const shortName = (t) => SHORT[t.id] || t.name.replace(/\s*\(.*\)$/, '').replace(/ 도구$/, '').replace(/ 선택 윤곽$/, ' 선택');
+
+/**
+ * Phone: one scrolling strip with a button for each toolbar slot (Edit Toolbar's arrangement),
+ * like Photoshop on iPad. A slot with more tools has a corner mark: tap it again (or press and
+ * hold) for the list. The colour chips and Extra Tools close the strip.
+ */
 export function buildToolStrip(P) {
   const el = h('div.ph-strip', { role: 'toolbar', 'aria-label': '도구' });
+  const pick = new Map();
+  const list = (title, items) => (mobileApi.listSheet ? mobileApi.listSheet(title, items) : showMenu(items, 8, 60));
+  const flyout = (title, ids) => list(title, ids.map((id) => {
+    const t = TOOL_BY_ID[id];
+    return { label: toolTitle(t), hint: t.key ? `단축키 ${t.key}` : '', checked: id === P.tool, action: () => {
+      pick.set(ids.join(), id);
+      P.setTool(id);
+    } };
+  }));
   const render = () => {
-    el.replaceChildren(...TOOLS.map((t) => h(`button.ph-stool${t.id === P.tool ? '.on' : ''}`, { onclick: () => P.setTool(t.id), 'aria-label': t.name, title: t.name }, toolIcon(t, 20), h('span', t.name.replace(/ \(.*\)/, '')))));
-    el.querySelector('.on')?.scrollIntoView({ inline: 'center', block: 'nearest' });
+    const { slots, hidden } = toolbarLayout();
+    const items = slots.map((slot) => {
+      const k = slot.join();
+      const cur = slot.includes(P.tool) ? P.tool : slot.includes(pick.get(k)) ? pick.get(k) : slot[0];
+      const t = TOOL_BY_ID[cur];
+      const on = slot.includes(P.tool);
+      const b = h(`button.ph-stool${on ? '.on' : ''}${slot.length > 1 ? '.group' : ''}`, { 'aria-label': `${toolTitle(t)}${slot.length > 1 ? ` (그룹: ${slot.length}개)` : ''}`, title: toolTitle(t), 'aria-pressed': String(on), 'aria-haspopup': slot.length > 1 ? 'menu' : null },
+        toolIcon(t, 20), h('span', shortName(t)));
+      let held = false;
+      let timer = 0;
+      b.addEventListener('pointerdown', () => {
+        held = false;
+        clearTimeout(timer);
+        if (slot.length > 1) timer = setTimeout(() => { held = true; flyout(toolTitle(t).replace(/ 도구$/, ' 도구 그룹'), slot); }, 450);
+      });
+      for (const ev of ['pointerup', 'pointercancel', 'pointerleave']) b.addEventListener(ev, () => clearTimeout(timer));
+      b.addEventListener('contextmenu', (e) => e.preventDefault());
+      b.addEventListener('click', () => {
+        if (held) return;
+        // the slot's tool is already in use: its group's list
+        if (on && slot.length > 1) return flyout(toolTitle(t).replace(/ 도구$/, ' 도구 그룹'), slot);
+        return P.setTool(cur);
+      });
+      return b;
+    });
+    const xtra = hidden.length ? [h(`button.ph-stool${hidden.includes(P.tool) ? '.on' : ''}`, { 'aria-label': '추가 도구', title: '추가 도구', onclick: () => flyout('추가 도구', hidden) }, icon('more', 20), h('span', '추가 도구'))] : [];
+    const chips = h('button.ph-stool.ph-schips', { 'aria-label': '전경색 / 배경색', title: '전경색 설정 (길게 누르면 전경색과 배경색 전환)', onclick: () => (P.colorPicker ? P.colorPicker('fg') : P.showPanel('color', 'fg')) },
+      h('span.ph-schip', h('i', { style: { background: P.bg } }), h('i', { style: { background: P.fg } })), h('span', '색상'));
+    let ct = 0;
+    chips.addEventListener('pointerdown', () => { ct = setTimeout(() => { ct = -1; P.swapColors(); }, 450); });
+    for (const ev of ['pointerup', 'pointercancel', 'pointerleave']) chips.addEventListener(ev, () => { if (ct > 0) clearTimeout(ct); });
+    chips.addEventListener('click', (e) => { if (ct === -1) { e.stopImmediatePropagation(); ct = 0; } }, true);
+    el.replaceChildren(...items, ...xtra, chips);
+    el.querySelector('.on')?.scrollIntoView({ inline: 'nearest', block: 'nearest' });
   };
-  P.on('tool', render);
+  P.on('tool', (id) => {
+    for (const slot of toolbarLayout().slots) if (slot.includes(id)) pick.set(slot.join(), id);
+    render();
+  });
+  P.on('color', render);
   render();
   return el;
 }
@@ -1373,6 +1427,57 @@ export function buildLayersPanel(P) {
       else if (ids.length > 1 && P.cmd.moveLayersTo) P.cmd.moveLayersTo(ids, l.id, zone);
       else P.cmd.moveLayerTo(ids[0], index, parent);
     });
+    // touch screens: drag the grip at the end of the row to move the layer (the browser's drag and
+    // drop above needs a mouse); a long press on the row still opens its menu
+    const grip = h('span.ph-lgrip', { title: '끌어서 레이어 순서 바꾸기', 'aria-hidden': 'true' }, icon('menu', 16));
+    grip.addEventListener('pointerdown', (e) => {
+      if (e.pointerType === 'mouse') return;
+      e.preventDefault();
+      e.stopPropagation();
+      grip.setPointerCapture(e.pointerId);
+      let scroller = row.parentElement;
+      while (scroller && scroller.scrollHeight <= scroller.clientHeight + 1) scroller = scroller.parentElement;
+      const ghost = h('div.ph-dragghost.ok', l.name);
+      document.body.append(ghost);
+      let target = null;
+      const mv = (ev) => {
+        ghost.style.left = `${ev.clientX + 14}px`;
+        ghost.style.top = `${ev.clientY - 30}px`;
+        if (target) delete target.dataset.drop;
+        const r2 = document.elementFromPoint(ev.clientX, ev.clientY)?.closest('.ph-layer[data-layer-id]');
+        target = r2 && r2 !== row && r2.parentElement === row.parentElement ? r2 : null;
+        if (target) {
+          const tl = doc.layers.find((x) => String(x.id) === target.dataset.layerId);
+          const r = target.getBoundingClientRect();
+          const y = (ev.clientY - r.top) / r.height;
+          target.dataset.drop = tl?.kind === 'group' && y > 0.3 && y < 0.7 ? 'into' : y < 0.5 ? 'above' : 'below';
+        }
+        // near the top or bottom of the list: it scrolls
+        const sr = scroller?.getBoundingClientRect();
+        if (sr && ev.clientY < sr.top + 36) scroller.scrollTop -= 10;
+        else if (sr && ev.clientY > sr.bottom - 36) scroller.scrollTop += 10;
+      };
+      const end = (ev) => {
+        grip.removeEventListener('pointermove', mv);
+        grip.removeEventListener('pointerup', end);
+        grip.removeEventListener('pointercancel', end);
+        ghost.remove();
+        if (!target) return;
+        const zone = target.dataset.drop;
+        delete target.dataset.drop;
+        const tl = doc.layers.find((x) => String(x.id) === target.dataset.layerId);
+        if (!tl || ev.type === 'pointercancel') return;
+        const ids = sel.has(l.id) ? [...sel] : [l.id];
+        if (ids.includes(tl.id)) return;
+        const index = zone === 'into' ? doc.index(tl.id) : zone === 'above' ? doc.index(tl.id) + 1 : doc.block(tl.id)[0];
+        if (ids.length > 1 && P.cmd.moveLayersTo) P.cmd.moveLayersTo(ids, tl.id, zone);
+        else P.cmd.moveLayerTo(ids[0], index, zone === 'into' ? tl.id : tl.parent || null);
+      };
+      grip.addEventListener('pointermove', mv);
+      grip.addEventListener('pointerup', end);
+      grip.addEventListener('pointercancel', end);
+    });
+    row.append(grip);
     rows.push(row);
     // effects and smart filters listed under the layer
     if (fxOpen) {

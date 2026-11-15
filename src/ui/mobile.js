@@ -10,7 +10,7 @@ import { h } from '../util.js';
 import { showPanel, toast, closeMenus, panelHooks } from './common.js';
 import { icon } from './icons.js';
 import { quickApi } from './quick-panel.js';
-import { menubarApi } from './menubar.js';
+import { menubarApi, openManual } from './menubar.js';
 import { pickFiles } from './project-panel.js';
 import { importFiles, mediaStatus } from '../media.js';
 import { openSpeedDialog } from './dialogs.js';
@@ -49,7 +49,8 @@ export function initMobile() {
     h('button.m-icon', { 'aria-label': '메뉴', title: '메뉴', onclick: openMenuSheet }, icon('menu', 22)),
     h('div.m-modes', { role: 'group', 'aria-label': '편집기 바꾸기' }, modeBtns),
     title, undoBtn, redoBtn,
-    h('button.m-icon.m-help', { 'aria-label': '도움말', title: '시작 가이드', onclick: () => c.guide() }, icon('help', 20)),
+    // the photo editor's phone help is the 사진 편집 시작하기 page (its 휴대폰과 태블릿 part)
+    h('button.m-icon.m-help', { 'aria-label': '도움말', title: '도움말', onclick: () => (photo() ? openManual('p-start') : c.guide()) }, icon('help', 20)),
     h('button.primary.m-export', { onclick: () => (photo() ? photo().exportDialog() : c.exportMedia()) }, '내보내기'));
   app.prepend(top);
 
@@ -63,6 +64,40 @@ export function initMobile() {
       h('button.m-icon', { 'aria-label': '닫기', title: '닫기', onclick: closeSheet }, icon('close', 20)));
     g.prepend(head);
     heads.set(g, name);
+    // drag the head (portrait): down shrinks a big sheet or closes it, up makes it big
+    let y0 = null;
+    let dragged = false;
+    head.addEventListener('pointerdown', (e) => {
+      if (document.body.classList.contains('m-land') || e.target.closest('.m-icon')) return;
+      y0 = e.clientY;
+      dragged = false;
+      head.setPointerCapture(e.pointerId);
+    });
+    head.addEventListener('pointermove', (e) => {
+      if (y0 == null) return;
+      const dy = e.clientY - y0;
+      if (Math.abs(dy) > 8) dragged = true;
+      g.style.transition = 'none';
+      g.style.transform = dy > 0 ? `translateY(${dy}px)` : '';
+    });
+    const end = (e) => {
+      if (y0 == null) return;
+      const dy = e.type === 'pointerup' ? e.clientY - y0 : 0;
+      y0 = null;
+      g.style.transition = '';
+      g.style.transform = '';
+      if (dy > 70) {
+        if (big) setBig(false);
+        else closeSheet();
+      } else if (dy < -50) setBig(true);
+    };
+    head.addEventListener('pointerup', end);
+    head.addEventListener('pointercancel', end);
+    // the grip's tap toggles the size; not after a drag
+    head.addEventListener('click', (e) => {
+      if (dragged) e.stopPropagation();
+      dragged = false;
+    }, true);
   }
 
   // ---------------------------------------------------------------- clip toolbar (shown while clips are selected)
@@ -71,6 +106,10 @@ export function initMobile() {
   const clipbar = h('div.m-clipbar', { role: 'toolbar', 'aria-label': '클립 도구' },
     tool('scissors', '분할', () => { edit.addEdit(); }),
     tool('trash', '삭제', () => edit.deleteSelection({ ripple: true })),
+    tool('transition', '전환', () => {
+      c.applyDefaultTransitions();
+      toast('기본 전환을 넣었습니다 (종류는 효과에서 바꿉니다)');
+    }),
     tool('copy', '복제', () => duplicateClips(selIds())),
     tool('speed', '속도', () => { if (selIds().length) openSpeedDialog(selIds()); }),
     tool('reverse', '역재생', () => edit.toggleReverse(selIds())),
@@ -103,7 +142,8 @@ export function initMobile() {
 
   /** Phone "+": import files and insert them one after another at the playhead. */
   async function addMedia() {
-    const files = await pickFiles();
+    // media types only: with file extensions in the list, phones skip their photo / video gallery picker
+    const files = await pickFiles({ accept: 'video/*,audio/*,image/*' });
     if (!files.length) return;
     toast('가져오는 중…');
     const ids = await importFiles(files);
@@ -201,6 +241,23 @@ export function initMobile() {
     }, 120);
   });
 
+  // the on-screen keyboard: browsers that do not shrink the page for it (iOS Safari) still report the
+  // visible part, so dialogs and the typing sheet sit on top of the keyboard and the field stays in view
+  const vv = window.visualViewport;
+  if (vv) {
+    let kb0 = 0;
+    const onViewport = () => {
+      const kb = mobileApi.active && vv.scale < 1.01 ? Math.max(0, Math.round(window.innerHeight - vv.height - vv.offsetTop)) : 0;
+      if (kb === kb0) return;
+      kb0 = kb;
+      document.documentElement.style.setProperty('--m-kb', `${kb}px`);
+      const a = document.activeElement;
+      if (kb && typable(a)) requestAnimationFrame(() => a.scrollIntoView({ block: 'nearest' }));
+    };
+    vv.addEventListener('resize', onViewport);
+    vv.addEventListener('scroll', onViewport);
+  }
+
   // menus and commands that bring a panel forward open its sheet on the phone
   panelHooks.onShow = (id) => {
     if (!opening && mobileApi.active && groupOf(id)) openSheet(id);
@@ -267,10 +324,15 @@ export function initMobile() {
     listSheet('더보기', [
       { label: '마커', action: () => openSheet('markers') },
       { label: '작업 내역 (실행 취소 목록)', action: () => openSheet('history') },
-      { label: '오디오 트랙 믹서', action: () => openSheet('mixer') },
-      { label: '멀티 카메라', action: () => openSheet('multicam') },
-      { label: '소스 모니터', action: () => openSheet('source') },
+      { label: '소스 모니터', hint: '시작·종료 표시, 삽입·덮어쓰기', action: () => openSheet('source') },
+      { label: 'Lumetri 색상', hint: '색 보정', action: () => openSheet('lumetri') },
       { label: 'Lumetri 범위', action: () => openSheet('scopes') },
+      { label: '기본 그래픽', hint: '자막 템플릿', action: () => openSheet('essentialGraphics') },
+      { label: '기본 사운드', hint: '대화·음악, 더킹', action: () => openSheet('essentialSound') },
+      { label: '오디오 트랙 믹서', action: () => openSheet('mixer') },
+      { label: '오디오 클립 믹서', action: () => openSheet('clipMixer') },
+      { label: '멀티 카메라', action: () => openSheet('multicam') },
+      { label: '학습', hint: '따라 하는 연습', action: () => openSheet('learn') },
       '-',
       { label: '화면 비율 바꾸기', action: () => openQuick('frame') },
       { label: '시퀀스 설정…', action: () => c.sequenceSettings() },

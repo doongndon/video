@@ -175,7 +175,9 @@ async function boot() {
   else if (!blank && firstVisit) {
     try {
       await loadSampleProject();
-      toast('샘플 프로젝트를 열었습니다. 왼쪽 위 홈(집 모양) 버튼에서 새 프로젝트를 만들 수 있습니다.');
+      toast(document.body.classList.contains('mobile')
+        ? '샘플 프로젝트를 열었습니다. 새로 시작하려면 아래 막대의 더보기 ▸ 새 프로젝트를 누르세요.'
+        : '샘플 프로젝트를 열었습니다. 왼쪽 위 홈(집 모양) 버튼에서 새 프로젝트를 만들 수 있습니다.');
     } catch (err) {
       console.warn('sample project failed', err);
     }

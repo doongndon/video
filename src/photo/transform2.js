@@ -6,7 +6,7 @@
 import { h } from '../util.js';
 import { toast, loadPref, savePref } from '../ui/common.js';
 import { icon } from '../ui/icons.js';
-import { Transformer, warpDims } from './transform.js';
+import { Transformer, warpDims, noteStep } from './transform.js';
 import { PerspectiveWarp } from './perspwarp.js';
 
 const INTERP = [['nearest', '최단입점'], ['bilinear', '쌍선형'], ['bicubic', '쌍입방']];
@@ -182,6 +182,7 @@ export function installTransform2(P) {
   let live = null; // inputs of the bar on screen, kept in step while dragging
   let raf = 0;
   P.transformChanged = (t) => {
+    noteStep(t);
     if (!live || live.t !== t || raf) return;
     raf = requestAnimationFrame(() => {
       raf = 0;

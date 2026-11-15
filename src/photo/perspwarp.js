@@ -409,6 +409,16 @@ export class PerspectiveWarp {
   }
 
   /** Layout: remove the selected quad. */
+  /** For Ctrl+Z inside the session (noteStep / undoStep in transform.js). */
+  stepState() {
+    return { mode: this.mode, V: this.V, Q: this.Q, straight: [...this.straight], sel: this.sel };
+  }
+
+  restoreState(s) {
+    Object.assign(this, { mode: s.mode, V: s.V, Q: s.Q, straight: new Map(s.straight), sel: s.sel });
+    this.update(true);
+  }
+
   removeSelected() {
     if (this.mode !== 'layout' || this.sel < 0) return false;
     this.Q.splice(this.sel, 1);

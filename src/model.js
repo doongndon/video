@@ -156,6 +156,7 @@ export function createTrack(kind, index) {
     kind,
     name: `${kind === 'video' ? 'V' : 'A'}${index + 1}`,
     locked: false,
+    syncLock: true, // 동기화 잠금: ripple edits move this track too (a project without the field counts as on)
     hidden: false, // video: output toggle (eye)
     muted: false, // audio
     solo: false, // audio

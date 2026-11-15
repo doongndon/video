@@ -693,6 +693,13 @@ export function createProjectPanel() {
     }
     el.addEventListener('click', (e) => {
       const sel = store.ui.selectedMedia;
+      // phones: the list redraws after the first tap, so no double-click reaches it; tapping the
+      // item that is already selected opens it (Source monitor, or the sequence) instead
+      if (document.body.classList.contains('mobile') && !e.shiftKey && !modKey(e) && sel.size === 1 && sel.has(id)) {
+        activate(id);
+        if (store.ui.sourceMediaId === id) showPanel('source');
+        return;
+      }
       if (e.shiftKey && anchor) {
         const order = [...list.querySelectorAll('.media-item:not(.bin)')].map((x) => x.dataset.id);
         const [a, b] = [order.indexOf(anchor), order.indexOf(id)].sort((x, y) => x - y);

@@ -167,12 +167,56 @@ function splitGroup(clips, t) {
   return rights;
 }
 
-function unlockedTrackIds(kind) {
-  return seq().tracks.filter((t) => !t.locked && (!kind || t.kind === kind)).map((t) => t.id);
-}
-
 function isLocked(trackId) {
   return !!getTrack(seq(), trackId)?.locked;
+}
+
+/** The edited tracks plus every unlocked track with 동기화 잠금 (sync lock: on unless turned off, as in Premiere). */
+function syncedTrackIds(editTracks) {
+  return seq().tracks.filter((t) => !t.locked && (editTracks.includes(t.id) || t.syncLock !== false)).map((t) => t.id);
+}
+
+/**
+ * 동기화 잠금 for a ripple at t: the clips at or after t on the other sync-locked tracks, which follow
+ * as whole clips (a ripple never cuts or overwrites them). `room` is how far left they can go.
+ */
+function syncPlan(editTracks, t, exceptIds = new Set()) {
+  const s = seq();
+  const plan = [];
+  for (const id of syncedTrackIds(editTracks)) {
+    if (editTracks.includes(id)) continue;
+    const clips = clipsOnTrack(s, id).filter((c) => !exceptIds.has(c.id));
+    const moving = clips.filter((c) => c.start >= t - EPS);
+    if (!moving.length) continue;
+    const stayEnd = Math.max(0, ...clips.filter((c) => c.start < t - EPS).map(clipEnd));
+    plan.push({ id, name: getTrack(s, id).name, room: Math.min(...moving.map((c) => c.start)) - stayEnd, clips: moving.map((c) => ({ id: c.id, start: c.start })) });
+  }
+  return plan;
+}
+
+/** Move a sync plan's clips by dt from where they were planned; a track without room stays put. Returns those names. */
+function applySyncPlan(plan, dt) {
+  const s = seq();
+  const stuck = [];
+  for (const tr of plan) {
+    const ok = dt >= -tr.room - EPS;
+    if (!ok) stuck.push(tr.name);
+    for (const p of tr.clips) if (s.clips[p.id]) s.clips[p.id].start = ok ? Math.max(0, p.start + dt) : p.start;
+  }
+  return stuck;
+}
+
+/** Ripple the edited tracks and, with them, every other sync-locked track. Returns the tracks left in place. */
+function rawSyncRipple(editTracks, t, dt, exceptIds = new Set()) {
+  const plan = syncPlan(editTracks, t, exceptIds);
+  rawRipple(editTracks, t, dt, exceptIds);
+  return applySyncPlan(plan, dt);
+}
+
+/** Tell which sync-locked tracks a ripple could not move (Premiere never cuts them for a ripple). */
+export function syncNote(names) {
+  const list = [...new Set(names)];
+  if (list.length) store.toast(`동기화 잠금: ${list.join(', ')} 트랙은 다른 클립에 막혀 옮기지 못했습니다 (그 트랙은 그대로 둠)`);
 }
 
 /** Expand a set of clip ids by their linked partners when linked selection is on. */
@@ -249,7 +293,8 @@ export function placeMedia(mediaId, opts) {
     const linkId = vTrack && aTrack ? uid('link') : null;
     const trackIds = [vTrack?.id, aTrack?.id].filter(Boolean);
     if (mode === 'insert') {
-      const affected = unlockedTrackIds();
+      // an insert splits and pushes the destination tracks and the sync-locked ones (Premiere's 동기화 잠금)
+      const affected = syncedTrackIds(trackIds);
       splitAllAt(affected, start);
       rawRipple(affected, start, duration);
     } else {
@@ -399,30 +444,32 @@ export function deleteSelection({ ripple = false } = {}) {
   }
   if (sel.gap) {
     const { trackId, start, end } = sel.gap;
-    // close the gap on every unlocked track that is empty across it (keeps tracks in sync)
-    const empty = unlockedTrackIds().filter((id) => !clipsOnTrack(s, id).some((c) => c.start < end - EPS && clipEnd(c) > start + EPS));
-    if (!empty.includes(trackId)) return;
-    store.transact('빈자리 잔물결 삭제', () => rawRipple(empty, end - EPS, -(end - start)));
+    // close the gap; the other sync-locked tracks move with it when they have room
+    if (isLocked(trackId) || clipsOnTrack(s, trackId).some((c) => c.start < end - EPS && clipEnd(c) > start + EPS)) return;
+    syncNote(store.transact('빈자리 잔물결 삭제', () => rawSyncRipple([trackId], end - EPS, -(end - start))) || []);
     store.selection.gap = null;
     store.emit('selection');
     return;
   }
   const ids = [...withLinked(sel.clips)].filter((id) => s.clips[id] && !isLocked(s.clips[id].trackId));
   if (!ids.length) return;
-  store.transact(ripple ? '잔물결 삭제' : '지우기', () => {
+  const stuck = store.transact(ripple ? '잔물결 삭제' : '지우기', () => {
     const removed = ids.map((id) => s.clips[id]);
     for (const c of removed) delete s.clips[c.id];
+    const left = [];
     if (ripple) {
-      // close the gap on each affected track, from right to left
+      // close the gap on each affected track (and the sync-locked ones), from right to left
       const spans = mergeSpans(removed.map((c) => [c.start, clipEnd(c)]));
       const tracks = [...new Set(removed.map((c) => c.trackId))];
       for (const [a, b] of spans.reverse()) {
         // only ripple if the span is empty on all affected tracks after removal
         const blocked = tracks.some((tid) => clipsOnTrack(s, tid).some((c) => c.start < b - EPS && clipEnd(c) > a + EPS));
-        if (!blocked) rawRipple(tracks, b, -(b - a));
+        if (!blocked) left.push(...rawSyncRipple(tracks, b, -(b - a)));
       }
     }
+    return left;
   });
+  syncNote(stuck || []);
   store.clearSelection();
 }
 
@@ -445,7 +492,8 @@ export function liftExtract(extract) {
     return;
   }
   const tracks = s.tracks.filter((t) => t.targeted && !t.locked).map((t) => t.id);
-  const all = unlockedTrackIds();
+  // extract takes the range out of the targeted tracks and the sync-locked ones, so they stay in sync
+  const all = syncedTrackIds(tracks);
   store.transact(extract ? '추출' : '들어올리기', () => {
     rawClearRangeMulti(extract ? all : tracks, s.inPoint, s.outPoint);
     if (extract) rawRipple(all, s.outPoint, -(s.outPoint - s.inPoint));
@@ -535,9 +583,10 @@ export function rawMoveClips(ids, dt, dTrackVideo, dTrackAudio, { mode = 'overwr
   if (mode === 'insert') {
     const minStart = Math.min(...plan.map((p) => p.start));
     const span = Math.max(...plan.map((p) => p.start + p.c.duration)) - minStart;
-    // pull moved clips out first so the ripple doesn't move them
-    splitAllAt(unlockedTrackIds(), minStart, exceptIds);
-    rawRipple(unlockedTrackIds(), minStart, span, exceptIds);
+    // pull moved clips out first so the ripple doesn't move them (destination and sync-locked tracks)
+    const affected = syncedTrackIds(plan.map((p) => p.trackId));
+    splitAllAt(affected, minStart, exceptIds);
+    rawRipple(affected, minStart, span, exceptIds);
   }
   for (const p of plan) {
     p.c.trackId = p.trackId;
@@ -613,23 +662,32 @@ export function rawTrimEdge(c, edge, delta) {
   if (c.transOut) c.transOut.duration = Math.min(c.transOut.duration, c.duration);
 }
 
-/** Ripple trim: trims the edge and shifts later clips on the same tracks. */
-export function rawRippleTrim(clips, edge, delta) {
+/**
+ * Ripple trim: trims the edge and shifts later clips on the same tracks. The other sync-locked tracks
+ * follow by the whole change so far: pass back the returned `sync` on each step of a drag.
+ */
+export function rawRippleTrim(clips, edge, delta, sync = null) {
   const tracks = [...new Set(clips.map((c) => c.trackId))];
   const ids = new Set(clips.map((c) => c.id));
   if (edge === 'in') {
     // trimming head by delta: keep clip start fixed, content shifts; later clips shift by -delta
     const pivot = clips[0].start;
+    sync ||= { plan: syncPlan(tracks, pivot + EPS, ids), total: 0 };
     for (const c of clips) {
       rawTrimEdge(c, 'in', delta);
       c.start -= delta;
     }
     rawRipple(tracks, pivot + EPS, -delta, ids);
+    sync.total -= delta;
   } else {
     const pivot = clipEnd(clips[0]);
+    sync ||= { plan: syncPlan(tracks, pivot - EPS, ids), total: 0 };
     rawRipple(tracks, pivot - EPS, delta, ids);
     for (const c of clips) rawTrimEdge(c, 'out', delta);
+    sync.total += delta;
   }
+  sync.stuck = applySyncPlan(sync.plan, sync.total);
+  return sync;
 }
 
 /** Q / W: ripple trim previous / next edit to playhead on targeted tracks. */
@@ -641,20 +699,20 @@ export function rippleTrimToPlayhead(which) {
   if (!under.length) return;
   const all = [...withLinked(under.map((c) => c.id))].map((id) => s.clips[id]);
   const affectedTracks = [...new Set(all.map((c) => c.trackId))];
-  store.transact(which === 'prev' ? '앞쪽 잔물결 트림' : '뒤쪽 잔물결 트림', () => {
+  const stuck = store.transact(which === 'prev' ? '앞쪽 잔물결 트림' : '뒤쪽 잔물결 트림', () => {
     if (which === 'prev') {
       const delta = Math.min(...all.map((c) => t - c.start));
       for (const c of all) rawTrimEdge(c, 'in', delta);
       for (const c of all) c.start -= delta;
-      rawRipple(affectedTracks, t + EPS, -delta, new Set(all.map((c) => c.id)));
       store.setPlayhead(t - delta);
-    } else {
-      const ends = all.map((c) => clipEnd(c));
-      const delta = Math.max(...ends) - t;
-      for (const c of all) rawTrimEdge(c, 'out', -(clipEnd(c) - t));
-      rawRipple(affectedTracks, Math.max(...ends) - EPS, -delta, new Set(all.map((c) => c.id)));
+      return rawSyncRipple(affectedTracks, t + EPS, -delta, new Set(all.map((c) => c.id)));
     }
+    const ends = all.map((c) => clipEnd(c));
+    const delta = Math.max(...ends) - t;
+    for (const c of all) rawTrimEdge(c, 'out', -(clipEnd(c) - t));
+    return rawSyncRipple(affectedTracks, Math.max(...ends) - EPS, -delta, new Set(all.map((c) => c.id)));
   });
+  syncNote(stuck || []);
 }
 
 // ---------------------------------------------------------------- clip properties
@@ -741,7 +799,7 @@ export function insertFrameHoldSegment(c, t = store.ui.playhead, dur = 2) {
   store.transact('프레임 고정 세그먼트 삽입', () => {
     const atIn = clamp(at, c.start, clipEnd(c) - fd());
     const frame = liveMediaTime(c, atIn);
-    const tracks = unlockedTrackIds();
+    const tracks = syncedTrackIds([c.trackId]);
     splitAllAt(tracks, at);
     rawRipple(tracks, at, d);
     const hold = cloneClip(c, { start: at, duration: d, hold: true, holdTime: frame, linkId: null, groupId: undefined, transIn: null, transOut: null, name: `${c.name} (고정)`, markers: [] });
@@ -1285,8 +1343,16 @@ export function paste({ insert = false } = {}) {
     const created = [];
     const span = Math.max(...cb.clips.map((c) => clipEnd(c))) - cb.base;
     if (insert) {
-      splitAllAt(unlockedTrackIds(), t);
-      rawRipple(unlockedTrackIds(), t, span);
+      // the tracks pasted into and the sync-locked ones are split and pushed
+      const dest = cb.clips.map((src) => {
+        const list = src.kind === 'audio' ? audioTracks(s) : videoTracks(s);
+        const off = list.findIndex((x) => x.id === src.trackId) - (src.kind === 'audio' ? minA : minV);
+        const baseIdx = Math.max(0, src.kind === 'audio' ? aIdx : vIdx);
+        return list[clamp(baseIdx + (Number.isFinite(off) ? off : 0), 0, list.length - 1)]?.id;
+      });
+      const affected = syncedTrackIds(dest.filter(Boolean));
+      splitAllAt(affected, t);
+      rawRipple(affected, t, span);
     }
     for (const src of cb.clips) {
       const c = cloneClip(src);
@@ -1526,6 +1592,17 @@ export function setTrackFlag(trackId, flag, value) {
   store.transact('트랙 설정', () => {
     const tr = getTrack(s, trackId);
     if (tr) tr[flag] = value ?? !tr[flag];
+  });
+}
+
+/** 동기화 잠금 켜기/끄기 on one track, or (all) on every track of its kind, as Shift+click does in Premiere. */
+export function toggleSyncLock(trackId, all = false) {
+  const s = seq();
+  const tr = getTrack(s, trackId);
+  if (!tr) return;
+  const on = tr.syncLock === false;
+  store.transact('동기화 잠금', () => {
+    for (const t of all ? s.tracks.filter((x) => x.kind === tr.kind) : [tr]) t.syncLock = on;
   });
 }
 
@@ -2215,13 +2292,12 @@ function extendPointToPlayhead(clips, { edge, mode }, t) {
   // a ripple of the head keeps the clip where it starts: the frame at the playhead becomes its first
   const d = min > max ? 0 : clamp(want, min, max);
   if (Math.abs(d) < EPS) return 0;
-  store.transact('편집점을 재생 헤드로 확장', () => {
-    if (ripple) rawRippleTrim(clips, edge, d);
-    else {
-      for (const c of clips) rawTrimEdge(c, edge, d);
-      if (mode === 'rolling') for (const p of partners) rawTrimEdge(p, edge === 'out' ? 'in' : 'out', d);
-    }
+  const sync = store.transact('편집점을 재생 헤드로 확장', () => {
+    if (ripple) return rawRippleTrim(clips, edge, d);
+    for (const c of clips) rawTrimEdge(c, edge, d);
+    if (mode === 'rolling') for (const p of partners) rawTrimEdge(p, edge === 'out' ? 'in' : 'out', d);
   });
+  syncNote(sync?.stuck || []);
   if (ripple && edge === 'in') store.setPlayhead(c0.start);
   return clips.length;
 }
