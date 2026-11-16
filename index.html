@@ -38,7 +38,7 @@
             <a class="btn btn-photo" href="app.html?mode=photo"><i data-icon="image" data-size="18"></i>사진 편집 시작</a>
             <a class="btn btn-ghost" href="docs.html"><i data-icon="book" data-size="18"></i>설명서</a>
           </div>
-          <p class="hero-note"><span>최신 Chrome · Edge 권장</span><span>휴대폰 화면 지원</span><span>무료</span></p>
+          <p class="hero-note"><span>최신 Chrome · Edge 권장</span><span>휴대폰 화면 지원</span><span>무료</span><span><a href="#download">Windows 앱 받기</a></span></p>
         </div>
         <div class="shots">
           <figure class="frame" style="margin:0">
@@ -171,8 +171,30 @@
       </div>
     </section>
 
+    <!-- Windows app (built by .github/workflows/desktop.yml on every update) -->
+    <section class="section" id="download" aria-labelledby="download-title">
+      <div class="wrap split">
+        <div>
+          <p class="kicker"><i data-icon="monitor"></i>Windows 앱</p>
+          <h2 id="download-title">컴퓨터에 설치해서 쓸 수도 있어요</h2>
+          <p class="intro" style="margin-bottom:22px">웹사이트와 똑같은 영상·사진 편집기를 Windows 프로그램으로 받아요. 창이 브라우저 탭에 묶이지 않고, 브라우저가 가로채는 <strong>Ctrl+N · Ctrl+T · Ctrl+W</strong> 단축키도 Premiere Pro·Photoshop처럼 그대로 써요.</p>
+          <div class="cta-row">
+            <a class="btn btn-ink" href="https://github.com/doongndon/video/releases/download/desktop-latest/Montage-Setup.exe"><i data-icon="download" data-size="18"></i>설치 파일 받기 (.exe)</a>
+            <a class="btn btn-ghost" href="https://github.com/doongndon/video/releases/download/desktop-latest/Montage-Portable.exe"><i data-icon="download" data-size="18"></i>설치 없이 실행하는 버전</a>
+          </div>
+          <p class="dl-meta">Windows 10 · 11 (64비트) · 무료 · 항상 최신판 · <a href="https://github.com/doongndon/video/releases/tag/desktop-latest">릴리스 페이지</a></p>
+        </div>
+        <ul class="leave" aria-label="설치할 때 알아 둘 것">
+          <li><span class="ico accent"><i data-icon="info" data-size="18"></i></span><div><b>'Windows의 PC 보호' 창이 나오면</b><span>서명되지 않은 프로그램이라 처음 한 번 나와요. <strong>추가 정보</strong>를 누른 다음 <strong>실행</strong>을 누르세요.</span></div></li>
+          <li><span class="ico video"><i data-icon="download" data-size="18"></i></span><div><b>새 버전으로 바꾸기</b><span>같은 버튼으로 다시 받아 설치하면 덮어써서 업그레이드돼요. 만든 작업은 그대로 남아요.</span></div></li>
+          <li><span class="ico photo"><i data-icon="save" data-size="18"></i></span><div><b>웹사이트의 작업 옮기기</b><span>웹사이트와 앱은 저장 공간이 따로예요. 웹사이트에서 프로젝트 파일(영상)이나 PSD·.mphoto(사진)로 저장해서 앱에서 여세요.</span></div></li>
+          <li><span class="ico accent"><i data-icon="phone" data-size="18"></i></span><div><b>휴대폰과 Mac</b><span>설치할 것 없이 이 웹사이트에서 바로 쓰면 돼요.</span></div></li>
+        </ul>
+      </div>
+    </section>
+
     <!-- manual -->
-    <section class="section" aria-labelledby="docs-title">
+    <section class="section alt" aria-labelledby="docs-title">
       <div class="wrap split">
         <div>
           <p class="kicker"><i data-icon="book"></i>설명서</p>
@@ -200,7 +222,7 @@
     </section>
 
     <!-- honest limits -->
-    <section class="section tight alt" aria-labelledby="limits-title">
+    <section class="section tight" aria-labelledby="limits-title">
       <div class="wrap">
         <h2 id="limits-title" style="font-size:clamp(1.35rem,2.4vw,1.7rem)">없는 기능과 확인하지 못한 것도 적어 두었어요</h2>
         <p class="intro" style="margin-bottom:16px">Premiere Pro나 Photoshop과 똑같지는 않아요. 방식이 달라 결과가 다른 기능(예: 피사체 선택은 색 분석으로 추정), 실제 Photoshop으로 열어 보지 못한 PSD 저장처럼 시험하지 못한 부분이 있어요.</p>

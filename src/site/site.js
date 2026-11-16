@@ -14,6 +14,8 @@ export const APPS = [
   ['app.html?mode=video', '영상 편집기', 'timeline', 'video', '타임라인, 효과, 자막, 내보내기'],
   ['app.html?mode=photo', '사진 편집기', 'image', 'photo', '레이어, 선택, 고치기, 필터'],
 ];
+// the Windows app's download section on the home page (the file links themselves are there)
+export const DESKTOP = ['index.html#download', 'Windows 앱 받기', 'monitor', 'desktop', '설치해서 쓰는 프로그램 (.exe)'];
 const THEME_KEY = 'montage.docs.theme'; // shared with the manual
 
 function pref(k, v) {
@@ -46,8 +48,8 @@ function themeButton() {
 function appMenu() {
   const d = h('details.appmenu',
     h('summary.btn.btn-ink.small', svg('open', 16), '편집기 열기'),
-    h('div.appmenu-panel', ...APPS.map(([href, name, icon, kind, sub]) => h('a', { href },
-      h(`span.appmenu-ico.${kind}`, svg(icon, 18)), h('span', h('strong', name), h('small', sub))))));
+    h('div.appmenu-panel', ...[...APPS, null, DESKTOP].map((a) => (a ? h('a', { href: a[0] },
+      h(`span.appmenu-ico.${a[3]}`, svg(a[2], 18)), h('span', h('strong', a[1]), h('small', a[4]))) : h('div.appmenu-sep')))));
   document.addEventListener('click', (e) => {
     if (!d.contains(e.target)) d.open = false;
   });
@@ -73,6 +75,7 @@ export function buildHeader(el) {
       h('div.head-tools', themeButton(), appMenu(), menuBtn)),
     h('nav.wrap.mobile-nav', { 'aria-label': '사이트 메뉴' },
       ...NAV.map((n) => link(n, true)),
+      link(DESKTOP, true),
       h('div.mobile-apps', ...APPS.map(([href, name, , kind]) => h(`a.btn.btn-${kind}`, { href }, name)))));
 }
 
@@ -83,7 +86,7 @@ export function buildFooter(el) {
       h('div',
         h('a.brand', { href: 'index.html' }, h('span.brand-mark', svg('film', 18)), 'Montage'),
         h('p', { style: { margin: '12px 0 0', maxWidth: '24em' } }, '설치 없이 브라우저에서 쓰는 영상·사진 편집기. 가져온 파일은 내 컴퓨터 밖으로 나가지 않아요.')),
-      col('편집기', [['app.html?mode=video', '영상 편집기 열기'], ['app.html?mode=photo', '사진 편집기 열기'], ['video.html', '영상 편집 기능'], ['photo.html', '사진 편집 기능']]),
+      col('편집기', [['app.html?mode=video', '영상 편집기 열기'], ['app.html?mode=photo', '사진 편집기 열기'], ['video.html', '영상 편집 기능'], ['photo.html', '사진 편집 기능'], ['index.html#download', 'Windows 앱 받기 (.exe)']]),
       col('설명서', [['docs.html#intro', '시작하기'], ['docs.html#shortcuts', '단축키 모음'], ['docs.html#faq', '문제 해결'], ['docs.html#limits', '알려진 제한']]),
       col('저장과 기기', [['docs.html#saving', '저장과 불러오기'], ['docs.html#mobile', '휴대폰에서 쓰기'], ['docs.html#ai-start', 'AI 편집 시작하기'], ['docs.html#p-save', '사진 저장과 내보내기']])),
     h('div.foot-legal',

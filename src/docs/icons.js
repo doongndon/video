@@ -19,6 +19,7 @@ export const ICONS = {
   text: '<path d="M3 3.5h10M8 3.5v9.5M6 13h4"/>',
   grid: '<rect x="2" y="2" width="5" height="5"/><rect x="9" y="2" width="5" height="5"/><rect x="2" y="9" width="5" height="5"/><rect x="9" y="9" width="5" height="5"/>',
   export: '<path d="M8 10V2.5M5 5.5l3-3 3 3M3 9.5v4h10v-4"/>',
+  download: '<path d="M8 2.5V10M5 7l3 3 3-3M3 9.5v4h10v-4"/>',
   ai: '<path d="M6.5 2.5 7.6 5.4 10.5 6.5 7.6 7.6 6.5 10.5 5.4 7.6 2.5 6.5 5.4 5.4z"/><path d="M11.5 9.5l.6 1.4 1.4.6-1.4.6-.6 1.4-.6-1.4-1.4-.6 1.4-.6z"/>',
   chat: '<path d="M2.5 3.5h11v7.5H7l-3 2.5V11H2.5z"/>',
   script: '<path d="M4 2.5h6l2.5 2.5v8.5H4z"/><path d="M6 7h5M6 9.5h5M6 12h3"/>',

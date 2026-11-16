@@ -3164,6 +3164,7 @@ function buildMenus(P) {
       { label: '설명서 (모든 기능)', action: () => import('../docs/viewer.js').then((m) => m.openDocs('p-start')) },
       '-',
       { label: 'Montage 웹사이트 (새 탭)', action: () => window.open('index.html', '_blank', 'noopener') },
+      ...(location.protocol === 'app:' ? [] : [{ label: 'Windows 앱 받기 (새 탭)', action: () => window.open('index.html#download', '_blank', 'noopener') }]),
     ],
   };
 }

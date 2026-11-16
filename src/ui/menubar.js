@@ -566,6 +566,8 @@ function videoMenus() {
       { slot: 'tail' },
       '-',
       { label: 'Montage 웹사이트 (새 탭)', action: () => window.open('index.html', '_blank', 'noopener') },
+      // not inside the Windows app itself (it is served from app://)
+      ...(location.protocol === 'app:' ? [] : [{ label: 'Windows 앱 받기 (새 탭)', action: () => window.open('index.html#download', '_blank', 'noopener') }]),
       { label: 'Montage 정보', action: c.about },
     ]),
   };

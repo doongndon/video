@@ -63,9 +63,13 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+        # fixed file names, so the website's download links always get the newest build:
+        # https://github.com/<owner>/<repo>/releases/download/desktop-latest/Montage-Setup.exe
         run: |
+          cp desktop/dist/Montage-Setup-*.exe desktop/dist/Montage-Setup.exe
+          cp desktop/dist/Montage-*-portable.exe desktop/dist/Montage-Portable.exe
           gh release delete desktop-latest --yes --cleanup-tag || true
-          gh release create desktop-latest desktop/dist/*.exe \
+          gh release create desktop-latest desktop/dist/Montage-Setup.exe desktop/dist/Montage-Portable.exe \
             --target "$GITHUB_SHA" --prerelease \
-            --title "Montage 데스크톱 앱 (Windows) 최신판" \
-            --notes "Montage-Setup-*.exe: 설치형 (시작 메뉴와 바탕 화면에 바로 가기를 만듭니다). Montage-*-portable.exe: 설치 없이 바로 실행합니다. 서명되지 않은 프로그램이라 처음 실행할 때 'Windows의 PC 보호' 창이 나오면 '추가 정보' ▸ '실행'을 누르세요. 커밋 $GITHUB_SHA 에서 만들었습니다."
+            --title "Montage 데스크톱 앱 (Windows) 최신판 1.0.${{ github.run_number }}" \
+            --notes "Montage-Setup.exe: 설치형 (시작 메뉴와 바탕 화면에 바로 가기를 만듭니다. 새 버전을 받아 설치하면 덮어써서 업그레이드됩니다). Montage-Portable.exe: 설치 없이 바로 실행합니다. 서명되지 않은 프로그램이라 처음 실행할 때 'Windows의 PC 보호' 창이 나오면 '추가 정보' ▸ '실행'을 누르세요. 버전 1.0.${{ github.run_number }}, 커밋 $GITHUB_SHA 에서 만들었습니다."
