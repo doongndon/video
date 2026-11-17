@@ -1,0 +1,21 @@
+{
+  "name": "montage-android",
+  "version": "1.0.0",
+  "description": "Montage 영상·사진 편집기 (안드로이드 앱)",
+  "license": "MPL-2.0",
+  "private": true,
+  "scripts": {
+    "copy": "bash copy-app.sh",
+    "sync": "bash copy-app.sh && cap sync android"
+  },
+  "dependencies": {
+    "@capacitor/android": "8.6.2",
+    "@capacitor/app": "8.1.2",
+    "@capacitor/core": "8.6.2",
+    "@capacitor/filesystem": "8.1.5",
+    "@capacitor/share": "8.0.3"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "8.6.2"
+  }
+}

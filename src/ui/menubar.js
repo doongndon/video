@@ -6,7 +6,7 @@ import { store } from '../store.js';
 import { playback } from '../playback.js';
 import { commands as c } from '../commands.js';
 import * as edit from '../edit.js';
-import { h, isMac } from '../util.js';
+import { h, isMac, inInstalledApp } from '../util.js';
 import { showMenu, closeMenus, UI_SCALES, uiScale, promptDialog, toast, toggleMaximize, panelIds, openAppearanceDialog } from './common.js';
 import { LABEL_COLORS } from '../model.js';
 import { templateMenu } from '../templates.js';
@@ -566,8 +566,8 @@ function videoMenus() {
       { slot: 'tail' },
       '-',
       { label: 'Montage 웹사이트 (새 탭)', action: () => window.open('index.html', '_blank', 'noopener') },
-      // not inside the Windows app itself (it is served from app://)
-      ...(location.protocol === 'app:' ? [] : [{ label: 'Windows 앱 받기 (새 탭)', action: () => window.open('index.html#download', '_blank', 'noopener') }]),
+      // not inside the installed apps themselves
+      ...(inInstalledApp() ? [] : [{ label: '앱 받기 (Windows · 안드로이드, 새 탭)', action: () => window.open('index.html#download', '_blank', 'noopener') }]),
       { label: 'Montage 정보', action: c.about },
     ]),
   };

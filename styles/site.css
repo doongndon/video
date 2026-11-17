@@ -128,6 +128,8 @@ p { text-wrap: pretty; }
 .hero-note { margin: 18px 0 0; font-size: .86rem; color: var(--stage-dim); }
 .hero-note span + span::before { content: '·'; margin: 0 8px; opacity: .6; }
 .hero-note a { color: #8cc4ff; text-underline-offset: 3px; }
+.dl-head { display: flex; align-items: center; gap: 8px; margin: 22px 0 10px; font-size: 1.02rem; }
+.dl-head:first-of-type { margin-top: 0; }
 .dl-meta { margin: 14px 0 0; font-size: .88rem; color: var(--dim); }
 .dl-meta a { color: var(--accent); }
 

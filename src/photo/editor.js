@@ -1,7 +1,7 @@
 // Photo editor ("사진 편집"): a Photoshop-style raster editor living next to the video editor.
 // Owns the open documents, the canvas view (zoom/pan, overlay), tools, menus and shortcuts.
 
-import { h, clamp, downloadBlob, modKey } from '../util.js';
+import { h, clamp, downloadBlob, modKey, inInstalledApp } from '../util.js';
 import { toast, promptDialog, confirmDialog, openModal, showMenu, closeMenus, menusOpen, loadPref, savePref } from '../ui/common.js';
 import { icon } from '../ui/icons.js';
 import { mobileApi } from '../ui/mobile.js';
@@ -3164,7 +3164,7 @@ function buildMenus(P) {
       { label: '설명서 (모든 기능)', action: () => import('../docs/viewer.js').then((m) => m.openDocs('p-start')) },
       '-',
       { label: 'Montage 웹사이트 (새 탭)', action: () => window.open('index.html', '_blank', 'noopener') },
-      ...(location.protocol === 'app:' ? [] : [{ label: 'Windows 앱 받기 (새 탭)', action: () => window.open('index.html#download', '_blank', 'noopener') }]),
+      ...(inInstalledApp() ? [] : [{ label: '앱 받기 (Windows · 안드로이드, 새 탭)', action: () => window.open('index.html#download', '_blank', 'noopener') }]),
     ],
   };
 }

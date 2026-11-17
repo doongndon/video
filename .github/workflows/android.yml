@@ -1,0 +1,57 @@
+# Builds the Montage Android app (APK) on every push to this branch and puts it on the Releases
+# page under the tag android-latest as Montage.apk (the website's download button links there).
+name: Android app (APK)
+
+on:
+  push:
+    branches: [claude/exciting-lamport-u0leve]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-app
+  cancel-in-progress: true
+
+jobs:
+  apk:
+    name: Android APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - name: Put the web app into the Android project
+        working-directory: mobile
+        run: |
+          npm ci --no-audit --no-fund
+          bash copy-app.sh
+          npx cap sync android
+      - name: Build the APK
+        working-directory: mobile/android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon \
+            -PmontageVersionCode=${{ github.run_number }} -PmontageVersionName=1.0.${{ github.run_number }}
+          cp app/build/outputs/apk/release/app-release.apk ../Montage.apk
+      - name: Keep the APK with this run
+        uses: actions/upload-artifact@v4
+        with:
+          name: Montage-Android
+          path: mobile/Montage.apk
+      - name: Put it on the Releases page (android-latest)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete android-latest --yes --cleanup-tag || true
+          gh release create android-latest mobile/Montage.apk \
+            --target "$GITHUB_SHA" --prerelease \
+            --title "Montage 안드로이드 앱 최신판 1.0.${{ github.run_number }}" \
+            --notes "Montage.apk: 휴대폰에서 받아 열면 설치됩니다. 처음이면 '이 출처의 앱 설치 허용'을 켜 주세요. Play 프로텍트 창이 나오면 '무시하고 설치'를 누르세요. 새 버전을 받아 설치하면 덮어써서 업그레이드되고 작업은 그대로 남습니다. 버전 1.0.${{ github.run_number }}, 커밋 $GITHUB_SHA 에서 만들었습니다."

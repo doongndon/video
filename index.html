@@ -38,7 +38,7 @@
             <a class="btn btn-photo" href="app.html?mode=photo"><i data-icon="image" data-size="18"></i>사진 편집 시작</a>
             <a class="btn btn-ghost" href="docs.html"><i data-icon="book" data-size="18"></i>설명서</a>
           </div>
-          <p class="hero-note"><span>최신 Chrome · Edge 권장</span><span>휴대폰 화면 지원</span><span>무료</span><span><a href="#download">Windows 앱 받기</a></span></p>
+          <p class="hero-note"><span>최신 Chrome · Edge 권장</span><span>휴대폰 화면 지원</span><span>무료</span><span><a href="#download">Windows · 안드로이드 앱 받기</a></span></p>
         </div>
         <div class="shots">
           <figure class="frame" style="margin:0">
@@ -171,24 +171,31 @@
       </div>
     </section>
 
-    <!-- Windows app (built by .github/workflows/desktop.yml on every update) -->
+    <!-- installable apps (built by .github/workflows/desktop.yml and android.yml on every update) -->
     <section class="section" id="download" aria-labelledby="download-title">
       <div class="wrap split">
         <div>
-          <p class="kicker"><i data-icon="monitor"></i>Windows 앱</p>
-          <h2 id="download-title">컴퓨터에 설치해서 쓸 수도 있어요</h2>
-          <p class="intro" style="margin-bottom:22px">웹사이트와 똑같은 영상·사진 편집기를 Windows 프로그램으로 받아요. 창이 브라우저 탭에 묶이지 않고, 브라우저가 가로채는 <strong>Ctrl+N · Ctrl+T · Ctrl+W</strong> 단축키도 Premiere Pro·Photoshop처럼 그대로 써요.</p>
+          <p class="kicker"><i data-icon="download"></i>앱 받기</p>
+          <h2 id="download-title">컴퓨터와 휴대폰에 설치해서 쓸 수도 있어요</h2>
+          <p class="intro" style="margin-bottom:22px">웹사이트와 똑같은 영상·사진 편집기를 프로그램으로 받아요. Windows 앱은 브라우저가 가로채는 <strong>Ctrl+N · Ctrl+T · Ctrl+W</strong> 단축키도 Premiere Pro·Photoshop처럼 그대로 쓰고, 안드로이드 앱은 인터넷 주소창 없이 휴대폰 화면을 다 써요.</p>
+          <h3 class="dl-head"><i data-icon="monitor" data-size="18"></i>Windows</h3>
           <div class="cta-row">
             <a class="btn btn-ink" href="https://github.com/doongndon/video/releases/download/desktop-latest/Montage-Setup.exe"><i data-icon="download" data-size="18"></i>설치 파일 받기 (.exe)</a>
             <a class="btn btn-ghost" href="https://github.com/doongndon/video/releases/download/desktop-latest/Montage-Portable.exe"><i data-icon="download" data-size="18"></i>설치 없이 실행하는 버전</a>
           </div>
           <p class="dl-meta">Windows 10 · 11 (64비트) · 무료 · 항상 최신판 · <a href="https://github.com/doongndon/video/releases/tag/desktop-latest">릴리스 페이지</a></p>
+          <h3 class="dl-head"><i data-icon="phone" data-size="18"></i>안드로이드</h3>
+          <div class="cta-row">
+            <a class="btn btn-ink" href="https://github.com/doongndon/video/releases/download/android-latest/Montage.apk"><i data-icon="download" data-size="18"></i>안드로이드 앱 받기 (.apk)</a>
+          </div>
+          <p class="dl-meta">안드로이드 7 이상 · 무료 · 항상 최신판 · <a href="https://github.com/doongndon/video/releases/tag/android-latest">릴리스 페이지</a></p>
         </div>
         <ul class="leave" aria-label="설치할 때 알아 둘 것">
-          <li><span class="ico accent"><i data-icon="info" data-size="18"></i></span><div><b>'Windows의 PC 보호' 창이 나오면</b><span>서명되지 않은 프로그램이라 처음 한 번 나와요. <strong>추가 정보</strong>를 누른 다음 <strong>실행</strong>을 누르세요.</span></div></li>
+          <li><span class="ico accent"><i data-icon="info" data-size="18"></i></span><div><b>Windows: 'Windows의 PC 보호' 창이 나오면</b><span>서명되지 않은 프로그램이라 처음 한 번 나와요. <strong>추가 정보</strong>를 누른 다음 <strong>실행</strong>을 누르세요.</span></div></li>
+          <li><span class="ico accent"><i data-icon="phone" data-size="18"></i></span><div><b>안드로이드: 설치가 막히면</b><span>휴대폰에서 받은 Montage.apk를 열고, 처음이면 <strong>이 출처의 앱 설치 허용</strong>을 켜세요. Play 프로텍트 창이 나오면 <strong>무시하고 설치</strong>(또는 세부정보 ▸ 설치)를 누르세요. 앱에서 저장한 파일은 휴대폰의 <strong>Documents/Montage</strong> 폴더에 들어가고, 공유 버튼으로 갤러리나 메신저로 보낼 수 있어요.</span></div></li>
           <li><span class="ico video"><i data-icon="download" data-size="18"></i></span><div><b>새 버전으로 바꾸기</b><span>같은 버튼으로 다시 받아 설치하면 덮어써서 업그레이드돼요. 만든 작업은 그대로 남아요.</span></div></li>
           <li><span class="ico photo"><i data-icon="save" data-size="18"></i></span><div><b>웹사이트의 작업 옮기기</b><span>웹사이트와 앱은 저장 공간이 따로예요. 웹사이트에서 프로젝트 파일(영상)이나 PSD·.mphoto(사진)로 저장해서 앱에서 여세요.</span></div></li>
-          <li><span class="ico accent"><i data-icon="phone" data-size="18"></i></span><div><b>휴대폰과 Mac</b><span>설치할 것 없이 이 웹사이트에서 바로 쓰면 돼요.</span></div></li>
+          <li><span class="ico accent"><i data-icon="layout" data-size="18"></i></span><div><b>아이폰과 Mac</b><span>설치할 것 없이 이 웹사이트에서 바로 쓰면 돼요.</span></div></li>
         </ul>
       </div>
     </section>

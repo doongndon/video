@@ -161,6 +161,8 @@ function hostDownloads() {
  * Resolves true when the file was handed over; failures are reported through a 'montage:toast' event.
  */
 export async function downloadBlob(blob, filename) {
+  // the Android app saves into the phone's Documents/Montage folder (src/native.js)
+  if (typeof window !== 'undefined' && window.montageNative) return window.montageNative.save(blob, filename);
   const host = await hostDownloads();
   if (host) {
     try {
@@ -187,6 +189,9 @@ export async function downloadBlob(blob, filename) {
   setTimeout(() => URL.revokeObjectURL(url), 30_000);
   return true;
 }
+
+/** Running as the Windows (Electron, app://) or Android (Capacitor) app rather than the website. */
+export const inInstalledApp = () => typeof window !== 'undefined' && (location.protocol === 'app:' || !!window.Capacitor?.isNativePlatform?.());
 
 export const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
 export const modKey = (e) => (isMac ? e.metaKey : e.ctrlKey);
